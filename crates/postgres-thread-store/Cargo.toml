@@ -1,0 +1,19 @@
+[package]
+name = "agentframe-postgres-thread-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+codex-git-utils.workspace = true
+codex-protocol.workspace = true
+codex-rollout.workspace = true
+codex-state.workspace = true
+codex-thread-store.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

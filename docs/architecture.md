@@ -1,0 +1,100 @@
+# 架构与一致性语义
+
+## 组件边界
+
+```mermaid
+flowchart LR
+  I["Product Cookie / JWT / SSO"] --> R["IdentityResolver"]
+  R --> B["Principal-scoped request"]
+  B -->|"HTTP + durable SSE"| L["Service / Load Balancer"]
+  L --> A1["AgentFrame instance A"]
+  L --> A2["AgentFrame instance B"]
+  A1 --> P[("PostgreSQL")]
+  A2 --> P
+  A1 --> R1["Codex Runtime A"]
+  A2 --> R2["Codex Runtime B"]
+  R1 -->|"WebSocket exec protocol"| S1["Session sandbox"]
+  R2 -->|"WebSocket exec protocol"| S2["Session sandbox"]
+  S1 --> W1[("Session workspace")]
+  S2 --> W2[("Session workspace")]
+```
+
+App 实例包含无状态 HTTP 层、Run worker 和一个沙盒外 Codex Runtime。PostgreSQL
+是控制面真相来源；工作区只挂载给 Session sandbox，不挂载给 Web/App 实例。
+
+## 产品身份与三层资源
+
+| 概念 | 作用 | 持久化位置 |
+|---|---|---|
+| Principal | 当前产品用户、活动租户与即时能力 | 不持久化，由产品逐请求解析 |
+| Session | 用户所有权、产品工作区与调度边界 | `app_sessions` |
+| Thread | 同一工作区中的独立多轮对话 | `app_threads` + `codex_engine.threads` |
+| Run | Thread 上的一次用户输入与执行 | `runs` + `run_events` + `messages` |
+
+Principal 使用 `tenant_id + issuer + subject` 形成身份边界。AgentFrame 不复制产品用户表或角色
+表；产品把现有角色即时映射为框架 Capability。Session 保存租户和所有者，Thread、Run、
+Message 与 Event 均通过 Session 继承权限。
+
+一个 Session 的多个 Thread 共用一个 Docker volume 或 PVC。多个 Thread 可以同时执行；
+同一 Thread 同一时刻只允许一个 Run 执行，避免 Codex 对话历史发生分叉写入。
+
+## 授权边界
+
+HTTP 层不能直接获取系统 Repository。每次已认证请求只能创建绑定 Principal 的
+`AuthorizedRepository`，其每个 Session、Thread、Run 和 Event 查询都带租户/所有者作用域。
+Worker 与沙盒控制器使用独立 `SystemRepository`，其中的实例 `owner_id` 只表示执行租约，
+不是终端用户身份。
+
+普通用户只有隐式 owner 权限。`SESSIONS_READ_TENANT` 与 `SESSIONS_WRITE_TENANT` 分别扩大
+当前租户内的读、写作用域，永远不能跨租户。无权限的直接资源访问返回 `404`，防止利用响应
+差异枚举资源；显式请求无权使用的 `scope=tenant` 返回 `403`。
+
+## 为什么浏览器不需要粘性 Session
+
+Run 在创建后由数据库队列驱动，与发起请求的 HTTP 连接解耦。每个 AG-UI 事件先提交到
+`run_events(run_id, seq)`，再由任意 App 实例读取并输出 SSE。
+
+浏览器断开只关闭当前 SSE reader，不会向 worker 发送取消。重连有两种方式：
+
+1. AG-UI 客户端使用相同 `runId` 并发送 `Last-Event-ID`；
+2. 内置 WebUI 重新读取 Thread，发现最近的 `queued/running` Run，然后建立 EventSource。
+
+SSE 本身也使用同一个 AuthorizedRepository，因此补流不会绕开用户边界。负载均衡器可把
+每次重连发到任意实例。
+
+## 多实例执行租约
+
+浏览器流量无粘性，但执行必须有单写者：
+
+- `session_leases` 使一个 Session 在任一时刻归一个 App Runtime 管理；
+- `fencing_epoch` 防止过期实例继续写 Run 事件；
+- Codex PostgreSQL ThreadStore 另有 writer lease，防止同一 Codex Thread 双写；
+- `FOR UPDATE SKIP LOCKED` 让多个实例竞争队列时只领取一次。
+
+租约默认 30 秒、每 10 秒续约。同一 owner 可领取该 Session 的多个不同 Thread，所以共享
+工作区并行成立；其他实例仍可服务这个 Session 的读取与 SSE。最后一个并行 Run 结束后，
+Runtime 会 unsubscribe 并卸载 Codex Thread，再原子地释放空闲 Session 租约，因此下一次
+Run 可由任意实例领取。
+
+实例崩溃后，Run 会在租约过期后重新入队，并由其他实例从 PostgreSQL 恢复 Codex Thread。
+MVP 的崩溃恢复语义是 **at-least-once**：如果旧实例在崩溃前已经对外部系统产生不可逆副作用，
+重放 prompt 可能重复该副作用。浏览器断线不触发重放，因此正常断线补流没有这个问题。生产版
+需要为有副作用的 Tool 增加幂等键或提交日志。
+
+## PostgreSQL 与 PVC 的职责
+
+PostgreSQL 保存可查询、可补流、可跨实例恢复的结构化状态。PVC/volume 只保存用户工作区文件。
+多个 App 实例不共用一个 PVC；每个 Session 有独立 PVC，并且只由该 Session 的 sandbox 使用。
+
+Kind 默认 storage class 的 `ReadWriteOnce` 足够，因为 Session 执行租约保证同一时刻只有一个
+Runtime 使用这个 sandbox。未来跨节点热迁移可改用支持 `ReadWriteMany` 的存储，但不是当前
+正确性前提。
+
+## Sandbox 信任边界
+
+Codex Runtime 和 API key 留在 App 容器/Pod；sandbox 不接收 API key，也不挂载 Docker
+Socket 或 Kubernetes 凭据。Sandbox 仅暴露 exec-server WebSocket，并挂载对应 Session
+工作区。
+
+Docker backend 的 App 为创建沙盒而挂载宿主 Docker Socket，只适用于本地开发。Kind backend
+通过 namespace Role 创建/读取 Pod、Service、PVC，是 GKE 路径的基础。

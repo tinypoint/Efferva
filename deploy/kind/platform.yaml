@@ -1,0 +1,232 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentframe
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentframe
+  namespace: agentframe
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-controller
+  namespace: agentframe
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentframe-sandbox-controller
+  namespace: agentframe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-controller
+subjects:
+  - kind: ServiceAccount
+    name: agentframe
+    namespace: agentframe
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentframe-postgres
+  namespace: agentframe
+type: Opaque
+stringData:
+  username: agentframe
+  password: agentframe
+  database-url: postgresql://agentframe:agentframe@postgres:5432/agentframe
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agentframe
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: agentframe
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: agentframe-postgres
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agentframe-postgres
+                  key: password
+            - name: POSTGRES_DB
+              value: agentframe
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "agentframe", "-d", "agentframe"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentframe
+  namespace: agentframe
+spec:
+  selector:
+    app: agentframe
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentframe
+  namespace: agentframe
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agentframe
+  template:
+    metadata:
+      labels:
+        app: agentframe
+    spec:
+      serviceAccountName: agentframe
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -p 5432; do sleep 1; done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 70
+      containers:
+        - name: app
+          image: agentframe-app:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 10001
+          env:
+            - name: AGENTFRAME_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentframe-postgres
+                  key: database-url
+            - name: AGENTFRAME_RUNTIME_BINARY
+              value: /usr/local/bin/agentframe-codex-runtime
+            - name: AGENTFRAME_SANDBOX_BACKEND
+              value: kubernetes
+            - name: AGENTFRAME_SANDBOX_IMAGE
+              value: agentframe-sandbox:local
+            - name: AGENTFRAME_KUBERNETES_NAMESPACE
+              value: agentframe
+            - name: CODEX_HOME
+              value: /var/lib/agentframe/codex
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentframe-openai
+                  key: api-key
+                  optional: true
+            - name: AGENTFRAME_CODEX_OPENAI_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentframe-openai
+                  key: base-url
+                  optional: true
+            - name: AGENTFRAME_CODEX_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: agentframe-openai
+                  key: model
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: codex-home
+              mountPath: /var/lib/agentframe/codex
+      volumes:
+        - name: codex-home
+          emptyDir: {}

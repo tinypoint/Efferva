@@ -1,0 +1,74 @@
+name: agentframe
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agentframe
+      POSTGRES_USER: agentframe
+      POSTGRES_PASSWORD: agentframe
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentframe -d agentframe"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - agentframe
+
+  sandbox-image:
+    image: agentframe-sandbox:local
+    build:
+      context: ..
+      dockerfile: agent-framework/docker/Dockerfile
+      target: sandbox
+    entrypoint: ["/bin/true"]
+    networks:
+      - agentframe
+
+  app:
+    image: agentframe-app:local
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: agent-framework/docker/Dockerfile
+      target: app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sandbox-image:
+        condition: service_completed_successfully
+    environment:
+      AGENTFRAME_DATABASE_URL: postgresql://agentframe:agentframe@postgres:5432/agentframe
+      AGENTFRAME_RUNTIME_BINARY: /usr/local/bin/agentframe-codex-runtime
+      AGENTFRAME_SANDBOX_BACKEND: docker
+      AGENTFRAME_SANDBOX_IMAGE: agentframe-sandbox:local
+      AGENTFRAME_DOCKER_NETWORK: agentframe
+      AGENTFRAME_PUBLIC_BASE_URL: http://localhost:8080
+      CODEX_HOME: /var/lib/agentframe/codex
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "${AGENTFRAME_HTTP_PORT:-8080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - codex-home:/var/lib/agentframe/codex
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    networks:
+      - agentframe
+
+volumes:
+  postgres-data:
+  codex-home:
+
+networks:
+  agentframe:
+    name: agentframe
+    external: true

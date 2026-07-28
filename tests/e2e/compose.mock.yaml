@@ -1,0 +1,6 @@
+services:
+  app:
+    environment:
+      MOCK_API_KEY: mock
+    volumes:
+      - ./tests/e2e/codex-config.toml:/var/lib/agentframe/codex/config.toml:ro

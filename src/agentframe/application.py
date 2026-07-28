@@ -1,0 +1,160 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from importlib.resources import files
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+
+from agentframe.api import create_api_router, principal_dependency
+from agentframe.config import Settings, get_settings
+from agentframe.db import Database
+from agentframe.identity import (
+    ForbiddenError,
+    IdentityResolver,
+    Principal,
+    UnauthenticatedError,
+)
+from agentframe.repository import (
+    ConflictError,
+    NotFoundError,
+    SystemRepository,
+)
+from agentframe.runtime import CodexRuntime
+from agentframe.sandbox import create_sandbox_backend
+from agentframe.worker import RunWorker
+
+
+@dataclass(slots=True)
+class _RuntimeResources:
+    repository: SystemRepository | None = None
+    worker: RunWorker | None = None
+
+    def require_repository(self) -> SystemRepository:
+        if self.repository is None:
+            raise RuntimeError("AgentFrame application has not started")
+        return self.repository
+
+    def worker_healthy(self) -> bool:
+        return self.worker is not None and self.worker.healthy
+
+
+class AgentFrame:
+    """Product-facing facade for installing AgentFrame into an authenticated application."""
+
+    def __init__(
+        self,
+        *,
+        identity: IdentityResolver,
+        settings: Settings | None = None,
+    ) -> None:
+        self.identity = identity
+        self.settings = settings or get_settings()
+
+    def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
+        normalized_prefix = self._normalize_prefix(prefix)
+        installed_prefixes = getattr(app.state, "_agentframe_prefixes", set())
+        if normalized_prefix in installed_prefixes:
+            raise RuntimeError(f"AgentFrame is already installed at {normalized_prefix or '/'}")
+        app.state._agentframe_prefixes = {*installed_prefixes, normalized_prefix}
+
+        resources = _RuntimeResources()
+        settings = self.settings
+        migrations_dir = files("agentframe.migrations")
+        migrations = [
+            (path.name, path.read_text())
+            for path in sorted(migrations_dir.iterdir(), key=lambda item: item.name)
+            if path.name.endswith(".sql")
+        ]
+
+        @asynccontextmanager
+        async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+            database = Database(settings.database_url)
+            worker: RunWorker | None = None
+            await database.open()
+            try:
+                await database.migrate(migrations)
+                repository = SystemRepository(database)
+                runtime = CodexRuntime(
+                    settings.runtime_binary,
+                    settings.database_url,
+                    openai_base_url=settings.codex_openai_base_url,
+                    model=settings.codex_model,
+                )
+                sandbox_backend = create_sandbox_backend(settings, repository)
+                worker = RunWorker(settings, repository, runtime, sandbox_backend)
+                resources.repository = repository
+                resources.worker = worker
+                await worker.start()
+                yield
+            finally:
+                resources.worker = None
+                resources.repository = None
+                if worker is not None:
+                    await worker.close()
+                await database.close()
+
+        router = APIRouter(lifespan=lifespan)
+        router.include_router(
+            create_api_router(
+                identity=self.identity,
+                system_repository=resources.require_repository,
+                worker_healthy=resources.worker_healthy,
+            )
+        )
+
+        static_dir = files("agentframe").joinpath("static")
+        require_principal = principal_dependency(self.identity)
+        IndexPrincipal = Annotated[Principal, Depends(require_principal)]
+
+        @router.get("/", include_in_schema=False)
+        async def index(_: IndexPrincipal) -> FileResponse:
+            return FileResponse(str(static_dir.joinpath("index.html")))
+
+        @router.get("/static/{asset_name}", include_in_schema=False)
+        async def static_asset(asset_name: str) -> FileResponse:
+            if asset_name not in {"app.js", "style.css"}:
+                raise HTTPException(status_code=404, detail="asset not found")
+            return FileResponse(str(static_dir.joinpath(asset_name)))
+
+        app.include_router(router, prefix=normalized_prefix)
+        self._install_exception_handlers(app)
+
+    def asgi_app(self) -> FastAPI:
+        app = FastAPI(title="AgentFrame")
+        self.install(app, prefix="")
+        return app
+
+    def app(self) -> FastAPI:
+        """Compatibility alias for asgi_app()."""
+
+        return self.asgi_app()
+
+    @staticmethod
+    def _normalize_prefix(prefix: str) -> str:
+        if prefix in {"", "/"}:
+            return ""
+        if not prefix.startswith("/"):
+            raise ValueError("prefix must start with '/'")
+        return prefix.rstrip("/")
+
+    @staticmethod
+    def _install_exception_handlers(app: FastAPI) -> None:
+        async def not_found_handler(_, error: NotFoundError) -> JSONResponse:
+            return JSONResponse(status_code=404, content={"detail": str(error)})
+
+        async def conflict_handler(_, error: ConflictError) -> JSONResponse:
+            return JSONResponse(status_code=409, content={"detail": str(error)})
+
+        async def unauthenticated_handler(_, error: UnauthenticatedError) -> JSONResponse:
+            detail = str(error) or "authentication required"
+            return JSONResponse(status_code=401, content={"detail": detail})
+
+        async def forbidden_handler(_, error: ForbiddenError) -> JSONResponse:
+            return JSONResponse(status_code=403, content={"detail": str(error)})
+
+        app.add_exception_handler(NotFoundError, not_found_handler)
+        app.add_exception_handler(ConflictError, conflict_handler)
+        app.add_exception_handler(UnauthenticatedError, unauthenticated_handler)
+        app.add_exception_handler(ForbiddenError, forbidden_handler)

@@ -1,0 +1,21 @@
+[package]
+name = "agentframe-codex-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agentframe-codex-runtime"
+path = "src/main.rs"
+
+[dependencies]
+agentframe-postgres-thread-store = { path = "../postgres-thread-store" }
+anyhow.workspace = true
+clap.workspace = true
+codex-app-server.workspace = true
+codex-arg0.workspace = true
+codex-config.workspace = true
+codex-protocol.workspace = true
+codex-thread-store.workspace = true
+codex-utils-cli.workspace = true
