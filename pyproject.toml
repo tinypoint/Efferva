@@ -16,8 +16,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+opensandbox = [
+    "opensandbox>=0.1.15,<0.2",
+]
 dev = [
     "httpx2>=2,<3",
+    "opensandbox>=0.1.15,<0.2",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.1,<2",
     "ruff>=0.12,<1",

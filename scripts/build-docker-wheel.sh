@@ -14,11 +14,20 @@ trap cleanup EXIT
 
 codex_revision="$(git -C "${workspace_dir}/codex" rev-parse HEAD)"
 efferva_revision="$(git -C "${project_dir}" rev-parse HEAD)"
-docker build \
+cache_args=()
+if [[ -n "${EFFERVA_DOCKER_CACHE_FROM:-}" ]]; then
+  cache_args+=("--cache-from=${EFFERVA_DOCKER_CACHE_FROM}")
+fi
+if [[ -n "${EFFERVA_DOCKER_CACHE_TO:-}" ]]; then
+  cache_args+=("--cache-to=${EFFERVA_DOCKER_CACHE_TO}")
+fi
+
+docker buildx build \
   --file "${project_dir}/docker/Wheel.Dockerfile" \
   --target wheel \
   --build-arg "CODEX_REVISION=${codex_revision}" \
   --build-arg "EFFERVA_REVISION=${efferva_revision}" \
+  "${cache_args[@]}" \
   --output "type=local,dest=${temporary_dir}" \
   "${workspace_dir}"
 

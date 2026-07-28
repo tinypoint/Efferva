@@ -102,6 +102,14 @@ def create_sandbox_provider(settings: Settings) -> SandboxProvider:
     name = settings.sandbox_provider.lower()
     if name == "docker":
         return DockerSandboxProvider(settings)
+    if name == "opensandbox":
+        try:
+            from efferva.sandbox.opensandbox import OpenSandboxProvider
+        except ImportError as error:
+            raise RuntimeError(
+                "The OpenSandbox provider requires the 'efferva[opensandbox]' extra"
+            ) from error
+        return OpenSandboxProvider(settings)
     if name in {"kubernetes", "kind"}:
         return KubernetesSandboxProvider(settings)
     return create_registered_provider(name)

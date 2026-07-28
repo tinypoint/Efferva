@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     sandbox_image: str = "efferva-sandbox:local"
     sandbox_cpu_limit: str = "2"
     docker_sandbox_memory_limit: str = "2g"
+    opensandbox_server_url: str = "http://localhost:8080"
+    opensandbox_api_key: str | None = None
+    opensandbox_use_server_proxy: bool = True
     kubernetes_sandbox_memory_limit: str = "2Gi"
     sandbox_pids_limit: int = 512
     workspace_path: str = "/workspace"

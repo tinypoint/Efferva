@@ -21,11 +21,11 @@ docker-runtime: wheel-docker
 		--tag efferva-runtime:local \
 		..
 
-docker-example: wheel-docker
+docker-example:
 	docker build \
-		--file examples/basic-product/Dockerfile \
-		--tag efferva-basic-product:local \
-		.
+		--file examples/basic-local-docker/Dockerfile \
+		--tag efferva-basic-local-docker:local \
+		examples/basic-local-docker
 
 docker-up: wheel-docker
 	@docker network inspect efferva >/dev/null 2>&1 || docker network create efferva
