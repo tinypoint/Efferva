@@ -1,4 +1,4 @@
-# AgentFrame engineering constraints
+# Efferva engineering constraints
 
 - Keep Codex Runtime outside the sandbox. Only command and filesystem execution cross the
   exec-server boundary.

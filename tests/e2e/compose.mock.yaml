@@ -3,4 +3,4 @@ services:
     environment:
       MOCK_API_KEY: mock
     volumes:
-      - ./tests/e2e/codex-config.toml:/var/lib/agentframe/codex/config.toml:ro
+      - ./tests/e2e/codex-config.toml:/var/lib/efferva/codex/config.toml:ro

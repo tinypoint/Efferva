@@ -3,11 +3,11 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
-http_port="${AGENTFRAME_E2E_PORT:-18080}"
+http_port="${EFFERVA_E2E_PORT:-18080}"
 base_url="http://localhost:${http_port}"
-export AGENTFRAME_HTTP_PORT="${http_port}"
+export EFFERVA_HTTP_PORT="${http_port}"
 compose_args=(
-  --project-name agentframe-e2e
+  --project-name efferva-e2e
   --file "${project_dir}/compose.yaml"
   --file "${project_dir}/tests/e2e/compose.mock.yaml"
 )
@@ -29,11 +29,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker network inspect agentframe >/dev/null 2>&1 || docker network create agentframe >/dev/null
+docker network inspect efferva >/dev/null 2>&1 || docker network create efferva >/dev/null
 python3 "${project_dir}/tests/e2e/mock_responses.py" &
 mock_pid="$!"
 
-if [[ "${AGENTFRAME_SKIP_WHEEL_BUILD:-0}" != "1" ]]; then
+if [[ "${EFFERVA_SKIP_WHEEL_BUILD:-0}" != "1" ]]; then
   "${project_dir}/scripts/build-docker-wheel.sh"
 fi
 docker compose "${compose_args[@]}" build app sandbox-image
@@ -47,15 +47,15 @@ done
 curl --fail --silent "${base_url}/healthz" >/dev/null
 
 docker compose "${compose_args[@]}" exec --no-TTY app \
-  python -m agentframe.sandbox.conformance_cli --provider docker \
+  python -m efferva.sandbox.conformance_cli --provider docker \
   | jq --exit-status \
     '.provider == "docker" and (.checks | index("stop-start-persistence") != null)' \
   >/dev/null
 
-alice_header="x-agentframe-demo-user: alice"
-bob_header="x-agentframe-demo-user: bob"
-admin_header="x-agentframe-demo-user: admin"
-other_admin_header="x-agentframe-demo-user: other-admin"
+alice_header="x-efferva-demo-user: alice"
+bob_header="x-efferva-demo-user: bob"
+admin_header="x-efferva-demo-user: admin"
+other_admin_header="x-efferva-demo-user: other-admin"
 session_json="$(curl --fail --silent \
   --header "${alice_header}" \
   --header "content-type: application/json" \

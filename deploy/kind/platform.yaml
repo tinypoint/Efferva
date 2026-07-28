@@ -1,19 +1,19 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: agentframe
+  name: efferva
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: agentframe
-  namespace: agentframe
+  name: efferva
+  namespace: efferva
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: sandbox-controller
-  namespace: agentframe
+  namespace: efferva
 rules:
   - apiGroups: [""]
     resources: ["pods", "persistentvolumeclaims"]
@@ -25,33 +25,33 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: agentframe-sandbox-controller
-  namespace: agentframe
+  name: efferva-sandbox-controller
+  namespace: efferva
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: sandbox-controller
 subjects:
   - kind: ServiceAccount
-    name: agentframe
-    namespace: agentframe
+    name: efferva
+    namespace: efferva
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: agentframe-postgres
-  namespace: agentframe
+  name: efferva-postgres
+  namespace: efferva
 type: Opaque
 stringData:
-  username: agentframe
-  password: agentframe
-  database-url: postgresql://agentframe:agentframe@postgres:5432/agentframe
+  username: efferva
+  password: efferva
+  database-url: postgresql://efferva:efferva@postgres:5432/efferva
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: agentframe
+  namespace: efferva
 spec:
   selector:
     app: postgres
@@ -64,7 +64,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres
-  namespace: agentframe
+  namespace: efferva
 spec:
   serviceName: postgres
   replicas: 1
@@ -84,21 +84,21 @@ spec:
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
-                  name: agentframe-postgres
+                  name: efferva-postgres
                   key: username
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: agentframe-postgres
+                  name: efferva-postgres
                   key: password
             - name: POSTGRES_DB
-              value: agentframe
+              value: efferva
           ports:
             - name: postgres
               containerPort: 5432
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "agentframe", "-d", "agentframe"]
+              command: ["pg_isready", "-U", "efferva", "-d", "efferva"]
             initialDelaySeconds: 2
             periodSeconds: 2
           volumeMounts:
@@ -116,11 +116,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: agentframe
-  namespace: agentframe
+  name: efferva
+  namespace: efferva
 spec:
   selector:
-    app: agentframe
+    app: efferva
   ports:
     - name: http
       port: 80
@@ -129,19 +129,19 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agentframe
-  namespace: agentframe
+  name: efferva
+  namespace: efferva
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: agentframe
+      app: efferva
   template:
     metadata:
       labels:
-        app: agentframe
+        app: efferva
     spec:
-      serviceAccountName: agentframe
+      serviceAccountName: efferva
       securityContext:
         fsGroup: 10001
         seccompProfile:
@@ -162,7 +162,7 @@ spec:
             runAsUser: 70
       containers:
         - name: app
-          image: agentframe-app:local
+          image: efferva-app:local
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -171,35 +171,35 @@ spec:
             runAsNonRoot: true
             runAsUser: 10001
           env:
-            - name: AGENTFRAME_DATABASE_URL
+            - name: EFFERVA_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: agentframe-postgres
+                  name: efferva-postgres
                   key: database-url
-            - name: AGENTFRAME_SANDBOX_PROVIDER
+            - name: EFFERVA_SANDBOX_PROVIDER
               value: kubernetes
-            - name: AGENTFRAME_SANDBOX_IMAGE
-              value: agentframe-sandbox:local
-            - name: AGENTFRAME_KUBERNETES_NAMESPACE
-              value: agentframe
+            - name: EFFERVA_SANDBOX_IMAGE
+              value: efferva-sandbox:local
+            - name: EFFERVA_KUBERNETES_NAMESPACE
+              value: efferva
             - name: CODEX_HOME
-              value: /var/lib/agentframe/codex
+              value: /var/lib/efferva/codex
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: agentframe-openai
+                  name: efferva-openai
                   key: api-key
                   optional: true
-            - name: AGENTFRAME_CODEX_OPENAI_BASE_URL
+            - name: EFFERVA_CODEX_OPENAI_BASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: agentframe-openai
+                  name: efferva-openai
                   key: base-url
                   optional: true
-            - name: AGENTFRAME_CODEX_MODEL
+            - name: EFFERVA_CODEX_MODEL
               valueFrom:
                 secretKeyRef:
-                  name: agentframe-openai
+                  name: efferva-openai
                   key: model
                   optional: true
           ports:
@@ -227,7 +227,7 @@ spec:
               memory: 2Gi
           volumeMounts:
             - name: codex-home
-              mountPath: /var/lib/agentframe/codex
+              mountPath: /var/lib/efferva/codex
       volumes:
         - name: codex-home
           emptyDir: {}

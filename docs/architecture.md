@@ -7,8 +7,8 @@ flowchart LR
   I["Product Cookie / JWT / SSO"] --> R["IdentityResolver"]
   R --> B["Principal-scoped request"]
   B -->|"HTTP + durable SSE"| L["Service / Load Balancer"]
-  L --> A1["AgentFrame instance A"]
-  L --> A2["AgentFrame instance B"]
+  L --> A1["Efferva instance A"]
+  L --> A2["Efferva instance B"]
   A1 --> P[("PostgreSQL")]
   A2 --> P
   A1 --> R1["Codex Runtime A"]
@@ -35,7 +35,7 @@ Exec 或第三方 API 执行。PostgreSQL 是控制面真相来源；工作区�
 | Thread | 同一工作区中的独立多轮对话 | `app_threads` + `codex_engine.threads` |
 | Run | Thread 上的一次用户输入与执行 | `runs` + `run_events` + `messages` |
 
-Principal 使用 `tenant_id + issuer + subject` 形成身份边界。AgentFrame 不复制产品用户表或角色
+Principal 使用 `tenant_id + issuer + subject` 形成身份边界。Efferva 不复制产品用户表或角色
 表；产品把现有角色即时映射为框架 Capability。Session 保存租户和所有者，Thread、Run、
 Message 与 Event 均通过 Session 继承权限。
 
@@ -103,7 +103,7 @@ Runtime 使用这个 sandbox。未来跨节点热迁移可改用支持 `ReadWrit
 Codex Runtime 和 API key 留在 App 容器/Pod；sandbox 不接收 API key，也不挂载 Docker
 Socket 或 Kubernetes 凭据。Executor Gateway 也位于 App 实例中，仅监听 loopback，并在
 每个协议请求上验证 Sandbox lease fencing。Sandbox 只运行基础工具镜像并挂载对应 Session
-工作区，不运行 AgentFrame helper，也不暴露 WebSocket Service。
+工作区，不运行 Efferva helper，也不暴露 WebSocket Service。
 
 Docker backend 的 App 为创建沙盒而挂载宿主 Docker Socket，只适用于本地开发。Kind backend
 通过 namespace Role 管理 Pod、PVC 并调用 Kubernetes Exec API，是 GKE 路径的基础。

@@ -1,22 +1,22 @@
 # Codex 薄 fork 维护约定
 
-`codex-fork` 只属于 AgentFrame 发布构建和维护工作区。产品使用方安装平台 Wheel，不 Clone
+`codex` 只属于 Efferva 发布构建和维护工作区。产品使用方安装平台 Wheel，不 Clone
 该仓库、不安装 Rust，也不在部署现场编译 Runtime。
 
 ## 原则
 
 fork 只承载上游无法通过公开扩展点完成的能力。产品 API、Session/Run 模型、调度、AG-UI、
-WebUI 与部署全部留在 `agent-framework`，避免把产品逻辑侵入 Codex。
+WebUI 与部署全部留在 `Efferva`，避免把产品逻辑侵入 Codex。
 
 当前 fork 只有两类语义变化：
 
 1. App Server 启动时可注入 `Arc<dyn ThreadStore>`；
 2. 非本地 ThreadStore 冷恢复时允许 `rollout_path = None`。
 
-PostgreSQL Store 的具体实现位于 `agent-framework/crates/postgres-thread-store`，fork 不依赖
+PostgreSQL Store 的具体实现位于 `Efferva/crates/postgres-thread-store`，fork 不依赖
 PostgreSQL 驱动。
 
-Sandbox Provider 不增加 fork patch。AgentFrame 在沙盒外实现 Codex 已有的远程 exec-server
+Sandbox Provider 不增加 fork patch。Efferva 在沙盒外实现 Codex 已有的远程 exec-server
 协议，并在 Executor Gateway 内转换为 `SandboxRuntime`；Docker/Kubernetes/E2B 等差异留在
 Provider SDK。这样上游同步只需要长期维护 ThreadStore 注入，而不需要让 Codex 认识任何
 沙盒厂商。
@@ -42,18 +42,18 @@ git switch main
 git rebase upstream/main
 ```
 
-随后在 `agent-framework` 运行编译与集成测试。若上游重构 ThreadStore，应优先把注入点迁移到
+随后在 `Efferva` 运行编译与集成测试。若上游重构 ThreadStore，应优先把注入点迁移到
 新的稳定边界，不复制整个 App Server。
 
 ## 每次同步的验收顺序
 
 ```bash
-cd codex-fork/codex-rs
+cd codex/codex-rs
 just test -p codex-app-server
 
-cd ../../agent-framework
+cd ../../Efferva
 cargo check --workspace
-AGENTFRAME_TEST_DATABASE_URL=... uv run pytest -q -m integration
+EFFERVA_TEST_DATABASE_URL=... uv run pytest -q -m integration
 ```
 
 Codex 仓自身还要求 Rust 改动完成后执行项目级 `just fix -p codex-app-server` 与 `just fmt`。

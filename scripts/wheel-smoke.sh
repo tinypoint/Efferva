@@ -15,19 +15,19 @@ fi
 
 docker run --rm \
   --volume "${wheel_path}:/tmp/${wheel_name}:ro" \
-  --env "AGENTFRAME_SMOKE_WHEEL=/tmp/${wheel_name}" \
+  --env "EFFERVA_SMOKE_WHEEL=/tmp/${wheel_name}" \
   python:3.13-slim-bookworm \
   sh -ceu '
     command -v cargo >/dev/null 2>&1 && exit 20
-    test ! -e /source/codex-fork
-    python -m pip install --quiet "${AGENTFRAME_SMOKE_WHEEL}"
+    test ! -e /source/codex
+    python -m pip install --quiet "${EFFERVA_SMOKE_WHEEL}"
     runtime="$(
-      python -c "from agentframe import locate_runtime_binary; print(locate_runtime_binary())"
+      python -c "from efferva import locate_runtime_binary; print(locate_runtime_binary())"
     )"
     test -x "${runtime}"
     "${runtime}" --help >/dev/null
     python -c "
-from agentframe import AgentFrame, runtime_build_info
+from efferva import Efferva, runtime_build_info
 info = runtime_build_info()
 assert info is not None
 assert info.codex_revision

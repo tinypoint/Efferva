@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
-proxy_container="${AGENTFRAME_CLIPROXY_CONTAINER:-cli-proxy-api}"
+proxy_container="${EFFERVA_CLIPROXY_CONTAINER:-cli-proxy-api}"
 
 if ! docker inspect "${proxy_container}" >/dev/null 2>&1; then
   echo "CLIProxyAPI container not found: ${proxy_container}" >&2
@@ -36,7 +36,7 @@ proxy_api_key="$(
 )"
 
 export OPENAI_API_KEY="${proxy_api_key}"
-export AGENTFRAME_CODEX_OPENAI_BASE_URL="${AGENTFRAME_CODEX_OPENAI_BASE_URL:-http://host.docker.internal:${proxy_port}/v1}"
-export AGENTFRAME_CODEX_MODEL="${AGENTFRAME_CODEX_MODEL:-gpt-5.4}"
+export EFFERVA_CODEX_OPENAI_BASE_URL="${EFFERVA_CODEX_OPENAI_BASE_URL:-http://host.docker.internal:${proxy_port}/v1}"
+export EFFERVA_CODEX_MODEL="${EFFERVA_CODEX_MODEL:-gpt-5.4}"
 
 exec "${script_dir}/kind-up.sh"

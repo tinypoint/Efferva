@@ -17,37 +17,37 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /source
-COPY codex-fork /source/codex-fork
-COPY agent-framework/Cargo.toml agent-framework/Cargo.lock agent-framework/rust-toolchain.toml \
-    /source/agent-framework/
-COPY agent-framework/crates /source/agent-framework/crates
-WORKDIR /source/agent-framework
+COPY codex /source/codex
+COPY Efferva/Cargo.toml Efferva/Cargo.lock Efferva/rust-toolchain.toml \
+    /source/Efferva/
+COPY Efferva/crates /source/Efferva/crates
+WORKDIR /source/Efferva
 
-RUN --mount=type=cache,id=agentframe-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=agentframe-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=agentframe-rust-target-${TARGETARCH},target=/source/agent-framework/target,sharing=locked \
+RUN --mount=type=cache,id=efferva-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=efferva-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=efferva-rust-target-${TARGETARCH},target=/source/Efferva/target,sharing=locked \
     cargo build --locked --profile container --jobs 4 \
-        --package agentframe-codex-runtime \
+        --package efferva-codex-runtime \
     && mkdir -p /artifacts \
-    && cp target/container/agentframe-codex-runtime /artifacts/
+    && cp target/container/efferva-codex-runtime /artifacts/
 
 FROM python:3.13-slim-bookworm AS wheel-builder
 
 ARG CODEX_REVISION
-ARG AGENTFRAME_REVISION
+ARG EFFERVA_REVISION
 
-WORKDIR /source/agent-framework
-COPY agent-framework/pyproject.toml agent-framework/README.md ./
-COPY agent-framework/build_hooks ./build_hooks
-COPY agent-framework/src ./src
+WORKDIR /source/Efferva
+COPY Efferva/pyproject.toml Efferva/README.md ./
+COPY Efferva/build_hooks ./build_hooks
+COPY Efferva/src ./src
 COPY --from=runtime-builder \
-    /artifacts/agentframe-codex-runtime \
-    /artifacts/agentframe-codex-runtime
-RUN --mount=type=cache,id=agentframe-pip-cache,target=/root/.cache/pip,sharing=locked \
-    AGENTFRAME_BUILD_RUNTIME_BINARY=/artifacts/agentframe-codex-runtime \
-    AGENTFRAME_BUILD_CODEX_REVISION="${CODEX_REVISION}" \
-    AGENTFRAME_BUILD_REVISION="${AGENTFRAME_REVISION}" \
-    AGENTFRAME_BUILD_PLATFORM_TAG="linux_$(uname -m)" \
+    /artifacts/efferva-codex-runtime \
+    /artifacts/efferva-codex-runtime
+RUN --mount=type=cache,id=efferva-pip-cache,target=/root/.cache/pip,sharing=locked \
+    EFFERVA_BUILD_RUNTIME_BINARY=/artifacts/efferva-codex-runtime \
+    EFFERVA_BUILD_CODEX_REVISION="${CODEX_REVISION}" \
+    EFFERVA_BUILD_REVISION="${EFFERVA_REVISION}" \
+    EFFERVA_BUILD_PLATFORM_TAG="linux_$(uname -m)" \
     pip wheel --no-deps --wheel-dir /dist .
 
 FROM scratch AS wheel

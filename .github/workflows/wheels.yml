@@ -3,7 +3,6 @@ name: Platform wheels
 on:
   pull_request:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -34,70 +33,74 @@ jobs:
             artifact: wheel-linux-x86_64
           - runner: ubuntu-24.04-arm
             artifact: wheel-linux-aarch64
-          - runner: macos-15
-            artifact: wheel-macos-arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout AgentFrame
+      - name: Checkout Efferva
         uses: actions/checkout@v4
         with:
-          path: agent-framework
+          path: Efferva
       - name: Checkout pinned Codex fork
         uses: actions/checkout@v4
         with:
           repository: tinypoint/codex
           ref: ${{ env.CODEX_REVISION }}
-          path: codex-fork
-      - uses: astral-sh/setup-uv@v8
-      - if: runner.os == 'macOS'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.95.0"
-      - name: Install native build dependencies
-        if: runner.os == 'macOS'
-        run: brew list protobuf >/dev/null 2>&1 || brew install protobuf
+          path: codex
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Test Python package
-        working-directory: agent-framework
+        working-directory: Efferva
         run: |
           uv sync --extra dev
           uv run ruff check .
           uv run ruff format --check .
           uv run pytest -q -m "not integration"
       - name: Build Debian 12 Linux wheel
-        if: runner.os == 'Linux'
-        working-directory: agent-framework
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Efferva/docker/Wheel.Dockerfile
+          target: wheel
+          build-args: |
+            CODEX_REVISION=${{ env.CODEX_REVISION }}
+            EFFERVA_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=efferva-wheel-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=efferva-wheel-${{ runner.arch }}
+          outputs: type=local,dest=Efferva/dist/docker
+      - name: Stage release wheel
+        working-directory: Efferva
         run: |
-          ./scripts/build-docker-wheel.sh
           mkdir -p dist/release
-          cp dist/docker/agentframe-*.whl dist/release/
-      - name: Build native macOS wheel
-        if: runner.os == 'macOS'
-        working-directory: agent-framework
-        env:
-          AGENTFRAME_BUILD_OUTPUT_DIR: ${{ github.workspace }}/agent-framework/dist/release
-        run: ./scripts/build-wheel.sh
+          cp dist/docker/efferva-*.whl dist/release/
       - name: Verify Linux wheel without Rust or Codex source
-        if: runner.os == 'Linux'
-        working-directory: agent-framework
-        run: ./scripts/wheel-smoke.sh "$(find dist/release -name 'agentframe-*.whl' -print -quit)"
-      - name: Verify macOS wheel from a clean environment
-        if: runner.os == 'macOS'
-        working-directory: agent-framework
-        run: |
-          smoke_dir="$(mktemp -d)"
-          uv venv --python 3.13 "${smoke_dir}"
-          uv pip install --python "${smoke_dir}/bin/python" \
-            "$(find dist/release -name 'agentframe-*.whl' -print -quit)"
-          runtime="$("${smoke_dir}/bin/python" -c \
-            'from agentframe import locate_runtime_binary; print(locate_runtime_binary())')"
-          test -x "${runtime}"
-          "${runtime}" --help >/dev/null
+        working-directory: Efferva
+        run: ./scripts/wheel-smoke.sh "$(find dist/release -name 'efferva-*.whl' -print -quit)"
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: agent-framework/dist/release/*.whl
+          path: Efferva/dist/release/*.whl
           if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, linux-validation]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download platform wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/efferva-*.whl
+          generate_release_notes: true
 
   linux-validation:
     name: PostgreSQL, Docker and dual-instance Kind
@@ -107,72 +110,72 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_DB: agentframe
-          POSTGRES_USER: agentframe
-          POSTGRES_PASSWORD: agentframe
+          POSTGRES_DB: efferva
+          POSTGRES_USER: efferva
+          POSTGRES_PASSWORD: efferva
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U agentframe -d agentframe"
+          --health-cmd "pg_isready -U efferva -d efferva"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
     steps:
-      - name: Checkout AgentFrame
+      - name: Checkout Efferva
         uses: actions/checkout@v4
         with:
-          path: agent-framework
+          path: Efferva
       - name: Download x86_64 wheel
         uses: actions/download-artifact@v4
         with:
           name: wheel-linux-x86_64
-          path: agent-framework/dist/docker
-      - uses: astral-sh/setup-uv@v8
+          path: Efferva/dist/docker
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Test Debian 12 wheel against PostgreSQL
-        working-directory: agent-framework
+        working-directory: Efferva
         env:
-          AGENTFRAME_TEST_DATABASE_URL: postgresql://agentframe:agentframe@localhost:5432/agentframe
+          EFFERVA_TEST_DATABASE_URL: postgresql://efferva:efferva@localhost:5432/efferva
         run: |
           docker run --rm --network host \
             --volume "$PWD:/workspace:ro" \
-            --env AGENTFRAME_TEST_DATABASE_URL \
+            --env EFFERVA_TEST_DATABASE_URL \
             python:3.13-slim-bookworm \
             sh -ceu '
               python -m pip install --quiet \
-                /workspace/dist/docker/agentframe-*.whl \
+                /workspace/dist/docker/efferva-*.whl \
                 "pytest>=8.4,<9" "pytest-asyncio>=1.1,<2"
               runtime="$(
                 python -c \
-                  "from agentframe import locate_runtime_binary; print(locate_runtime_binary())"
+                  "from efferva import locate_runtime_binary; print(locate_runtime_binary())"
               )"
-              AGENTFRAME_TEST_RUNTIME_BINARY="${runtime}" \
+              EFFERVA_TEST_RUNTIME_BINARY="${runtime}" \
                 python -m pytest -q /workspace/tests/integration
             '
       - name: Build wheel-only application and sandbox images
-        working-directory: agent-framework
+        working-directory: Efferva
         run: |
           docker build --file docker/Dockerfile --target app \
-            --tag agentframe-app:local ..
+            --tag efferva-app:local ..
           docker build --file docker/Dockerfile --target sandbox \
-            --tag agentframe-sandbox:local ..
+            --tag efferva-sandbox:local ..
           docker build --file tests/e2e/Mock.Dockerfile \
-            --tag agentframe-model-proxy:local ..
+            --tag efferva-model-proxy:local ..
       - name: Install Kind
         uses: helm/kind-action@v1
         with:
           install_only: true
       - name: Run dual-instance Kind E2E
-        working-directory: agent-framework
+        working-directory: Efferva
         env:
-          AGENTFRAME_SKIP_WHEEL_BUILD: "1"
+          EFFERVA_SKIP_WHEEL_BUILD: "1"
           OPENAI_API_KEY: mock
-          AGENTFRAME_CODEX_OPENAI_BASE_URL: http://model-proxy:8000/v1
-          AGENTFRAME_CODEX_MODEL: mock
+          EFFERVA_CODEX_OPENAI_BASE_URL: http://model-proxy:8000/v1
+          EFFERVA_CODEX_MODEL: mock
         run: |
           ./scripts/kind-up.sh
-          kind load docker-image --name agentframe agentframe-model-proxy:local
+          kind load docker-image --name efferva efferva-model-proxy:local
           kubectl apply --filename tests/e2e/kind-mock.yaml
-          kubectl --namespace agentframe rollout status deployment/model-proxy --timeout=180s
+          kubectl --namespace efferva rollout status deployment/model-proxy --timeout=180s
           ./scripts/kind-smoke.sh
           ./scripts/kind-e2e.sh
 
@@ -187,14 +190,14 @@ jobs:
           pattern: wheel-*
           path: dist
           merge-multiple: true
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Upload
         env:
-          TWINE_USERNAME: ${{ secrets.AGENTFRAME_REGISTRY_USERNAME }}
-          TWINE_PASSWORD: ${{ secrets.AGENTFRAME_REGISTRY_PASSWORD }}
+          TWINE_USERNAME: ${{ secrets.EFFERVA_REGISTRY_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.EFFERVA_REGISTRY_PASSWORD }}
           REPOSITORY_URL: ${{ inputs.repository_url }}
         run: |
           test -n "${REPOSITORY_URL}"
           uvx twine upload --non-interactive \
             --repository-url "${REPOSITORY_URL}" \
-            dist/agentframe-*.whl
+            dist/efferva-*.whl

@@ -12,23 +12,23 @@ wheel-docker:
 	./scripts/build-docker-wheel.sh
 
 wheel-smoke: wheel-docker
-	./scripts/wheel-smoke.sh $$(find dist/docker -maxdepth 1 -name 'agentframe-*.whl' -print -quit)
+	./scripts/wheel-smoke.sh $$(find dist/docker -maxdepth 1 -name 'efferva-*.whl' -print -quit)
 
 docker-runtime: wheel-docker
 	docker build \
 		--file docker/Dockerfile \
 		--target runtime \
-		--tag agentframe-runtime:local \
+		--tag efferva-runtime:local \
 		..
 
-docker-example: wheel-docker
+docker-example:
 	docker build \
-		--file examples/basic-product/Dockerfile \
-		--tag agentframe-basic-product:local \
-		.
+		--file examples/basic-local-docker/Dockerfile \
+		--tag efferva-basic-local-docker:local \
+		examples/basic-local-docker
 
 docker-up: wheel-docker
-	@docker network inspect agentframe >/dev/null 2>&1 || docker network create agentframe
+	@docker network inspect efferva >/dev/null 2>&1 || docker network create efferva
 	docker compose up --build --detach
 	docker compose ps
 
@@ -51,8 +51,8 @@ kind-e2e:
 	./scripts/kind-e2e.sh
 
 kind-down:
-	kind delete cluster --name "$${AGENTFRAME_KIND_CLUSTER:-agentframe}"
+	kind delete cluster --name "$${EFFERVA_KIND_CLUSTER:-efferva}"
 
 kind-port-forward:
-	kubectl --context "kind-$${AGENTFRAME_KIND_CLUSTER:-agentframe}" \
-		--namespace agentframe port-forward service/agentframe 8080:80
+	kubectl --context "kind-$${EFFERVA_KIND_CLUSTER:-efferva}" \
+		--namespace efferva port-forward service/efferva 8080:80

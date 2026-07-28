@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from agentframe.events import (
+from efferva.events import (
     raw,
     run_error,
     run_finished,

@@ -1,0 +1,53 @@
+---
+import "../styles/portal.css";
+import { withBase } from "../lib/urls";
+
+interface Props {
+  lang: "en" | "zh-CN";
+  title: string;
+  description: string;
+  alternatePath: string;
+}
+
+const { lang, title, description, alternatePath } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const englishUrl = new URL(withBase("/"), Astro.site);
+const chineseUrl = new URL(withBase("/zh-cn/"), Astro.site);
+const socialImage = new URL(withBase("/og.png"), Astro.site);
+---
+
+<!doctype html>
+<html lang={lang}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#07070c" />
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang="en" href={englishUrl} />
+    <link rel="alternate" hreflang="zh-CN" href={chineseUrl} />
+    <link rel="alternate" hreflang="x-default" href={englishUrl} />
+    <link rel="icon" type="image/png" sizes="32x32" href={withBase("/favicon-32.png")} />
+    <link rel="apple-touch-icon" href={withBase("/icon-192.png")} />
+    <link rel="manifest" href={withBase("/manifest.webmanifest")} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Efferva" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={socialImage} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={socialImage} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <slot />
+    <a class="language-fallback" href={withBase(alternatePath)}>
+      {lang === "en" ? "简体中文" : "English"}
+    </a>
+  </body>
+</html>

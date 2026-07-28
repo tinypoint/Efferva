@@ -1,16 +1,16 @@
 [package]
-name = "agentframe-codex-runtime"
+name = "efferva-codex-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "agentframe-codex-runtime"
+name = "efferva-codex-runtime"
 path = "src/main.rs"
 
 [dependencies]
-agentframe-postgres-thread-store = { path = "../postgres-thread-store" }
+efferva-postgres-thread-store = { path = "../postgres-thread-store" }
 anyhow.workspace = true
 clap.workspace = true
 codex-app-server.workspace = true

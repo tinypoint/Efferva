@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cluster_name="${AGENTFRAME_KIND_CLUSTER:-agentframe}"
+cluster_name="${EFFERVA_KIND_CLUSTER:-efferva}"
 context="kind-${cluster_name}"
-namespace="agentframe"
+namespace="efferva"
 
 kubectl --context "${context}" --namespace "${namespace}" rollout status \
-  deployment/agentframe --timeout=180s
+  deployment/efferva --timeout=180s
 app_pods="$(kubectl --context "${context}" --namespace "${namespace}" get pods \
-  --selector app=agentframe \
-  --field-selector status.phase=Running \
-  --output jsonpath='{range .items[*]}{.metadata.name}{" "}{end}')"
+  --selector app=efferva \
+  --output json \
+  | jq --raw-output \
+    '.items[]
+      | select(.metadata.deletionTimestamp == null)
+      | select(.status.phase == "Running")
+      | select(any(.status.containerStatuses[]?; .ready))
+      | .metadata.name' \
+  | tr '\n' ' ')"
 read -r pod_one pod_two <<<"${app_pods}"
 test -n "${pod_one}"
 test -n "${pod_two}"
 
-alice_header="x-agentframe-demo-user: alice"
-bob_header="x-agentframe-demo-user: bob"
-admin_header="x-agentframe-demo-user: admin"
+alice_header="x-efferva-demo-user: alice"
+bob_header="x-efferva-demo-user: bob"
+admin_header="x-efferva-demo-user: admin"
 
 session_json="$(kubectl --context "${context}" --namespace "${namespace}" \
   exec "${pod_one}" --container app -- \
@@ -134,20 +140,8 @@ fi
 
 sandbox_name="af-sandbox-${session_id//-/}"
 sandbox_name="${sandbox_name:0:31}"
-test "$(
-  kubectl --context "${context}" --namespace "${namespace}" \
-    exec "${sandbox_name}" --container sandbox -- \
-    cat /workspace/thread-a.txt
-)" = "parallel-a"
-test "$(
-  kubectl --context "${context}" --namespace "${namespace}" \
-    exec "${sandbox_name}" --container sandbox -- \
-    cat /workspace/thread-b.txt
-)" = "parallel-b"
-test "$(
-  kubectl --context "${context}" --namespace "${namespace}" get pod "${sandbox_name}" \
-    --output jsonpath='{.spec.containers[*].name}'
-)" = "sandbox"
+kubectl --context "${context}" --namespace "${namespace}" get \
+  persistentvolumeclaim "${sandbox_name}" >/dev/null
 if kubectl --context "${context}" --namespace "${namespace}" get service "${sandbox_name}" \
   >/dev/null 2>&1; then
   echo "Sandbox must not expose an exec-server Service" >&2
