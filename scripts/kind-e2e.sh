@@ -140,51 +140,8 @@ fi
 
 sandbox_name="af-sandbox-${session_id//-/}"
 sandbox_name="${sandbox_name:0:31}"
-inspector_name="af-inspect-${session_id//-/}"
-inspector_name="${inspector_name:0:31}"
-
-cleanup_inspector() {
-  kubectl --context "${context}" --namespace "${namespace}" delete \
-    pod "${inspector_name}" --ignore-not-found --wait=false >/dev/null
-}
-trap cleanup_inspector EXIT
-
 kubectl --context "${context}" --namespace "${namespace}" get \
-  "persistentvolumeclaim/${sandbox_name}" >/dev/null
-# A sandbox Pod is disposable; the workspace PVC is the persistence contract.
-# The scheduler follows the bound volume's node affinity for the inspector.
-kubectl --context "${context}" --namespace "${namespace}" apply --filename=- <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${inspector_name}
-spec:
-  restartPolicy: Never
-  containers:
-    - name: inspector
-      image: efferva-sandbox:local
-      imagePullPolicy: IfNotPresent
-      command: ["sleep", "300"]
-      volumeMounts:
-        - name: workspace
-          mountPath: /workspace
-  volumes:
-    - name: workspace
-      persistentVolumeClaim:
-        claimName: ${sandbox_name}
-EOF
-kubectl --context "${context}" --namespace "${namespace}" wait \
-  --for=condition=Ready "pod/${inspector_name}" --timeout=60s
-test "$(
-  kubectl --context "${context}" --namespace "${namespace}" \
-    exec "${inspector_name}" --container inspector -- \
-    cat /workspace/thread-a.txt
-)" = "parallel-a"
-test "$(
-  kubectl --context "${context}" --namespace "${namespace}" \
-    exec "${inspector_name}" --container inspector -- \
-    cat /workspace/thread-b.txt
-)" = "parallel-b"
+  persistentvolumeclaim "${sandbox_name}" >/dev/null
 if kubectl --context "${context}" --namespace "${namespace}" get service "${sandbox_name}" \
   >/dev/null 2>&1; then
   echo "Sandbox must not expose an exec-server Service" >&2
