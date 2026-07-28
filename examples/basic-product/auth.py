@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from agentframe import Capability, Principal, UnauthenticatedError
+from efferva import Capability, Principal, UnauthenticatedError
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +76,7 @@ async def login_page(request: Request) -> str:
         <h1>Basic Product</h1>
         <p>当前身份：{current_text}</p>
         <ul>{links}</ul>
-        <p><a href="/agent/">进入 AgentFrame WebUI</a> · <a href="/logout">退出</a></p>
+        <p><a href="/agent/">进入 Efferva WebUI</a> · <a href="/logout">退出</a></p>
         <small>这是开发示例，不是生产登录实现。</small>
       </body>
     </html>

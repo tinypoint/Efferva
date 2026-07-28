@@ -6,8 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from agentframe.runtime import CodexRpcError, CodexRuntime
-from agentframe.sandbox import SandboxEnvironment, SandboxHandle
+from efferva.runtime import CodexRpcError, CodexRuntime
+from efferva.sandbox import SandboxEnvironment, SandboxHandle
 
 
 def sandbox_environment() -> SandboxEnvironment:
@@ -34,15 +34,15 @@ def test_runtime_command_uses_codex_provider_overrides() -> None:
     assert runtime._runtime_command() == [
         "/runtime",
         "--config",
-        'model_provider="agentframe_proxy"',
+        'model_provider="efferva_proxy"',
         "--config",
-        'model_providers.agentframe_proxy.name="AgentFrame LLM proxy"',
+        'model_providers.efferva_proxy.name="Efferva LLM proxy"',
         "--config",
-        'model_providers.agentframe_proxy.base_url="http://proxy:8317/v1"',
+        'model_providers.efferva_proxy.base_url="http://proxy:8317/v1"',
         "--config",
-        'model_providers.agentframe_proxy.env_key="OPENAI_API_KEY"',
+        'model_providers.efferva_proxy.env_key="OPENAI_API_KEY"',
         "--config",
-        'model_providers.agentframe_proxy.wire_api="responses"',
+        'model_providers.efferva_proxy.wire_api="responses"',
         "--config",
         'model="gpt-5.4"',
     ]
@@ -109,7 +109,7 @@ async def test_environment_connection_retries_until_sandbox_is_listening(
         return None
 
     monkeypatch.setattr(runtime, "request", request)
-    monkeypatch.setattr("agentframe.runtime.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("efferva.runtime.asyncio.sleep", no_sleep)
 
     await runtime.ensure_environment(sandbox)
     await runtime.ensure_environment(sandbox)

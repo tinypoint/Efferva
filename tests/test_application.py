@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from agentframe import AgentFrame, Principal, UnauthenticatedError
+from efferva import Efferva, Principal, UnauthenticatedError
 
 
 async def resolve_header_principal(request: Request) -> Principal:
@@ -13,9 +13,9 @@ async def resolve_header_principal(request: Request) -> Principal:
     return Principal(tenant_id="acme", issuer="tests", subject=subject)
 
 
-def test_agentframe_installs_under_product_prefix_and_reuses_product_title() -> None:
+def test_efferva_installs_under_product_prefix_and_reuses_product_title() -> None:
     app = FastAPI(title="Product Host")
-    frame = AgentFrame(identity=resolve_header_principal)
+    frame = Efferva(identity=resolve_header_principal)
     frame.install(app, prefix="/agent")
     client = TestClient(app, raise_server_exceptions=False)
 

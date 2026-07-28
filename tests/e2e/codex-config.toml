@@ -2,7 +2,7 @@ model = "gpt-5.2-codex"
 model_provider = "mock"
 
 [model_providers.mock]
-name = "AgentFrame mock"
+name = "Efferva mock"
 base_url = "http://host.docker.internal:18090/v1"
 env_key = "MOCK_API_KEY"
 wire_api = "responses"

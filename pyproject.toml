@@ -1,5 +1,5 @@
 [project]
-name = "agentframe"
+name = "efferva"
 version = "0.1.0"
 description = "A Codex-based, AG-UI compatible agent framework for Docker and Kubernetes."
 readme = "README.md"
@@ -24,7 +24,7 @@ dev = [
 ]
 
 [project.scripts]
-agentframe = "agentframe.cli:main"
+efferva = "efferva.cli:main"
 
 [build-system]
 requires = [
@@ -34,7 +34,7 @@ requires = [
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agentframe"]
+packages = ["src/efferva"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "build_hooks/runtime.py"

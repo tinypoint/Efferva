@@ -31,17 +31,17 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 
-codex-app-server = { path = "../codex-fork/codex-rs/app-server" }
-codex-arg0 = { path = "../codex-fork/codex-rs/arg0" }
-codex-config = { path = "../codex-fork/codex-rs/config" }
-codex-exec-server = { path = "../codex-fork/codex-rs/exec-server" }
-codex-git-utils = { path = "../codex-fork/codex-rs/git-utils" }
-codex-http-client = { path = "../codex-fork/codex-rs/http-client" }
-codex-protocol = { path = "../codex-fork/codex-rs/protocol" }
-codex-rollout = { path = "../codex-fork/codex-rs/rollout" }
-codex-state = { path = "../codex-fork/codex-rs/state" }
-codex-thread-store = { path = "../codex-fork/codex-rs/thread-store" }
-codex-utils-cli = { path = "../codex-fork/codex-rs/utils/cli" }
+codex-app-server = { path = "../codex/codex-rs/app-server" }
+codex-arg0 = { path = "../codex/codex-rs/arg0" }
+codex-config = { path = "../codex/codex-rs/config" }
+codex-exec-server = { path = "../codex/codex-rs/exec-server" }
+codex-git-utils = { path = "../codex/codex-rs/git-utils" }
+codex-http-client = { path = "../codex/codex-rs/http-client" }
+codex-protocol = { path = "../codex/codex-rs/protocol" }
+codex-rollout = { path = "../codex/codex-rs/rollout" }
+codex-state = { path = "../codex/codex-rs/state" }
+codex-thread-store = { path = "../codex/codex-rs/thread-store" }
+codex-utils-cli = { path = "../codex/codex-rs/utils/cli" }
 
 # Keep the thin runtime compatible with the exact transport forks used by Codex.
 [patch.crates-io]

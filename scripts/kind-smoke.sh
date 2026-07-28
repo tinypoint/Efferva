@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cluster_name="${AGENTFRAME_KIND_CLUSTER:-agentframe}"
+cluster_name="${EFFERVA_KIND_CLUSTER:-efferva}"
 context="kind-${cluster_name}"
-namespace="agentframe"
+namespace="efferva"
 
 kubectl --context "${context}" --namespace "${namespace}" rollout status \
-  deployment/agentframe --timeout=180s
+  deployment/efferva --timeout=180s
 app_pods="$(kubectl --context "${context}" --namespace "${namespace}" get pods \
-  --selector app=agentframe \
+  --selector app=efferva \
   --output json \
   | jq --raw-output \
     '.items[]
@@ -21,15 +21,15 @@ test "$(wc -w <<<"${app_pods}" | tr -d ' ')" -eq 2
 read -r app_pod_one app_pod_two <<<"${app_pods}"
 
 kubectl --context "${context}" --namespace "${namespace}" exec "${app_pod_one}" -- \
-  python -m agentframe.sandbox.conformance_cli --provider kubernetes \
+  python -m efferva.sandbox.conformance_cli --provider kubernetes \
   | jq --exit-status \
     '.provider == "kubernetes" and (.checks | index("stop-start-persistence") != null)' \
   >/dev/null
 
-alice_header="x-agentframe-demo-user: alice"
-bob_header="x-agentframe-demo-user: bob"
-admin_header="x-agentframe-demo-user: admin"
-other_admin_header="x-agentframe-demo-user: other-admin"
+alice_header="x-efferva-demo-user: alice"
+bob_header="x-efferva-demo-user: bob"
+admin_header="x-efferva-demo-user: admin"
+other_admin_header="x-efferva-demo-user: other-admin"
 session_json="$(kubectl --context "${context}" --namespace "${namespace}" exec "${app_pod_one}" -- \
   curl --fail --silent \
     --header "${alice_header}" \

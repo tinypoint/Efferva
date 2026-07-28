@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agentframe_postgres_thread_store::PostgresThreadStore;
+use efferva_postgres_thread_store::PostgresThreadStore;
 use clap::Parser;
 use codex_app_server::AppServerDependencies;
 use codex_app_server::AppServerRuntimeOptions;
@@ -20,7 +20,7 @@ struct RuntimeArgs {
     #[command(flatten)]
     config_overrides: CliConfigOverrides,
 
-    /// PostgreSQL connection URL. AGENTFRAME_DATABASE_URL takes precedence.
+    /// PostgreSQL connection URL. EFFERVA_DATABASE_URL takes precedence.
     #[arg(long, env = "DATABASE_URL")]
     database_url: Option<String>,
 
@@ -40,12 +40,12 @@ struct RuntimeArgs {
 fn main() -> anyhow::Result<()> {
     arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
         let args = RuntimeArgs::parse();
-        let database_url = std::env::var("AGENTFRAME_DATABASE_URL")
+        let database_url = std::env::var("EFFERVA_DATABASE_URL")
             .ok()
             .or(args.database_url)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "AGENTFRAME_DATABASE_URL or DATABASE_URL is required for the Codex runtime"
+                    "EFFERVA_DATABASE_URL or DATABASE_URL is required for the Codex runtime"
                 )
             })?;
         let thread_store: Arc<dyn ThreadStore> =

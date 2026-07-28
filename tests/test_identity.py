@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentframe import Capability, Principal
+from efferva import Capability, Principal
 
 
 def test_principal_normalizes_and_types_capabilities() -> None:

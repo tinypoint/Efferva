@@ -1,0 +1,478 @@
+---
+import Brand from "./Brand.astro";
+import PortalLayout from "../layouts/PortalLayout.astro";
+import { withBase } from "../lib/urls";
+
+interface Props {
+  locale: "en" | "zh-cn";
+}
+
+const copy = {
+  en: {
+    metaTitle: "Efferva — Agent infrastructure that lives inside your product",
+    metaDescription:
+      "Efferva is an embeddable, multi-tenant agent runtime for durable FastAPI products running on Docker or Kubernetes.",
+    navLabel: "Primary navigation",
+    nav: {
+      capabilities: "Capabilities",
+      architecture: "Architecture",
+      docs: "Docs",
+    },
+    preview: "Private preview · v0.1",
+    heroTitle: "Agent infrastructure that lives inside your product.",
+    heroLead:
+      "Embed durable, multi-tenant agent workflows into FastAPI. Efferva owns sessions, execution, sandboxes, events, and scale—your product keeps identity and control.",
+    readDocs: "Explore the docs",
+    viewGithub: "View on GitHub",
+    proofLabel: "Framework highlights",
+    proof: ["Open source", "FastAPI native", "Docker + Kubernetes"],
+    visualLabel: "Efferva system architecture preview",
+    visual: {
+      product: "Your product",
+      state: "Durable state",
+      execution: "Isolated execution",
+      runtime: "Agent runtime",
+    },
+    signalLabel: "Core operating model",
+    signals: [
+      { value: "1", label: "install point" },
+      { value: "N", label: "product instances" },
+      { value: "∞", label: "durable threads" },
+      { value: "0", label: "sticky sessions" },
+    ],
+    capabilityKicker: "Built for product teams",
+    capabilityTitle: "The hard parts are framework concerns.",
+    capabilityLead:
+      "Efferva gives backend teams a coherent control plane instead of a pile of agent primitives.",
+    capabilities: [
+      {
+        title: "Embed, don’t re-platform",
+        body: "Install Efferva into the FastAPI application that already owns users, organizations, middleware, and deployment.",
+        meta: "FastAPI / ASGI",
+      },
+      {
+        title: "Durable by default",
+        body: "Sessions, threads, runs, messages, and events survive disconnects, restarts, and horizontal traffic shifts.",
+        meta: "PostgreSQL / SSE",
+      },
+      {
+        title: "Isolated execution",
+        body: "Run tools in provider-backed sandboxes with persistent per-session workspaces and a consistent execution contract.",
+        meta: "Docker / Kubernetes / Providers",
+      },
+      {
+        title: "Multi-tenant boundaries",
+        body: "Map your product identity into tenant-scoped principals without copying your user database into the framework.",
+        meta: "Identity / Capabilities",
+      },
+      {
+        title: "Scale without affinity",
+        body: "Leases, fencing tokens, and persistent events keep multiple application instances correct without sticky sessions.",
+        meta: "Queues / Fencing",
+      },
+      {
+        title: "Stream-native UX",
+        body: "Resume durable AG-UI and SSE event streams from any instance after browser or network interruptions.",
+        meta: "AG-UI / Last-Event-ID",
+      },
+    ],
+    embedKicker: "One integration boundary",
+    embedTitle: "Your identity in. A complete agent surface out.",
+    embedBody:
+      "Resolve the authenticated product user once, then install Efferva under the route prefix you control.",
+    embedPoints: [
+      "Reuses your middleware and login state",
+      "Starts migrations, runtime, gateway, and workers with the app",
+      "Fails readiness cleanly when dependencies are unavailable",
+    ],
+    codeStatus: "Framework lifecycle attached",
+    architectureKicker: "A durable control plane",
+    architectureTitle: "Designed for real product traffic.",
+    architectureLead:
+      "Every boundary is explicit: identity stays with your product, durable state stays in PostgreSQL, and command execution crosses into isolated sandboxes.",
+    architectureSteps: [
+      {
+        title: "Product identity",
+        body: "Tenant, issuer, subject, and capabilities.",
+      },
+      {
+        title: "Efferva control plane",
+        body: "Sessions, threads, runs, events, leases, and routing.",
+      },
+      {
+        title: "Codex runtime",
+        body: "Agent loop and protocol outside the sandbox.",
+      },
+      {
+        title: "Provider sandbox",
+        body: "Commands and files inside an isolated workspace.",
+      },
+    ],
+    runtimeKicker: "Runtime without the fork burden",
+    runtimeTitle: "Codex-powered. Efferva-shaped.",
+    runtimeBody:
+      "Efferva packages a thin Codex runtime inside each platform wheel, then surrounds it with product-grade identity, persistence, sandbox providers, and multi-instance coordination.",
+    runtimeFacts: [
+      { title: "Thin runtime", body: "Codex stays focused on the agent loop." },
+      { title: "Provider contract", body: "Execution backends remain replaceable." },
+      { title: "Product control", body: "Behavior lives in Efferva, not a deep fork." },
+    ],
+    ctaKicker: "Build the product, not the plumbing",
+    ctaTitle: "Give your agent a durable place to live.",
+    ctaBody:
+      "The documentation is being rebuilt for the first public preview. Start with the architecture and follow the project as the integration guides land.",
+  },
+  "zh-cn": {
+    metaTitle: "Efferva — 生长在产品内部的 Agent 基础设施",
+    metaDescription:
+      "Efferva 是可嵌入 FastAPI 产品的多租户持久化 Agent Runtime，支持 Docker 与 Kubernetes。",
+    navLabel: "主导航",
+    nav: {
+      capabilities: "核心能力",
+      architecture: "架构",
+      docs: "文档",
+    },
+    preview: "内部预览 · v0.1",
+    heroTitle: "生长在产品内部的 Agent 基础设施。",
+    heroLead:
+      "把持久、多租户的 Agent 工作流直接嵌入 FastAPI。Efferva 管理 Session、执行、沙盒、事件与扩展；身份和控制权仍属于你的产品。",
+    readDocs: "浏览文档",
+    viewGithub: "查看 GitHub",
+    proofLabel: "框架特性",
+    proof: ["开源", "原生 FastAPI", "Docker + Kubernetes"],
+    visualLabel: "Efferva 系统架构预览",
+    visual: {
+      product: "你的产品",
+      state: "持久状态",
+      execution: "隔离执行",
+      runtime: "Agent Runtime",
+    },
+    signalLabel: "核心运行模型",
+    signals: [
+      { value: "1", label: "个接入点" },
+      { value: "N", label: "个产品实例" },
+      { value: "∞", label: "条持久 Thread" },
+      { value: "0", label: "个粘性 Session" },
+    ],
+    capabilityKicker: "为产品后端团队而生",
+    capabilityTitle: "难题应该由框架解决。",
+    capabilityLead:
+      "Efferva 提供一套完整控制面，而不是让团队自行拼接零散的 Agent 原语。",
+    capabilities: [
+      {
+        title: "嵌入，而非重建平台",
+        body: "将 Efferva 安装到现有 FastAPI 应用，继续复用用户、组织、中间件和部署体系。",
+        meta: "FastAPI / ASGI",
+      },
+      {
+        title: "默认持久化",
+        body: "Session、Thread、Run、消息和事件不会因断线、重启或流量切换而丢失。",
+        meta: "PostgreSQL / SSE",
+      },
+      {
+        title: "隔离执行",
+        body: "通过统一 Provider 契约在沙盒中执行工具，并保留每个 Session 的持久工作区。",
+        meta: "Docker / Kubernetes / Provider",
+      },
+      {
+        title: "多租户边界",
+        body: "把产品身份映射为租户范围的 Principal，无需把用户数据库复制到框架内部。",
+        meta: "身份 / Capability",
+      },
+      {
+        title: "无需会话亲和的扩展",
+        body: "租约、fencing token 与持久事件保证多个应用实例之间的正确协作。",
+        meta: "队列 / Fencing",
+      },
+      {
+        title: "原生流式体验",
+        body: "浏览器或网络中断后，可从任意实例恢复 AG-UI 与 SSE 持久事件流。",
+        meta: "AG-UI / Last-Event-ID",
+      },
+    ],
+    embedKicker: "一个接入边界",
+    embedTitle: "输入产品身份，获得完整 Agent 能力。",
+    embedBody:
+      "只需解析一次已登录用户，再把 Efferva 安装到你控制的路由前缀。",
+    embedPoints: [
+      "复用产品中间件和登录态",
+      "随应用启动迁移、Runtime、Gateway 与 Worker",
+      "依赖不可用时明确阻止服务进入 Ready",
+    ],
+    codeStatus: "框架生命周期已接入",
+    architectureKicker: "持久化控制面",
+    architectureTitle: "为真实产品流量设计。",
+    architectureLead:
+      "每条边界都清晰可见：身份属于产品，持久状态属于 PostgreSQL，命令执行进入隔离沙盒。",
+    architectureSteps: [
+      {
+        title: "产品身份",
+        body: "Tenant、Issuer、Subject 与 Capability。",
+      },
+      {
+        title: "Efferva 控制面",
+        body: "Session、Thread、Run、事件、租约与路由。",
+      },
+      {
+        title: "Codex Runtime",
+        body: "Agent Loop 与协议运行在沙盒外。",
+      },
+      {
+        title: "Provider 沙盒",
+        body: "命令和文件位于隔离工作区。",
+      },
+    ],
+    runtimeKicker: "不用承担深度 Fork",
+    runtimeTitle: "由 Codex 驱动，为 Efferva 而塑形。",
+    runtimeBody:
+      "Efferva 将精简的 Codex Runtime 打包进各平台 Wheel，并在外层提供产品级身份、持久化、沙盒 Provider 与多实例协调。",
+    runtimeFacts: [
+      { title: "精简 Runtime", body: "Codex 专注 Agent Loop。" },
+      { title: "Provider 契约", body: "执行后端可以替换。" },
+      { title: "产品掌控", body: "行为属于 Efferva，而非深度 Fork。" },
+    ],
+    ctaKicker: "构建产品，而非重复造管道",
+    ctaTitle: "给你的 Agent 一个持久的容身之处。",
+    ctaBody:
+      "文档正在为首次公开预览重建。你可以先了解架构，并关注后续接入指南。",
+  },
+} as const;
+
+const { locale } = Astro.props;
+const t = copy[locale];
+const isChinese = locale === "zh-cn";
+const homePath = isChinese ? "/zh-cn/" : "/";
+const alternatePath = isChinese ? "/" : "/zh-cn/";
+const docsPath = isChinese ? "/zh-cn/docs/" : "/docs/";
+const githubUrl = "https://github.com/tinypoint/Efferva";
+const year = new Date().getFullYear();
+---
+
+<PortalLayout
+  lang={isChinese ? "zh-CN" : "en"}
+  title={t.metaTitle}
+  description={t.metaDescription}
+  alternatePath={alternatePath}
+>
+  <div class="site-shell">
+    <header class="topbar">
+      <div class="container nav-inner">
+        <Brand href={withBase(homePath)} />
+        <nav aria-label={t.navLabel}>
+          <a href="#capabilities">{t.nav.capabilities}</a>
+          <a href="#architecture">{t.nav.architecture}</a>
+          <a href={withBase(docsPath)}>{t.nav.docs}</a>
+          <a class="language-link" href={withBase(alternatePath)}>
+            {isChinese ? "EN" : "中文"}
+          </a>
+          <a class="github-link" href={githubUrl} target="_blank" rel="noreferrer">
+            GitHub <span aria-hidden="true">↗</span>
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero container">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span class="status-dot"></span>
+            {t.preview}
+          </div>
+          <h1>{t.heroTitle}</h1>
+          <p class="hero-lead">{t.heroLead}</p>
+          <div class="hero-actions">
+            <a class="button primary" href={withBase(docsPath)}>
+              {t.readDocs} <span aria-hidden="true">→</span>
+            </a>
+            <a class="button secondary" href={githubUrl} target="_blank" rel="noreferrer">
+              {t.viewGithub}
+            </a>
+          </div>
+          <div class="hero-proof" aria-label={t.proofLabel}>
+            {t.proof.map((item) => (
+              <span><i aria-hidden="true"></i>{item}</span>
+            ))}
+          </div>
+        </div>
+
+        <div class="hero-system" aria-label={t.visualLabel}>
+          <div class="system-glow"></div>
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="system-node product-node">
+            <span class="node-kicker">{t.visual.product}</span>
+            <strong>FastAPI</strong>
+          </div>
+          <div class="system-node efferva-node">
+            <img src={withBase("/icon-192.png")} alt="" />
+            <span>Efferva</span>
+          </div>
+          <div class="system-node data-node">
+            <span class="node-kicker">{t.visual.state}</span>
+            <strong>PostgreSQL</strong>
+          </div>
+          <div class="system-node sandbox-node">
+            <span class="node-kicker">{t.visual.execution}</span>
+            <strong>Sandbox</strong>
+          </div>
+          <div class="system-node runtime-node">
+            <span class="node-kicker">{t.visual.runtime}</span>
+            <strong>Codex</strong>
+          </div>
+          <span class="signal signal-one"></span>
+          <span class="signal signal-two"></span>
+          <span class="signal signal-three"></span>
+        </div>
+      </section>
+
+      <section class="signal-strip" aria-label={t.signalLabel}>
+        <div class="container signal-grid">
+          {t.signals.map((signal) => (
+            <div>
+              <strong>{signal.value}</strong>
+              <span>{signal.label}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section id="capabilities" class="section container">
+        <div class="section-heading">
+          <p class="section-kicker">{t.capabilityKicker}</p>
+          <h2>{t.capabilityTitle}</h2>
+          <p>{t.capabilityLead}</p>
+        </div>
+        <div class="capability-grid">
+          {t.capabilities.map((capability, index) => (
+            <article class="capability-card">
+              <span class="card-index">0{index + 1}</span>
+              <div class:list={["capability-icon", `icon-${index + 1}`]} aria-hidden="true">
+                <i></i><i></i><i></i>
+              </div>
+              <h3>{capability.title}</h3>
+              <p>{capability.body}</p>
+              <span class="card-meta">{capability.meta}</span>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section class="section embed-section">
+        <div class="container split-layout">
+          <div class="split-copy">
+            <p class="section-kicker">{t.embedKicker}</p>
+            <h2>{t.embedTitle}</h2>
+            <p>{t.embedBody}</p>
+            <ul class="check-list">
+              {t.embedPoints.map((point) => (
+                <li><span aria-hidden="true">✓</span>{point}</li>
+              ))}
+            </ul>
+          </div>
+          <div class="code-window">
+            <div class="window-bar">
+              <span></span><span></span><span></span>
+              <p>app.py</p>
+            </div>
+            <pre><code><span class="token-keyword">from</span> fastapi <span class="token-keyword">import</span> FastAPI
+<span class="token-keyword">from</span> efferva <span class="token-keyword">import</span> Efferva, Principal
+
+app = FastAPI()
+
+<span class="token-keyword">async def</span> <span class="token-fn">resolve_principal</span>(request):
+    user = request.state.user
+    <span class="token-keyword">return</span> Principal(
+        tenant_id=<span class="token-fn">str</span>(user.organization_id),
+        issuer=<span class="token-string">"my-product"</span>,
+        subject=<span class="token-fn">str</span>(user.id),
+    )
+
+Efferva(identity=resolve_principal).install(
+    app,
+    prefix=<span class="token-string">"/agent"</span>,
+)</code></pre>
+            <div class="code-status">
+              <span></span>{t.codeStatus}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture" class="section container">
+        <div class="section-heading architecture-heading">
+          <p class="section-kicker">{t.architectureKicker}</p>
+          <h2>{t.architectureTitle}</h2>
+          <p>{t.architectureLead}</p>
+        </div>
+        <div class="architecture-flow">
+          {t.architectureSteps.map((step, index) => (
+            <div class="flow-step">
+              <span class="flow-number">0{index + 1}</span>
+              <div>
+                <strong>{step.title}</strong>
+                <p>{step.body}</p>
+              </div>
+              {index < t.architectureSteps.length - 1 && (
+                <span class="flow-line" aria-hidden="true"></span>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section class="section runtime-section">
+        <div class="container runtime-grid">
+          <div class="runtime-visual" aria-hidden="true">
+            <div class="runtime-core">
+              <img src={withBase("/icon-192.png")} alt="" />
+            </div>
+            <span class="runtime-ring ring-one"></span>
+            <span class="runtime-ring ring-two"></span>
+            <span class="runtime-chip chip-one">AG-UI</span>
+            <span class="runtime-chip chip-two">SSE</span>
+            <span class="runtime-chip chip-three">Docker</span>
+            <span class="runtime-chip chip-four">K8s</span>
+          </div>
+          <div>
+            <p class="section-kicker">{t.runtimeKicker}</p>
+            <h2>{t.runtimeTitle}</h2>
+            <p class="runtime-copy">{t.runtimeBody}</p>
+            <div class="runtime-facts">
+              {t.runtimeFacts.map((fact) => (
+                <div><strong>{fact.title}</strong><span>{fact.body}</span></div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta container">
+        <div>
+          <p class="section-kicker">{t.ctaKicker}</p>
+          <h2>{t.ctaTitle}</h2>
+          <p>{t.ctaBody}</p>
+        </div>
+        <div class="hero-actions">
+          <a class="button primary" href={withBase(docsPath)}>
+            {t.readDocs} <span aria-hidden="true">→</span>
+          </a>
+          <a class="button secondary" href={githubUrl} target="_blank" rel="noreferrer">
+            GitHub
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="container footer-inner">
+        <Brand href={withBase(homePath)} compact />
+        <p>© {year} Efferva. Apache-2.0.</p>
+        <div>
+          <a href={withBase(docsPath)}>{t.nav.docs}</a>
+          <a href={githubUrl} target="_blank" rel="noreferrer">GitHub</a>
+        </div>
+      </div>
+    </footer>
+  </div>
+</PortalLayout>

@@ -12,19 +12,19 @@ from uuid import uuid4
 import pytest
 from websockets.asyncio.client import connect
 
-from agentframe import AgentFrame
-from agentframe.config import Settings
-from agentframe.sandbox.conformance import run_provider_conformance
-from agentframe.sandbox.gateway import ExecutorGateway
-from agentframe.sandbox.manager import create_sandbox_provider
-from agentframe.sandbox.runtime import (
+from efferva import Efferva
+from efferva.config import Settings
+from efferva.sandbox.conformance import run_provider_conformance
+from efferva.sandbox.gateway import ExecutorGateway
+from efferva.sandbox.manager import create_sandbox_provider
+from efferva.sandbox.runtime import (
     BufferedSandboxRuntime,
     ProcessTransport,
     TransportEvent,
     TransportExited,
     TransportOutput,
 )
-from agentframe.sandbox.types import (
+from efferva.sandbox.types import (
     ProcessHandle,
     ProcessSpec,
     SandboxCapabilities,
@@ -274,7 +274,7 @@ def test_product_can_register_custom_provider() -> None:
             provider.name = "company-test"
             return provider
 
-        AgentFrame.register_sandbox_provider(
+        Efferva.register_sandbox_provider(
             "company-test",
             provider_factory,
         )

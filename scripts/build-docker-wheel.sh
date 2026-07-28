@@ -12,16 +12,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-codex_revision="$(git -C "${workspace_dir}/codex-fork" rev-parse HEAD)"
-agentframe_revision="$(git -C "${project_dir}" rev-parse HEAD)"
+codex_revision="$(git -C "${workspace_dir}/codex" rev-parse HEAD)"
+efferva_revision="$(git -C "${project_dir}" rev-parse HEAD)"
 docker build \
   --file "${project_dir}/docker/Wheel.Dockerfile" \
   --target wheel \
   --build-arg "CODEX_REVISION=${codex_revision}" \
-  --build-arg "AGENTFRAME_REVISION=${agentframe_revision}" \
+  --build-arg "EFFERVA_REVISION=${efferva_revision}" \
   --output "type=local,dest=${temporary_dir}" \
   "${workspace_dir}"
 
 mkdir -p "${output_dir}"
-find "${output_dir}" -maxdepth 1 -type f -name 'agentframe-*.whl' -delete
-cp "${temporary_dir}"/agentframe-*.whl "${output_dir}/"
+find "${output_dir}" -maxdepth 1 -type f -name 'efferva-*.whl' -delete
+cp "${temporary_dir}"/efferva-*.whl "${output_dir}/"

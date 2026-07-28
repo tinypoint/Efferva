@@ -1,39 +1,39 @@
-name: agentframe
+name: efferva
 
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: agentframe
-      POSTGRES_USER: agentframe
-      POSTGRES_PASSWORD: agentframe
+      POSTGRES_DB: efferva
+      POSTGRES_USER: efferva
+      POSTGRES_PASSWORD: efferva
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agentframe -d agentframe"]
+      test: ["CMD-SHELL", "pg_isready -U efferva -d efferva"]
       interval: 2s
       timeout: 3s
       retries: 30
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
-      - agentframe
+      - efferva
 
   sandbox-image:
-    image: agentframe-sandbox:local
+    image: efferva-sandbox:local
     build:
       context: ..
-      dockerfile: agent-framework/docker/Dockerfile
+      dockerfile: Efferva/docker/Dockerfile
       target: sandbox
     entrypoint: ["/bin/true"]
     networks:
-      - agentframe
+      - efferva
 
   app:
-    image: agentframe-app:local
+    image: efferva-app:local
     restart: unless-stopped
     build:
       context: ..
-      dockerfile: agent-framework/docker/Dockerfile
+      dockerfile: Efferva/docker/Dockerfile
       target: app
     depends_on:
       postgres:
@@ -41,33 +41,33 @@ services:
       sandbox-image:
         condition: service_completed_successfully
     environment:
-      AGENTFRAME_DATABASE_URL: postgresql://agentframe:agentframe@postgres:5432/agentframe
-      AGENTFRAME_SANDBOX_PROVIDER: docker
-      AGENTFRAME_SANDBOX_IMAGE: agentframe-sandbox:local
-      AGENTFRAME_DOCKER_NETWORK: agentframe
-      AGENTFRAME_PUBLIC_BASE_URL: http://localhost:8080
-      CODEX_HOME: /var/lib/agentframe/codex
+      EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
+      EFFERVA_SANDBOX_PROVIDER: docker
+      EFFERVA_SANDBOX_IMAGE: efferva-sandbox:local
+      EFFERVA_DOCKER_NETWORK: efferva
+      EFFERVA_PUBLIC_BASE_URL: http://localhost:8080
+      CODEX_HOME: /var/lib/efferva/codex
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
-      - "${AGENTFRAME_HTTP_PORT:-8080}:8080"
+      - "${EFFERVA_HTTP_PORT:-8080}:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - codex-home:/var/lib/agentframe/codex
+      - codex-home:/var/lib/efferva/codex
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/healthz"]
       interval: 3s
       timeout: 3s
       retries: 40
     networks:
-      - agentframe
+      - efferva
 
 volumes:
   postgres-data:
   codex-home:
 
 networks:
-  agentframe:
-    name: agentframe
+  efferva:
+    name: efferva
     external: true

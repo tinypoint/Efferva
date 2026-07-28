@@ -1,0 +1,40 @@
+---
+import mark from "../assets/efferva-mark.png";
+import { withBase } from "../lib/urls";
+
+interface Props {
+  href?: string;
+  compact?: boolean;
+}
+
+const { href = withBase("/"), compact = false } = Astro.props;
+---
+
+<a class:list={["brand", { compact }]} href={href} aria-label="Efferva home">
+  <img src={mark.src} width="44" height="44" alt="" />
+  <span>Efferva</span>
+</a>
+
+<style>
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.68rem;
+    color: #f8f7ff;
+    font-size: 1.1rem;
+    font-weight: 720;
+    letter-spacing: -0.035em;
+    text-decoration: none;
+  }
+
+  img {
+    width: 2rem;
+    height: 2rem;
+    object-fit: contain;
+  }
+
+  .compact img {
+    width: 1.55rem;
+    height: 1.55rem;
+  }
+</style>

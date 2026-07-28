@@ -7,31 +7,31 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg import sql
 
-from agentframe import Capability, Principal
-from agentframe.db import Database
-from agentframe.events import (
+from efferva import Capability, Principal
+from efferva.db import Database
+from efferva.events import (
     run_finished,
     text_message_content,
     text_message_end,
     text_message_start,
 )
-from agentframe.identity import (
+from efferva.identity import (
     LEGACY_ISSUER,
     LEGACY_TENANT_ID,
     ForbiddenError,
 )
-from agentframe.repository import ConflictError, NotFoundError, SystemRepository
+from efferva.repository import ConflictError, NotFoundError, SystemRepository
 
 
 def _database_url() -> str:
-    value = os.getenv("AGENTFRAME_TEST_DATABASE_URL")
+    value = os.getenv("EFFERVA_TEST_DATABASE_URL")
     if not value:
-        pytest.skip("AGENTFRAME_TEST_DATABASE_URL is not set")
+        pytest.skip("EFFERVA_TEST_DATABASE_URL is not set")
     return value
 
 
 async def _migrate(database: Database) -> None:
-    migrations_dir = files("agentframe.migrations")
+    migrations_dir = files("efferva.migrations")
     migrations = [
         (path.name, path.read_text())
         for path in sorted(migrations_dir.iterdir(), key=lambda item: item.name)
@@ -44,8 +44,8 @@ async def _migrate(database: Database) -> None:
 async def test_multi_tenant_migration_backfills_existing_sessions() -> None:
     database = Database(_database_url())
     await database.open()
-    schema_name = f"agentframe_migration_{uuid4().hex}"
-    migrations_dir = files("agentframe.migrations")
+    schema_name = f"efferva_migration_{uuid4().hex}"
+    migrations_dir = files("efferva.migrations")
     try:
         async with database.connection() as connection:
             await connection.execute(

@@ -4,9 +4,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
 workspace_dir="$(cd "${project_dir}/.." && pwd)"
-output_dir="${AGENTFRAME_BUILD_OUTPUT_DIR:-${project_dir}/dist/local}"
-profile="${AGENTFRAME_BUILD_PROFILE:-container}"
-runtime_binary="${AGENTFRAME_BUILD_RUNTIME_BINARY:-}"
+output_dir="${EFFERVA_BUILD_OUTPUT_DIR:-${project_dir}/dist/local}"
+profile="${EFFERVA_BUILD_PROFILE:-container}"
+runtime_binary="${EFFERVA_BUILD_RUNTIME_BINARY:-}"
 
 if [[ -z "${runtime_binary}" ]]; then
   if command -v cargo >/dev/null 2>&1; then
@@ -24,19 +24,19 @@ if [[ -z "${runtime_binary}" ]]; then
     --manifest-path "${project_dir}/Cargo.toml" \
     --locked \
     --profile "${profile}" \
-    --package agentframe-codex-runtime
-  runtime_binary="${project_dir}/target/${profile}/agentframe-codex-runtime"
+    --package efferva-codex-runtime
+  runtime_binary="${project_dir}/target/${profile}/efferva-codex-runtime"
 fi
 
-codex_revision="${AGENTFRAME_BUILD_CODEX_REVISION:-$(
-  git -C "${workspace_dir}/codex-fork" rev-parse HEAD
+codex_revision="${EFFERVA_BUILD_CODEX_REVISION:-$(
+  git -C "${workspace_dir}/codex" rev-parse HEAD
 )}"
-agentframe_revision="${AGENTFRAME_BUILD_REVISION:-$(
+efferva_revision="${EFFERVA_BUILD_REVISION:-$(
   git -C "${project_dir}" rev-parse HEAD
 )}"
 
 mkdir -p "${output_dir}"
-AGENTFRAME_BUILD_RUNTIME_BINARY="${runtime_binary}" \
-AGENTFRAME_BUILD_CODEX_REVISION="${codex_revision}" \
-AGENTFRAME_BUILD_REVISION="${agentframe_revision}" \
+EFFERVA_BUILD_RUNTIME_BINARY="${runtime_binary}" \
+EFFERVA_BUILD_CODEX_REVISION="${codex_revision}" \
+EFFERVA_BUILD_REVISION="${efferva_revision}" \
   uv build --wheel --out-dir "${output_dir}" "${project_dir}"

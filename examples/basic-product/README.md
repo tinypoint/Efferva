@@ -1,13 +1,13 @@
 # Basic Product
 
 这个示例模拟一个已经拥有 Cookie 登录体系的产品。产品只负责把当前用户转换成
-`Principal`，Session、Thread、Run、WebUI、沙盒和多实例状态都由 AgentFrame 提供。
+`Principal`，Session、Thread、Run、WebUI、沙盒和多实例状态都由 Efferva 提供。
 
-先安装已构建的 AgentFrame 平台 Wheel，再启动产品：
+先安装已构建的 Efferva 平台 Wheel，再启动产品：
 
 ```bash
 python -m venv .product-venv
-.product-venv/bin/pip install dist/local/agentframe-*.whl
+.product-venv/bin/pip install dist/local/efferva-*.whl
 .product-venv/bin/uvicorn --app-dir examples/basic-product main:app
 ```
 

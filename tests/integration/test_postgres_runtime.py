@@ -17,7 +17,7 @@ class RuntimeClient:
     @classmethod
     async def start(cls, binary: Path, database_url: str) -> RuntimeClient:
         environment = os.environ.copy()
-        environment["AGENTFRAME_DATABASE_URL"] = database_url
+        environment["EFFERVA_DATABASE_URL"] = database_url
         process = await asyncio.create_subprocess_exec(
             str(binary),
             stdin=asyncio.subprocess.PIPE,
@@ -30,8 +30,8 @@ class RuntimeClient:
             "initialize",
             {
                 "clientInfo": {
-                    "name": "agentframe-test",
-                    "title": "AgentFrame test",
+                    "name": "efferva-test",
+                    "title": "Efferva test",
                     "version": "0.1.0",
                 },
                 "capabilities": {"experimentalApi": True},
@@ -70,14 +70,14 @@ class RuntimeClient:
 
 
 def _configuration() -> tuple[Path, str]:
-    database_url = os.getenv("AGENTFRAME_TEST_DATABASE_URL")
+    database_url = os.getenv("EFFERVA_TEST_DATABASE_URL")
     binary_value = os.getenv(
-        "AGENTFRAME_TEST_RUNTIME_BINARY",
-        "target/debug/agentframe-codex-runtime",
+        "EFFERVA_TEST_RUNTIME_BINARY",
+        "target/debug/efferva-codex-runtime",
     )
     binary = Path(binary_value).resolve()
     if not database_url:
-        pytest.skip("AGENTFRAME_TEST_DATABASE_URL is not set")
+        pytest.skip("EFFERVA_TEST_DATABASE_URL is not set")
     if not binary.exists():
         pytest.skip(f"runtime binary not found: {binary}")
     return binary, database_url

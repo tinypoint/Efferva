@@ -254,38 +254,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentframe-codex-runtime"
-version = "0.1.0"
-dependencies = [
- "agentframe-postgres-thread-store",
- "anyhow",
- "clap",
- "codex-app-server",
- "codex-arg0",
- "codex-config",
- "codex-protocol",
- "codex-thread-store",
- "codex-utils-cli",
-]
-
-[[package]]
-name = "agentframe-postgres-thread-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "codex-git-utils",
- "codex-protocol",
- "codex-rollout",
- "codex-state",
- "codex-thread-store",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4475,6 +4443,38 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "efferva-codex-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "codex-app-server",
+ "codex-arg0",
+ "codex-config",
+ "codex-protocol",
+ "codex-thread-store",
+ "codex-utils-cli",
+ "efferva-postgres-thread-store",
+]
+
+[[package]]
+name = "efferva-postgres-thread-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "codex-git-utils",
+ "codex-protocol",
+ "codex-rollout",
+ "codex-state",
+ "codex-thread-store",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

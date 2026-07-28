@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cluster_name="${AGENTFRAME_KIND_CLUSTER:-agentframe}"
+cluster_name="${EFFERVA_KIND_CLUSTER:-efferva}"
 context="kind-${cluster_name}"
-namespace="agentframe"
+namespace="efferva"
 
 kubectl --context "${context}" --namespace "${namespace}" rollout status \
-  deployment/agentframe --timeout=180s
+  deployment/efferva --timeout=180s
 app_pods="$(kubectl --context "${context}" --namespace "${namespace}" get pods \
-  --selector app=agentframe \
+  --selector app=efferva \
   --field-selector status.phase=Running \
   --output jsonpath='{range .items[*]}{.metadata.name}{" "}{end}')"
 read -r pod_one pod_two <<<"${app_pods}"
 test -n "${pod_one}"
 test -n "${pod_two}"
 
-alice_header="x-agentframe-demo-user: alice"
-bob_header="x-agentframe-demo-user: bob"
-admin_header="x-agentframe-demo-user: admin"
+alice_header="x-efferva-demo-user: alice"
+bob_header="x-efferva-demo-user: bob"
+admin_header="x-efferva-demo-user: admin"
 
 session_json="$(kubectl --context "${context}" --namespace "${namespace}" \
   exec "${pod_one}" --container app -- \

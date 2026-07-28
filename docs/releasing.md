@@ -21,17 +21,17 @@ manylinux Wheel，也不应在受控产品镜像之外宣称跨发行版兼容�
 
 发布构建必须固定：
 
-- AgentFrame Git revision；
+- Efferva Git revision；
 - `tinypoint/codex` fork revision；
 - Rust toolchain；
 - 构建平台和架构。
 
 当前 Codex fork revision 由 `.github/workflows/wheels.yml` 的 `CODEX_REVISION` 指定。
 构建 Hook 把两个源码 revision、平台 tag 与 Runtime SHA-256 同时写入包内
-`agentframe/_build_info.json` 和 Wheel 的 `.dist-info/extra_metadata`。线上可以执行：
+`efferva/_build_info.json` 和 Wheel 的 `.dist-info/extra_metadata`。线上可以执行：
 
 ```python
-from agentframe import runtime_build_info
+from efferva import runtime_build_info
 
 print(runtime_build_info())
 ```
@@ -50,7 +50,7 @@ print(runtime_build_info())
 
 ```bash
 ./scripts/build-docker-wheel.sh
-./scripts/wheel-smoke.sh dist/docker/agentframe-*.whl
+./scripts/wheel-smoke.sh dist/docker/efferva-*.whl
 ```
 
 Smoke test 在没有 Rust、没有 Codex 源码的 Debian 12 `python:3.13-slim-bookworm` 容器中
@@ -73,8 +73,8 @@ Smoke test 在没有 Rust、没有 Codex 源码的 Debian 12 `python:3.13-slim-b
 
 - workflow input `publish=true`；
 - `repository_url` 指向内部上传端点；
-- Repository secrets `AGENTFRAME_REGISTRY_USERNAME` 和
-  `AGENTFRAME_REGISTRY_PASSWORD`。
+- Repository secrets `EFFERVA_REGISTRY_USERNAME` 和
+  `EFFERVA_REGISTRY_PASSWORD`。
 
 未配置 Registry 地址和凭据时流水线只构建、测试并保存 artifact，不会猜测发布目标。公开
 PyPI 发布应在内部 Registry 与真实产品接入稳定后作为单独审批流程增加。
@@ -88,5 +88,5 @@ PyPI 发布应在内部 Registry 与真实产品接入稳定后作为单独审�
 - 对产物运行 manylinux 合规审计和跨发行版安装矩阵；
 - 合规后再把 Linux tag 从 `linux_*` 改为相应 `manylinux_*`。
 
-在这些验收完成前，内部 Registry 的 Linux Wheel 只供 AgentFrame 提供的 Debian 12
+在这些验收完成前，内部 Registry 的 Linux Wheel 只供 Efferva 提供的 Debian 12
 产品镜像消费。
