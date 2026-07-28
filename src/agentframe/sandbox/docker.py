@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
-import os
-import pty
-import signal
-import struct
-import termios
+import re
 from collections.abc import AsyncIterator
+from typing import Any
+
+import aiodocker
+from aiodocker.exceptions import DockerError
 
 from agentframe.config import Settings
-from agentframe.sandbox.command import command
 from agentframe.sandbox.runtime import (
     BufferedSandboxRuntime,
     ProcessTransport,
@@ -30,159 +28,97 @@ from agentframe.sandbox.types import (
 
 _PROVIDER_LABEL = "agentframe.provider-contract"
 _PROVIDER_VERSION = "v1"
+_MEMORY_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>[kmgt]?i?b?)?$", re.I)
+_MEMORY_UNITS = {
+    "": 1,
+    "b": 1,
+    "k": 1024,
+    "kb": 1024,
+    "ki": 1024,
+    "kib": 1024,
+    "m": 1024**2,
+    "mb": 1024**2,
+    "mi": 1024**2,
+    "mib": 1024**2,
+    "g": 1024**3,
+    "gb": 1024**3,
+    "gi": 1024**3,
+    "gib": 1024**3,
+    "t": 1024**4,
+    "tb": 1024**4,
+    "ti": 1024**4,
+    "tib": 1024**4,
+}
 
 
-class _DockerPipeTransport(ProcessTransport):
+class _DockerExecTransport(ProcessTransport):
     def __init__(
         self,
-        process: asyncio.subprocess.Process,
-        container: str,
+        *,
+        process: Any,
+        stream: Any,
+        container: Any,
         pid_file: str,
+        tty: bool,
     ) -> None:
         self._process = process
+        self._stream = stream
         self._container = container
         self._pid_file = pid_file
-        self._queue: asyncio.Queue[TransportEvent | None] = asyncio.Queue()
-        self._task = asyncio.create_task(self._collect())
-
-    async def _collect(self) -> None:
-        async def pump(
-            reader: asyncio.StreamReader | None,
-            stream: str,
-        ) -> None:
-            if reader is None:
-                return
-            while chunk := await reader.read(64 * 1024):
-                await self._queue.put(TransportOutput(stream, chunk))  # type: ignore[arg-type]
-
-        stdout_task = asyncio.create_task(pump(self._process.stdout, "stdout"))
-        stderr_task = asyncio.create_task(pump(self._process.stderr, "stderr"))
-        exit_code = await self._process.wait()
-        await asyncio.gather(stdout_task, stderr_task)
-        await self._queue.put(TransportExited(exit_code))
-        await self._queue.put(None)
+        self._tty = tty
+        self._closed = False
+        self._forced_exit_code: int | None = None
 
     async def events(self) -> AsyncIterator[TransportEvent]:
-        while (event := await self._queue.get()) is not None:
-            yield event
-
-    async def write(self, data: bytes) -> None:
-        if self._process.stdin is None or self._process.stdin.is_closing():
-            raise BrokenPipeError("docker exec stdin is closed")
-        self._process.stdin.write(data)
-        await self._process.stdin.drain()
-
-    async def resize(self, cols: int, rows: int) -> None:
-        raise RuntimeError("process has no PTY")
-
-    async def terminate(self) -> None:
-        await _terminate_container_process(self._container, self._pid_file, self._process)
-
-    async def close(self) -> None:
-        if not self._task.done():
-            await self._task
-
-
-class _DockerPtyTransport(ProcessTransport):
-    def __init__(
-        self,
-        process: asyncio.subprocess.Process,
-        master_fd: int,
-        container: str,
-        pid_file: str,
-    ) -> None:
-        self._process = process
-        self._master_fd = master_fd
-        self._container = container
-        self._pid_file = pid_file
-        self._queue: asyncio.Queue[TransportEvent | None] = asyncio.Queue()
-        self._task = asyncio.create_task(self._collect())
-
-    async def _collect(self) -> None:
         try:
-            while True:
-                try:
-                    chunk = await asyncio.to_thread(os.read, self._master_fd, 64 * 1024)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                await self._queue.put(TransportOutput("pty", chunk))
-        finally:
-            exit_code = await self._process.wait()
-            await self._queue.put(TransportExited(exit_code))
-            await self._queue.put(None)
-
-    async def events(self) -> AsyncIterator[TransportEvent]:
-        while (event := await self._queue.get()) is not None:
-            yield event
+            while message := await self._stream.read_out():
+                stream = "pty" if self._tty else ("stderr" if message.stream == 2 else "stdout")
+                if message.data:
+                    yield TransportOutput(stream, message.data)
+        except (ConnectionError, RuntimeError):
+            if self._forced_exit_code is None:
+                raise
+        exit_code = (
+            self._forced_exit_code
+            if self._forced_exit_code is not None
+            else await _wait_for_exec_exit(self._process)
+        )
+        yield TransportExited(exit_code)
 
     async def write(self, data: bytes) -> None:
-        await asyncio.to_thread(os.write, self._master_fd, data)
+        try:
+            await self._stream.write_in(data)
+        except (ConnectionError, RuntimeError) as error:
+            raise BrokenPipeError("Docker Exec stdin is closed") from error
 
     async def resize(self, cols: int, rows: int) -> None:
+        if not self._tty:
+            raise RuntimeError("process has no PTY")
         if cols <= 0 or rows <= 0:
             raise ValueError("PTY size must be positive")
-        packed = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, packed)
-        self._process.send_signal(signal.SIGWINCH)
+        await self._process.resize(w=cols, h=rows)
 
     async def terminate(self) -> None:
-        await _terminate_container_process(self._container, self._pid_file, self._process)
+        # Mark the caller-requested exit before sending the signal. The stream reader
+        # can observe EOF as soon as the process group dies; setting this afterwards
+        # leaves a race where both coroutines try to inspect a hijacked Exec session.
+        self._forced_exit_code = 143
+        try:
+            await _terminate_container_process(self._container, self._pid_file)
+        except Exception:
+            self._forced_exit_code = None
+            raise
+        await self._stream.close()
 
     async def close(self) -> None:
-        with contextlib.suppress(OSError):
-            os.close(self._master_fd)
-        if not self._task.done():
-            await self._task
-
-
-async def _terminate_container_process(
-    container: str,
-    pid_file: str,
-    client_process: asyncio.subprocess.Process,
-) -> None:
-    if client_process.returncode is not None:
-        return
-    kill_script = (
-        'if [ -r "$1" ]; then pid="$(cat "$1")"; /bin/kill -TERM -- "-$pid" 2>/dev/null || true; fi'
-    )
-    await command(
-        "docker",
-        "exec",
-        container,
-        "/bin/sh",
-        "-c",
-        kill_script,
-        "agentframe-kill",
-        pid_file,
-        check=False,
-    )
-    try:
-        await asyncio.wait_for(client_process.wait(), 2)
-        return
-    except TimeoutError:
-        pass
-    await command(
-        "docker",
-        "exec",
-        container,
-        "/bin/sh",
-        "-c",
-        (
-            'if [ -r "$1" ]; then pid="$(cat "$1")"; '
-            '/bin/kill -KILL -- "-$pid" 2>/dev/null || true; fi'
-        ),
-        "agentframe-kill",
-        pid_file,
-        check=False,
-    )
-    with contextlib.suppress(ProcessLookupError):
-        client_process.terminate()
+        if self._closed:
+            return
+        self._closed = True
+        await self._stream.__aexit__(None, None, None)
 
 
 class DockerSandboxRuntime(BufferedSandboxRuntime):
-    def __init__(self, container: str, workspace_path: str) -> None:
+    def __init__(self, container: Any, workspace_path: str) -> None:
         super().__init__(workspace_path)
         self.container = container
 
@@ -197,53 +133,31 @@ class DockerSandboxRuntime(BufferedSandboxRuntime):
             'exec 3<&0; setsid "$@" <&3 3<&- & child="$!"; '
             'exec 3<&-; echo "$child" > "$pid_file"; wait "$child"'
         )
-        argv = [
-            "docker",
-            "exec",
-            "--interactive",
-            "--workdir",
-            spec.cwd,
-        ]
-        for key, value in spec.env.items():
-            argv.extend(["--env", f"{key}={value}"])
-        if spec.tty:
-            argv.append("--tty")
-        argv.extend(
+        process = await self.container.exec(
             [
-                self.container,
                 "/bin/sh",
                 "-c",
                 wrapper,
                 "agentframe-process",
                 pid_file,
                 *spec.argv,
-            ]
+            ],
+            stdout=True,
+            stderr=not spec.tty,
+            stdin=True,
+            tty=spec.tty,
+            environment=spec.env,
+            workdir=spec.cwd,
         )
-
-        if spec.tty:
-            master_fd, slave_fd = pty.openpty()
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *argv,
-                    stdin=slave_fd,
-                    stdout=slave_fd,
-                    stderr=slave_fd,
-                )
-            finally:
-                os.close(slave_fd)
-            return _DockerPtyTransport(process, master_fd, self.container, pid_file)
-
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=(
-                asyncio.subprocess.PIPE
-                if spec.pipe_stdin or spec.initial_stdin is not None
-                else asyncio.subprocess.DEVNULL
-            ),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        stream = process.start()
+        await stream.__aenter__()
+        return _DockerExecTransport(
+            process=process,
+            stream=stream,
+            container=self.container,
+            pid_file=pid_file,
+            tty=spec.tty,
         )
-        return _DockerPipeTransport(process, self.container, pid_file)
 
 
 class DockerSandboxProvider:
@@ -262,10 +176,25 @@ class DockerSandboxProvider:
         self._settings = settings
         self._lock = asyncio.Lock()
         self._runtimes: dict[str, DockerSandboxRuntime] = {}
+        self._client: aiodocker.Docker | None = None
 
     async def ensure_workspace(self, context: SandboxContext) -> WorkspaceHandle:
         volume = f"af-workspace-{context.session_id.hex}"
-        await command("docker", "volume", "create", volume)
+        client = self._docker()
+        try:
+            await client.volumes.get(volume)
+        except DockerError as error:
+            if error.status != 404:
+                raise
+            await client.volumes.create(
+                {
+                    "Name": volume,
+                    "Labels": {
+                        "agentframe.session": str(context.session_id),
+                        _PROVIDER_LABEL: _PROVIDER_VERSION,
+                    },
+                }
+            )
         return WorkspaceHandle(
             provider=self.name,
             external_ref=volume,
@@ -277,67 +206,50 @@ class DockerSandboxProvider:
         context: SandboxContext,
         workspace: WorkspaceHandle,
     ) -> SandboxHandle:
-        container = f"af-sandbox-{context.session_id.hex}"
+        container_name = f"af-sandbox-{context.session_id.hex}"
+        client = self._docker()
         async with self._lock:
             await self._ensure_network()
-            exists, _, _ = await command("docker", "inspect", container, check=False)
-            if exists == 0:
-                _, contract, _ = await command(
-                    "docker",
-                    "inspect",
-                    "--format",
-                    f'{{{{index .Config.Labels "{_PROVIDER_LABEL}"}}}}',
-                    container,
-                    check=False,
+            container = await self._get_container(container_name)
+            if container is not None:
+                details = await container.show()
+                labels = details.get("Config", {}).get("Labels") or {}
+                if labels.get(_PROVIDER_LABEL) != _PROVIDER_VERSION:
+                    await container.delete(force=True)
+                    container = None
+            if container is None:
+                container = await client.containers.create(
+                    {
+                        "Image": self._settings.sandbox_image,
+                        "Entrypoint": ["sleep"],
+                        "Cmd": ["infinity"],
+                        "Labels": {
+                            "agentframe.session": str(context.session_id),
+                            _PROVIDER_LABEL: _PROVIDER_VERSION,
+                        },
+                        "HostConfig": {
+                            "Binds": [f"{workspace.external_ref}:{context.workspace_path}"],
+                            "CapDrop": ["ALL"],
+                            "Memory": _parse_memory(self._settings.docker_sandbox_memory_limit),
+                            "NanoCpus": int(
+                                float(self._settings.sandbox_cpu_limit) * 1_000_000_000
+                            ),
+                            "NetworkMode": self._settings.docker_network,
+                            "PidsLimit": self._settings.sandbox_pids_limit,
+                            "RestartPolicy": {"Name": "unless-stopped"},
+                            "SecurityOpt": ["no-new-privileges"],
+                        },
+                    },
+                    name=container_name,
                 )
-                if contract != _PROVIDER_VERSION:
-                    await command("docker", "rm", "--force", container)
-                    exists = 1
-            if exists != 0:
-                await command(
-                    "docker",
-                    "run",
-                    "--detach",
-                    "--name",
-                    container,
-                    "--restart",
-                    "unless-stopped",
-                    "--cap-drop",
-                    "ALL",
-                    "--security-opt",
-                    "no-new-privileges",
-                    "--cpus",
-                    self._settings.sandbox_cpu_limit,
-                    "--memory",
-                    self._settings.docker_sandbox_memory_limit,
-                    "--pids-limit",
-                    str(self._settings.sandbox_pids_limit),
-                    "--network",
-                    self._settings.docker_network,
-                    "--volume",
-                    f"{workspace.external_ref}:{context.workspace_path}",
-                    "--label",
-                    f"agentframe.session={context.session_id}",
-                    "--label",
-                    f"{_PROVIDER_LABEL}={_PROVIDER_VERSION}",
-                    "--entrypoint",
-                    "sleep",
-                    self._settings.sandbox_image,
-                    "infinity",
-                )
+                await container.start()
             else:
-                _, running, _ = await command(
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.State.Running}}",
-                    container,
-                )
-                if running != "true":
-                    await command("docker", "start", container)
+                details = await container.show()
+                if not bool(details.get("State", {}).get("Running")):
+                    await container.start()
         return SandboxHandle(
             provider=self.name,
-            external_ref=container,
+            external_ref=container_name,
             workspace_id=context.workspace_id,
             state={"workspacePath": context.workspace_path},
         )
@@ -345,8 +257,9 @@ class DockerSandboxProvider:
     async def connect(self, sandbox: SandboxHandle) -> DockerSandboxRuntime:
         runtime = self._runtimes.get(sandbox.external_ref)
         if runtime is None:
+            container = await self._docker().containers.get(sandbox.external_ref)
             runtime = DockerSandboxRuntime(
-                sandbox.external_ref,
+                container,
                 str(sandbox.state.get("workspacePath", self._settings.workspace_path)),
             )
             self._runtimes[sandbox.external_ref] = runtime
@@ -356,29 +269,96 @@ class DockerSandboxProvider:
         runtime = self._runtimes.pop(sandbox.external_ref, None)
         if runtime is not None:
             await runtime.close()
-        await command("docker", "stop", sandbox.external_ref, check=False)
+        container = await self._get_container(sandbox.external_ref)
+        if container is not None:
+            with contextlib.suppress(DockerError):
+                await container.stop(t=2)
 
     async def destroy(self, sandbox: SandboxHandle) -> None:
         runtime = self._runtimes.pop(sandbox.external_ref, None)
         if runtime is not None:
             await runtime.close()
-        await command("docker", "rm", "--force", sandbox.external_ref, check=False)
+        container = await self._get_container(sandbox.external_ref)
+        if container is not None:
+            await container.delete(force=True)
 
     async def destroy_workspace(self, workspace: WorkspaceHandle) -> None:
-        await command("docker", "volume", "rm", workspace.external_ref, check=False)
+        try:
+            volume = await self._docker().volumes.get(workspace.external_ref)
+        except DockerError as error:
+            if error.status == 404:
+                return
+            raise
+        await volume.delete(force=True)
 
     async def close(self) -> None:
         for runtime in tuple(self._runtimes.values()):
             await runtime.close()
         self._runtimes.clear()
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
+    def _docker(self) -> aiodocker.Docker:
+        if self._client is None:
+            self._client = aiodocker.Docker()
+        return self._client
+
+    async def _get_container(self, name: str) -> Any | None:
+        try:
+            return await self._docker().containers.get(name)
+        except DockerError as error:
+            if error.status == 404:
+                return None
+            raise
 
     async def _ensure_network(self) -> None:
-        exists, _, _ = await command(
-            "docker",
-            "network",
-            "inspect",
-            self._settings.docker_network,
-            check=False,
-        )
-        if exists != 0:
-            await command("docker", "network", "create", self._settings.docker_network)
+        client = self._docker()
+        try:
+            await client.networks.get(self._settings.docker_network)
+        except DockerError as error:
+            if error.status != 404:
+                raise
+            await client.networks.create(
+                {
+                    "Name": self._settings.docker_network,
+                    "CheckDuplicate": True,
+                }
+            )
+
+
+async def _terminate_container_process(container: Any, pid_file: str) -> None:
+    script = (
+        'if [ -r "$1" ]; then pid="$(cat "$1")"; '
+        '/bin/kill -TERM -- "-$pid" 2>/dev/null || true; sleep 0.2; '
+        '/bin/kill -KILL -- "-$pid" 2>/dev/null || true; fi'
+    )
+    process = await container.exec(
+        ["/bin/sh", "-c", script, "agentframe-kill", pid_file],
+        stdout=True,
+        stderr=True,
+        stdin=False,
+        tty=False,
+    )
+    stream = process.start()
+    async with stream:
+        while await stream.read_out():
+            pass
+
+
+async def _wait_for_exec_exit(process: Any) -> int:
+    async with asyncio.timeout(10):
+        while True:
+            details = await process.inspect()
+            if not details["Running"]:
+                exit_code = details.get("ExitCode")
+                return int(exit_code) if exit_code is not None else 1
+            await asyncio.sleep(0.01)
+
+
+def _parse_memory(value: str) -> int:
+    match = _MEMORY_PATTERN.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(f"invalid Docker memory limit: {value!r}")
+    unit = (match.group("unit") or "").lower()
+    return int(float(match.group("value")) * _MEMORY_UNITS[unit])

@@ -1,7 +1,8 @@
-ARG AGENTFRAME_BASE_IMAGE=agentframe-runtime:local
-FROM ${AGENTFRAME_BASE_IMAGE}
+FROM python:3.13-slim-bookworm
 
 WORKDIR /product
-COPY auth.py main.py ./
+COPY dist/docker/agentframe-*.whl /tmp/wheels/
+RUN pip install --no-cache-dir /tmp/wheels/*.whl && rm -rf /tmp/wheels
+COPY examples/basic-product/auth.py examples/basic-product/main.py ./
 
-CMD ["main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

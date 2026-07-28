@@ -5,6 +5,7 @@ description = "A Codex-based, AG-UI compatible agent framework for Docker and Ku
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiodocker>=0.27,<0.28",
     "aiohttp>=3.12,<4",
     "fastapi>=0.116,<1",
     "kubernetes-asyncio>=33,<34",
@@ -16,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "httpx2>=2,<3",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.1,<2",
     "ruff>=0.12,<1",
@@ -25,11 +27,17 @@ dev = [
 agentframe = "agentframe.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = [
+    "hatchling>=1.27,<2",
+    "packaging>=24,<27",
+]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentframe"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "build_hooks/runtime.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

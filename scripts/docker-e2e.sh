@@ -33,6 +33,9 @@ docker network inspect agentframe >/dev/null 2>&1 || docker network create agent
 python3 "${project_dir}/tests/e2e/mock_responses.py" &
 mock_pid="$!"
 
+if [[ "${AGENTFRAME_SKIP_WHEEL_BUILD:-0}" != "1" ]]; then
+  "${project_dir}/scripts/build-docker-wheel.sh"
+fi
 docker compose "${compose_args[@]}" build app sandbox-image
 docker compose "${compose_args[@]}" up --detach --no-build
 for _ in $(seq 1 120); do

@@ -1,24 +1,33 @@
-.PHONY: check docker-runtime docker-example docker-up docker-down docker-e2e kind-up kind-up-cliproxy kind-smoke kind-e2e kind-down kind-port-forward
+.PHONY: check wheel wheel-docker wheel-smoke docker-runtime docker-example docker-up docker-down docker-e2e kind-up kind-up-cliproxy kind-smoke kind-e2e kind-down kind-port-forward
 
 check:
 	uv run ruff check .
 	uv run ruff format --check .
 	cargo check --workspace
 
-docker-runtime:
+wheel:
+	./scripts/build-wheel.sh
+
+wheel-docker:
+	./scripts/build-docker-wheel.sh
+
+wheel-smoke: wheel-docker
+	./scripts/wheel-smoke.sh $$(find dist/docker -maxdepth 1 -name 'agentframe-*.whl' -print -quit)
+
+docker-runtime: wheel-docker
 	docker build \
 		--file docker/Dockerfile \
 		--target runtime \
 		--tag agentframe-runtime:local \
 		..
 
-docker-example: docker-runtime
+docker-example: wheel-docker
 	docker build \
 		--file examples/basic-product/Dockerfile \
 		--tag agentframe-basic-product:local \
-		examples/basic-product
+		.
 
-docker-up:
+docker-up: wheel-docker
 	@docker network inspect agentframe >/dev/null 2>&1 || docker network create agentframe
 	docker compose up --build --detach
 	docker compose ps

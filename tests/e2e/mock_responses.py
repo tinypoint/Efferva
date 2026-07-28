@@ -35,10 +35,20 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
         inputs = body.get("input") or []
-        has_tool_output = any(
-            item.get("type") == "function_call_output" and item.get("call_id") == "sandbox-proof"
-            for item in inputs
-        )
+        has_tool_output = any(item.get("type") == "function_call_output" for item in inputs)
+        serialized = json.dumps(body)
+        if "thread-a.txt" in serialized:
+            call_id = "thread-a"
+            command = "printf parallel-a > /workspace/thread-a.txt"
+            response_text = "parallel-a"
+        elif "thread-b.txt" in serialized:
+            call_id = "thread-b"
+            command = "printf parallel-b > /workspace/thread-b.txt"
+            response_text = "parallel-b"
+        else:
+            call_id = "sandbox-proof"
+            command = "printf sandbox-ok > /workspace/proof.txt && cat /workspace/proof.txt"
+            response_text = "sandbox-ok"
 
         if has_tool_output:
             events = [
@@ -48,7 +58,7 @@ class ResponsesHandler(BaseHTTPRequestHandler):
                         "type": "message",
                         "role": "assistant",
                         "id": "message-1",
-                        "content": [{"type": "output_text", "text": "sandbox-ok"}],
+                        "content": [{"type": "output_text", "text": response_text}],
                     },
                 },
                 _completed("response-2"),
@@ -63,14 +73,11 @@ class ResponsesHandler(BaseHTTPRequestHandler):
                     "type": "response.output_item.done",
                     "item": {
                         "type": "function_call",
-                        "call_id": "sandbox-proof",
+                        "call_id": call_id,
                         "name": "exec_command",
                         "arguments": json.dumps(
                             {
-                                "cmd": (
-                                    "printf sandbox-ok > /workspace/proof.txt "
-                                    "&& cat /workspace/proof.txt"
-                                ),
+                                "cmd": command,
                                 "login": False,
                             }
                         ),

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql://agentframe:agentframe@localhost:5432/agentframe"
-    runtime_binary: Path = Path("agentframe-codex-runtime")
+    runtime_binary: Path | None = None
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
     sandbox_provider: str = Field(

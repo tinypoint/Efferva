@@ -6,6 +6,10 @@ project_dir="$(cd "${script_dir}/.." && pwd)"
 workspace_dir="$(cd "${project_dir}/.." && pwd)"
 cluster_name="${AGENTFRAME_KIND_CLUSTER:-agentframe}"
 
+if [[ "${AGENTFRAME_SKIP_WHEEL_BUILD:-0}" != "1" ]]; then
+  "${project_dir}/scripts/build-docker-wheel.sh"
+fi
+
 if ! kind get clusters | grep -qx "${cluster_name}"; then
   kind create cluster --name "${cluster_name}" --config "${project_dir}/deploy/kind/cluster.yaml"
 fi

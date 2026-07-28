@@ -176,8 +176,6 @@ spec:
                 secretKeyRef:
                   name: agentframe-postgres
                   key: database-url
-            - name: AGENTFRAME_RUNTIME_BINARY
-              value: /usr/local/bin/agentframe-codex-runtime
             - name: AGENTFRAME_SANDBOX_PROVIDER
               value: kubernetes
             - name: AGENTFRAME_SANDBOX_IMAGE

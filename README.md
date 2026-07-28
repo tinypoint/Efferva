@@ -1,8 +1,29 @@
 # AgentFrame
 
-AgentFrame 是一个基于 Codex 的多租户云端 Agent 产品框架。产品继续拥有自己的登录、用户和
-组织体系，只需要把当前请求转换成 `Principal`，即可获得按用户隔离的 Session、Thread、
-多轮对话、AG-UI 事件流、沙盒工作区、多实例补流和基础 WebUI。
+AgentFrame 是可嵌入产品 FastAPI 应用的多租户云端 Agent 框架。产品继续拥有登录、用户和
+组织体系；AgentFrame 负责身份作用域内的 Session、Thread、Run、Codex Runtime、沙盒、
+AG-UI、持久事件、多实例执行租约和基础 WebUI。
+
+## 产品接入
+
+安装当前平台的 Wheel：
+
+```bash
+pip install agentframe
+```
+
+提供运行环境：
+
+```bash
+export AGENTFRAME_DATABASE_URL=postgresql://user:password@postgres/agentframe
+export AGENTFRAME_SANDBOX_PROVIDER=docker
+export OPENAI_API_KEY=...
+# 使用 OpenAI-compatible Responses API 代理时可选：
+export AGENTFRAME_CODEX_OPENAI_BASE_URL=https://llm-proxy.example.com/v1
+export AGENTFRAME_CODEX_MODEL=gpt-5.4
+```
+
+安装到现有产品：
 
 ```python
 from fastapi import FastAPI, Request
@@ -10,194 +31,139 @@ from agentframe import AgentFrame, Capability, Principal
 
 
 async def resolve_principal(request: Request) -> Principal:
-    user = request.state.user  # 产品自己的 Cookie、JWT 或 SSO 中间件
+    user = request.state.user
     return Principal(
         tenant_id=str(user.organization_id or "default"),
         issuer="my-product",
         subject=str(user.id),
-        capabilities=frozenset(
-            {
-                Capability.SESSIONS_READ_TENANT,
-            }
-        )
-        if user.is_admin
-        else frozenset(),
+        capabilities=frozenset({Capability.SESSIONS_READ_TENANT}) if user.is_admin else frozenset(),
     )
 
 
-app = FastAPI(title="My Product")
+app = FastAPI()
 AgentFrame(identity=resolve_principal).install(app, prefix="/agent")
 ```
 
-没有现有 FastAPI 宿主时，可以基于相同模块创建完整 ASGI 应用：
+没有现有 FastAPI 宿主时：
 
 ```python
 app = AgentFrame(identity=resolve_principal).asgi_app()
 ```
 
-Model、OpenAI-compatible Base URL 与 API Key 由部署环境决定，不是产品代码的必填参数。
+`install()` 复用宿主应用的中间件和登录态，并在应用生命周期内自动：
 
-MVP 范围是 Docker Compose 与 Kind。GKE 会复用 Kubernetes backend，但不在第一版
-验收范围内。
+1. 建立 PostgreSQL 连接池；
+2. 使用 advisory lock 并发安全地执行包内迁移；
+3. 定位并启动 Wheel 内的 Codex Runtime；
+4. 启动 loopback Executor Gateway 和 Run Worker；
+5. 关闭时按依赖顺序释放资源。
 
-AgentFrame 对外维护三个边界：
+迁移或 Runtime 启动失败时，应用不会进入 Ready。
 
-1. 产品开发 SDK：`AgentFrame(identity=...)` 安装到产品现有 FastAPI 应用；
-2. Agent 控制面：身份授权、Session/Thread/Run、Codex、事件补流与多实例租约；
-3. Sandbox Provider SDK：用同一执行契约连接 Docker、Kubernetes 或第三方沙盒。
+## 安装包边界
 
-## 已实现的能力
+平台 Wheel 包含 Python SDK、FastAPI Router、WebUI、Worker、Repository、迁移、AG-UI、
+Executor Gateway、Docker/Kubernetes Provider 和当前平台的
+`agentframe/bin/agentframe-codex-runtime`。
 
-- Codex Runtime 与 Executor Gateway 位于沙盒外；Gateway 把 Codex 远程执行协议转换成
-  provider-neutral `SandboxRuntime`。
-- Docker Provider 使用 Docker Exec，Kubernetes Provider 使用 Kubernetes Exec API；
-  沙盒中没有 AgentFrame helper、模型凭证或对外 Service。
-- App Session、Thread、Run、Message 与 AG-UI 事件持久化在 PostgreSQL。
-- Codex 原生 ThreadStore 通过薄 fork 注入 PostgreSQL，支持跨实例
-  `thread/list`、`thread/read`、`thread/resume`。
-- 浏览器断线不取消 Run；SSE 使用事件序号与 `Last-Event-ID` 从任意 Web 实例补流。
-- 一个 Session 对应一个共享工作区；其中不同 Thread 可并行，同一 Thread 的 Run 串行。
-- Docker 使用每 Session 一个 named volume；Kubernetes 使用每 Session 一个 PVC。
-- 内置 Session 列表、Thread 列表和对话 WebUI。
-- Session 由 `tenant_id + issuer + subject` 标记所有者；所有子资源通过 Session 继承权限。
-- 普通用户默认只能看到自己的 Session；产品可以把自己的角色映射为租户级读写能力。
+最终用户不需要：
 
-架构与一致性语义见 [docs/architecture.md](docs/architecture.md)，Codex fork 的维护方法见
-[docs/codex-fork.md](docs/codex-fork.md)，Sandbox Provider 扩展契约见
-[docs/sandbox-providers.md](docs/sandbox-providers.md)。
+- Clone `codex-fork`；
+- 安装 Rust 或运行 Cargo；
+- 设置 `AGENTFRAME_RUNTIME_BINARY`；
+- 单独部署 AgentFrame 控制面；
+- 手动执行数据库迁移；
+- 理解 Executor Gateway。
 
-## 产品集成示例
+`AGENTFRAME_RUNTIME_BINARY`、Gateway host/port 仍是高级诊断覆盖项，不属于正常接入路径。
+Runtime 定位不做首次启动联网下载：显式高级覆盖优先，其次使用当前 Wheel 内置二进制；平台
+Wheel 缺失时启动会返回包含 OS/架构的明确错误。
 
-[`examples/basic-product`](examples/basic-product) 模拟了一个已经拥有 Cookie 登录体系的产品，
-并提供 Alice、Bob、同租户只读管理员和另一租户管理员四个身份：
+## 运行模型
+
+每个产品应用实例就是一个 AgentFrame 控制面实例。多个相同产品实例通过 PostgreSQL 队列、
+租约、fencing token 和持久事件协作，不要求粘性 Session。
+
+- Session 保存 `tenant_id + owner_issuer + owner_subject`；
+- Thread、Run、Message 和 Event 通过 Session 继承授权边界；
+- 普通用户默认只能访问自己的 Session；
+- 租户读、写能力由产品角色映射到 `Capability`，永远不能跨租户；
+- 越权子资源返回 `404`，未认证返回 `401`；
+- 浏览器断线不取消 Run，`Last-Event-ID` 可从任意实例补流；
+- 一个 Session 的多个 Thread 可并行并共享同一工作区；
+- 同一 Thread 的 Run 串行；
+- Docker 使用每 Session 一个 named volume，Kubernetes 使用每 Session 一个 PVC。
+
+详细一致性语义见 [架构文档](docs/architecture.md)。
+
+## Basic Product
+
+[`examples/basic-product`](examples/basic-product) 只展示框架使用方代码。它模拟现有 Cookie
+登录系统，并提供 Alice、Bob、同租户只读管理员和另一租户管理员四种开发身份。
+
+用已经构建的 Wheel 启动：
 
 ```bash
-uv run uvicorn --app-dir examples/basic-product main:app --reload
+python -m venv .product-venv
+.product-venv/bin/pip install dist/local/agentframe-*.whl
+
+export AGENTFRAME_DATABASE_URL=postgresql://agentframe:agentframe@localhost:5432/agentframe
+export AGENTFRAME_SANDBOX_PROVIDER=docker
+export OPENAI_API_KEY=...
+
+.product-venv/bin/uvicorn --app-dir examples/basic-product main:app
 ```
 
-打开 <http://localhost:8000>。示例登录只用于演示集成边界，不是生产认证实现。生产环境没有
-匿名默认身份；身份解析失败应抛出 `UnauthenticatedError`。
+产品入口只有登录适配和：
 
-框架同时提供可复用运行时基础镜像和薄产品镜像路径：
-
-```bash
-make docker-example
+```python
+app = FastAPI()
+AgentFrame(identity=resolve_principal).install(app, prefix="/agent")
 ```
 
-产品镜像只需继承 `agentframe-runtime:local` 并复制自己的应用代码。
+Example 不创建 Repository、Worker、Gateway，不执行迁移，也不指定 Runtime 路径。
 
-## Docker 验收
+## Docker 与 Kind 验收
 
-要求：Docker Desktop，以及可用的 `OPENAI_API_KEY`。
+要求 Docker Desktop；Kind 还要求 `kind`、`kubectl` 和 `jq`。
 
 ```bash
 export OPENAI_API_KEY=...
 make docker-up
 ```
 
-打开 <http://localhost:8080>。Compose 和 Kind 默认运行打包内置的开发身份适配器，方便本地
-体验；它不能用于生产。停止控制面：
+Compose 会先构建 Linux 平台 Wheel，最终 App 镜像只安装 Wheel，不从源码编译 Python 包或
+Codex。MVP 的 Linux Wheel 以 Debian 12 / glibc 2.36 为受控运行基线，不宣称通用
+manylinux 兼容。打开 <http://localhost:8080>，停止时执行：
 
 ```bash
 make docker-down
 ```
 
-Session 对应的 `af-sandbox-*` 容器和 `af-workspace-*` volume 是持久化资源，不会随
-`docker compose down` 自动删除。MVP 暂不提供 UI 删除 Session，以避免误删工作区。
-
-## Kind 验收
-
-要求：Docker、Kind、kubectl。
+Kind 双实例：
 
 ```bash
 export OPENAI_API_KEY=...
-make kind-up
-make kind-smoke
-make kind-port-forward
-```
-
-使用 OpenAI-compatible Responses API 代理时：
-
-```bash
-export OPENAI_API_KEY=代理的_api_key
 export AGENTFRAME_CODEX_OPENAI_BASE_URL=http://host.docker.internal:8317/v1
 export AGENTFRAME_CODEX_MODEL=gpt-5.4
 make kind-up
+make kind-smoke
+make kind-e2e
 ```
 
-`host.docker.internal` 适用于 Docker Desktop 本地 Kind；部署到 GKE 时应替换为集群可达的
-内部 HTTPS 地址。AgentFrame 会为该地址创建 Codex custom provider，并从
-`OPENAI_API_KEY` 环境变量读取 Bearer Token。API key 只进入 Kubernetes Secret，不写入
-镜像或仓库。
-
-本机运行默认名为 `cli-proxy-api` 的 CLIProxyAPI 容器时，可以直接执行：
+本机已有名为 `cli-proxy-api` 的 CLIProxyAPI 容器时：
 
 ```bash
 make kind-up-cliproxy
 make kind-e2e
 ```
 
-脚本会从容器的 `/CLIProxyAPI/config.yaml` bind mount 读取首个 `api-keys` 值，并自动发现
-宿主机映射端口。可用 `AGENTFRAME_CLIPROXY_CONTAINER` 和 `AGENTFRAME_CODEX_MODEL`
-覆盖容器名与模型。
+Kind E2E 验证两个产品 Pod、租户隔离、同 Session 两个并行 Thread、共享 PVC 文件，以及
+浏览器从另一实例按 `Last-Event-ID` 补流。
 
-打开 <http://localhost:8080>。`kind-up` 会：
+## Provider SDK
 
-1. 创建一个双节点 `agentframe` Kind 集群；
-2. 构建并加载 App 与 Sandbox 镜像；
-3. 部署一个 PostgreSQL、两个 AgentFrame App 副本；
-4. 安装仅能管理 Sandbox Pod、PVC 和调用 `pods/exec` 的 namespace 级 RBAC。
-
-`kind-smoke` 不要求真实模型；`kind-e2e` 要求可用模型，并额外验证双 Pod、租户隔离、同一
-Session 的两个并行 Thread、共享 PVC 文件，以及从另一 Pod 使用 `Last-Event-ID` 补流。
-
-删除验收集群：
-
-```bash
-make kind-down
-```
-
-## 本地开发
-
-```bash
-uv sync --extra dev
-cargo build --workspace
-cp .env.example .env
-agentframe
-```
-
-默认数据库地址在 `.env.example` 中。默认 Docker backend 会调用本机 Docker CLI。
-部署时通过 `AGENTFRAME_SANDBOX_PROVIDER=docker|kubernetes` 选择内置 Provider；旧的
-`AGENTFRAME_SANDBOX_BACKEND` 仅作为兼容别名保留。
-
-常规检查：
-
-```bash
-make check
-uv run pytest -q
-```
-
-无需真实模型额度的 Docker 端到端验收会启动一个本地 Responses API stub，让 Codex
-真实调用统一 `exec_command` 写入远程 Sandbox，再验证持久 Run、AG-UI 回放和工作区文件：
-
-```bash
-make docker-e2e
-```
-
-PostgreSQL 与 Codex Runtime 集成测试：
-
-```bash
-AGENTFRAME_TEST_DATABASE_URL=postgresql://agentframe:agentframe@localhost:5432/agentframe \
-  uv run pytest -q -m integration
-```
-
-## Sandbox Provider SDK
-
-公共 SPI 由 `SandboxProvider`、`SandboxRuntime`、不透明的 `WorkspaceHandle` /
-`SandboxHandle` 和显式 `SandboxCapabilities` 组成。框架数据库只保存 Provider 名称、
-`external_ref`、`state_json` 与 fencing lease，不保存特定厂商 endpoint。
-
-自定义 Provider 在进程启动前注册，产品业务代码仍可保持不变：
+内置 `docker` 和 `kubernetes` Provider。高级用户可以在进程启动前注册第三方 Provider：
 
 ```python
 from agentframe import AgentFrame
@@ -205,22 +171,46 @@ from agentframe import AgentFrame
 AgentFrame.register_sandbox_provider("company-sandbox", CompanySandboxProvider)
 ```
 
-然后由部署环境选择：
+再通过环境选择：
 
 ```bash
 export AGENTFRAME_SANDBOX_PROVIDER=company-sandbox
 ```
 
-Provider 必须通过共享认证套件，才可声明 Coding Agent 兼容：
+Provider 必须满足统一契约：
 
 ```bash
 uv run python -m agentframe.sandbox.conformance_cli --provider docker
 uv run python -m agentframe.sandbox.conformance_cli --provider kubernetes
 ```
 
-认证覆盖工作区与沙盒幂等、流式执行、stdin、并发进程、PTY、终止、文件 API 和
-stop/start 后的工作区持久性。E2B 等外部 Provider 不在 MVP 内；它们应作为独立适配包接入，
-不修改 AgentFrame 核心。
+契约覆盖工作区和沙盒幂等、流式执行、stdin、并发进程、PTY、终止、文件 API 与
+stop/start 持久性。详细接口见 [Provider 文档](docs/sandbox-providers.md)。
+
+## 框架维护与发布
+
+以下命令只面向 AgentFrame 维护者，不是产品接入步骤：
+
+```bash
+uv sync --extra dev
+make check
+uv run pytest -q
+make wheel
+make wheel-smoke
+make docker-e2e
+```
+
+源码工作区保持两个相邻仓库：
+
+```text
+codex-cloud-framwork/
+├── codex-fork/       # 仅发布构建和上游同步需要
+└── agent-framework/  # SDK、控制面、Provider、构建和交付
+```
+
+平台 Wheel 的构建矩阵、版本追踪和内部 Registry 发布见
+[发布文档](docs/releasing.md)；Codex fork 的维护边界见
+[fork 文档](docs/codex-fork.md)。
 
 ## HTTP 与 AG-UI
 
@@ -235,29 +225,5 @@ stop/start 后的工作区持久性。E2B 等外部 Provider 不在 MVP 内；�
 - `GET /api/runs/{run_id}/events/stream`
 - `POST /api/ag-ui`
 
-`POST /api/ag-ui` 接受 AG-UI `RunAgentInput`。传入稳定的 `runId` 可安全重试；相同
-Thread 内相同 `runId` 不会创建第二个 Run，不同 Thread 或用户可以复用客户端生成的 ID。
-服务返回带 SSE `id` 的 AG-UI 事件。重连时发送
-`Last-Event-ID`，或在普通 Run 流接口使用 `?after=<seq>`。
-
-`scope` 默认是 `mine`。只有 Principal 拥有 `SESSIONS_READ_TENANT` 时才可请求
-`scope=tenant`；`SESSIONS_WRITE_TENANT` 单独控制对其他所有者 Session 的 Thread/Run 写入。
-任何跨租户访问以及无权限的直接资源访问都返回 `404`。
-
-目前映射的标准事件包括：
-
-- `RUN_STARTED`
-- `TEXT_MESSAGE_START`
-- `TEXT_MESSAGE_CONTENT`
-- `TEXT_MESSAGE_END`
-- `RUN_FINISHED`
-- `RUN_ERROR`
-- `RAW`（保留 Codex 的计划、命令、文件变更等原始通知）
-
-## 仓库结构
-
-```text
-codex-cloud-framwork/
-├── codex-fork/       # tinypoint/codex：ThreadStore 注入点与冷恢复修复
-└── agent-framework/  # 产品框架、PostgreSQL Store、WebUI、Docker、Kind
-```
+AG-UI `runId` 在 Thread 内唯一，可安全重试。事件先写 PostgreSQL，再输出带 SSE `id` 的
+AG-UI 流；重连使用 `Last-Event-ID`，普通 Run 流也可使用 `?after=<seq>`。

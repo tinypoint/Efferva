@@ -22,6 +22,7 @@ from agentframe.repository import (
     SystemRepository,
 )
 from agentframe.runtime import CodexRuntime
+from agentframe.runtime_binary import locate_runtime_binary
 from agentframe.sandbox import create_sandbox_control_plane, register_sandbox_provider
 from agentframe.worker import RunWorker
 
@@ -70,7 +71,9 @@ class AgentFrame:
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+            runtime_binary = locate_runtime_binary(settings.runtime_binary)
             database = Database(settings.database_url)
+            runtime: CodexRuntime | None = None
             worker: RunWorker | None = None
             sandboxes = None
             await database.open()
@@ -78,11 +81,12 @@ class AgentFrame:
                 await database.migrate(migrations)
                 repository = SystemRepository(database)
                 runtime = CodexRuntime(
-                    settings.runtime_binary,
+                    runtime_binary,
                     settings.database_url,
                     openai_base_url=settings.codex_openai_base_url,
                     model=settings.codex_model,
                 )
+                await runtime.start()
                 sandboxes = create_sandbox_control_plane(settings, repository)
                 await sandboxes.start()
                 worker = RunWorker(settings, repository, runtime, sandboxes)
@@ -96,8 +100,11 @@ class AgentFrame:
                 try:
                     if worker is not None:
                         await worker.close()
-                    elif sandboxes is not None:
-                        await sandboxes.close()
+                    else:
+                        if sandboxes is not None:
+                            await sandboxes.close()
+                        if runtime is not None:
+                            await runtime.close()
                 finally:
                     await database.close()
 

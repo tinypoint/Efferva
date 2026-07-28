@@ -113,13 +113,14 @@ async def run_provider_conformance(
         if provider.capabilities.interactive_pty:
             pty_process = await runtime.start_process(
                 ProcessSpec(
-                    argv=("/bin/sh", "-c", "printf pty"),
+                    argv=("/bin/sh", "-c", "printf pty; IFS= read -r _"),
                     cwd=context.workspace_path,
                     tty=True,
                     pipe_stdin=True,
                 )
             )
             await runtime.resize_pty(pty_process, 100, 40)
+            await runtime.write_stdin(pty_process, b"\n")
             stdout, _, exit_code = await _collect(runtime, pty_process)
             assert b"pty" in stdout
             assert exit_code == 0

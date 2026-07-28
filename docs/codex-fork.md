@@ -1,5 +1,8 @@
 # Codex 薄 fork 维护约定
 
+`codex-fork` 只属于 AgentFrame 发布构建和维护工作区。产品使用方安装平台 Wheel，不 Clone
+该仓库、不安装 Rust，也不在部署现场编译 Runtime。
+
 ## 原则
 
 fork 只承载上游无法通过公开扩展点完成的能力。产品 API、Session/Run 模型、调度、AG-UI、
@@ -60,4 +63,5 @@ Codex 仓自身还要求 Rust 改动完成后执行项目级 `just fix -p codex-
 - 注入接口放在 App Server 组合根，业务处理器只接收 trait object。
 - 新行为用上游已有的 `ThreadStore` trait 表达，不修改协议数据结构。
 - 每个 fork patch 都必须有独立的回归测试。
-- 不把上游源码复制到产品仓，不长期 pin 某个源码 hash；依赖通过相邻仓路径构建。
+- 不把上游源码复制到产品仓；发布流水线固定经过验证的 fork revision，相邻仓路径只用于
+  维护者构建。
