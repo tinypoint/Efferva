@@ -5,11 +5,13 @@ description = "A Codex-based, AG-UI compatible agent framework for Docker and Ku
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.12,<4",
     "fastapi>=0.116,<1",
     "kubernetes-asyncio>=33,<34",
     "psycopg[binary,pool]>=3.2,<4",
     "pydantic-settings>=2.10,<3",
     "uvicorn[standard]>=0.35,<1",
+    "websockets>=15,<16",
 ]
 
 [project.optional-dependencies]

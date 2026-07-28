@@ -136,14 +136,23 @@ sandbox_name="af-sandbox-${session_id//-/}"
 sandbox_name="${sandbox_name:0:31}"
 test "$(
   kubectl --context "${context}" --namespace "${namespace}" \
-    exec "${sandbox_name}" --container exec-server -- \
+    exec "${sandbox_name}" --container sandbox -- \
     cat /workspace/thread-a.txt
 )" = "parallel-a"
 test "$(
   kubectl --context "${context}" --namespace "${namespace}" \
-    exec "${sandbox_name}" --container exec-server -- \
+    exec "${sandbox_name}" --container sandbox -- \
     cat /workspace/thread-b.txt
 )" = "parallel-b"
+test "$(
+  kubectl --context "${context}" --namespace "${namespace}" get pod "${sandbox_name}" \
+    --output jsonpath='{.spec.containers[*].name}'
+)" = "sandbox"
+if kubectl --context "${context}" --namespace "${namespace}" get service "${sandbox_name}" \
+  >/dev/null 2>&1; then
+  echo "Sandbox must not expose an exec-server Service" >&2
+  exit 1
+fi
 
 test "$(
   kubectl --context "${context}" --namespace "${namespace}" \

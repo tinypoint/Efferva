@@ -64,7 +64,24 @@ async def test_multi_tenant_migration_backfills_existing_sessions() -> None:
                 (session_id, f"session-{session_id}"),
             )
             await connection.execute(
+                """
+                INSERT INTO sandbox_bindings(
+                    session_id,
+                    backend,
+                    sandbox_id,
+                    endpoint,
+                    workspace_ref,
+                    status
+                )
+                VALUES (%s, 'legacy', 'legacy-sandbox', 'ws://legacy', 'legacy-workspace', 'ready')
+                """,
+                (session_id,),
+            )
+            await connection.execute(
                 migrations_dir.joinpath("002_multi_tenant_identity.sql").read_text()
+            )
+            await connection.execute(
+                migrations_dir.joinpath("003_provider_neutral_sandboxes.sql").read_text()
             )
             row = await (
                 await connection.execute(
@@ -80,6 +97,36 @@ async def test_multi_tenant_migration_backfills_existing_sessions() -> None:
                 "tenant_id": LEGACY_TENANT_ID,
                 "owner_issuer": LEGACY_ISSUER,
                 "owner_subject": "unowned",
+            }
+            workspace = await (
+                await connection.execute(
+                    """
+                    SELECT provider, external_ref, state_json
+                    FROM workspace_bindings
+                    WHERE session_id = %s
+                    """,
+                    (session_id,),
+                )
+            ).fetchone()
+            sandbox = await (
+                await connection.execute(
+                    """
+                    SELECT provider, external_ref, state_json
+                    FROM sandbox_leases
+                    WHERE workspace_id = %s
+                    """,
+                    (session_id,),
+                )
+            ).fetchone()
+            assert workspace == {
+                "provider": "legacy",
+                "external_ref": "legacy-workspace",
+                "state_json": {},
+            }
+            assert sandbox == {
+                "provider": "legacy",
+                "external_ref": "legacy-sandbox",
+                "state_json": {},
             }
             await connection.rollback()
     finally:
@@ -174,6 +221,33 @@ async def test_repository_isolates_tenants_and_projects_worker_events() -> None:
             second_run["id"],
         }
         assert await system.claim_run("worker-b", 30, 4) is None
+        await system.upsert_workspace_binding(
+            session["id"],
+            workspace_id=session["id"],
+            provider="test",
+            external_ref=f"workspace-{session['id']}",
+            state={"opaque": "workspace"},
+            status="ready",
+        )
+        await system.upsert_sandbox_lease(
+            workspace_id=session["id"],
+            provider="test",
+            external_ref=f"sandbox-{session['id']}",
+            state={"opaque": "sandbox"},
+            owner_id="worker-a",
+            fencing_token=first_claim["fencing_epoch"],
+            lease_ttl_seconds=30,
+        )
+        assert await system.sandbox_fence_is_current(
+            session["id"],
+            "worker-a",
+            first_claim["fencing_epoch"],
+        )
+        assert not await system.sandbox_fence_is_current(
+            session["id"],
+            "worker-b",
+            first_claim["fencing_epoch"],
+        )
 
         message_id = "integration:assistant"
         epoch = first_claim["fencing_epoch"]
@@ -231,7 +305,59 @@ async def test_repository_isolates_tenants_and_projects_worker_events() -> None:
                     (session["id"],),
                 )
             ).fetchone()
-        assert released is None
+        assert released is not None
+        async with database.connection() as connection:
+            idle_sandbox = await (
+                await connection.execute(
+                    """
+                    SELECT status, expires_at < now() AS expired
+                    FROM sandbox_leases
+                    WHERE workspace_id = %s
+                    """,
+                    (session["id"],),
+                )
+            ).fetchone()
+        assert idle_sandbox == {"status": "idle", "expired": True}
+
+        async with database.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE session_leases
+                SET owner_id = 'worker-b',
+                    fencing_epoch = fencing_epoch + 1,
+                    expires_at = now() + interval '30 seconds'
+                WHERE session_id = %s
+                """,
+                (session["id"],),
+            )
+            await connection.execute(
+                """
+                UPDATE sandbox_leases
+                SET status = 'ready',
+                    expires_at = now() - interval '1 second'
+                WHERE workspace_id = %s
+                """,
+                (session["id"],),
+            )
+            await connection.commit()
+        await system.renew_owned_leases("worker-a", 30)
+        assert not await system.sandbox_fence_is_current(
+            session["id"],
+            "worker-a",
+            first_claim["fencing_epoch"],
+        )
+        async with database.connection() as connection:
+            stale_sandbox = await (
+                await connection.execute(
+                    """
+                    SELECT expires_at < now() AS expired
+                    FROM sandbox_leases
+                    WHERE workspace_id = %s
+                    """,
+                    (session["id"],),
+                )
+            ).fetchone()
+        assert stale_sandbox == {"expired": True}
 
         with pytest.raises(ConflictError, match="already terminal"):
             await system.append_event(first_claim["id"], text_message_end(message_id))

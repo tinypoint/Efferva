@@ -43,6 +43,12 @@ for _ in $(seq 1 120); do
 done
 curl --fail --silent "${base_url}/healthz" >/dev/null
 
+docker compose "${compose_args[@]}" exec --no-TTY app \
+  python -m agentframe.sandbox.conformance_cli --provider docker \
+  | jq --exit-status \
+    '.provider == "docker" and (.checks | index("stop-start-persistence") != null)' \
+  >/dev/null
+
 alice_header="x-agentframe-demo-user: alice"
 bob_header="x-agentframe-demo-user: bob"
 admin_header="x-agentframe-demo-user: admin"

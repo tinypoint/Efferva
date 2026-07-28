@@ -40,9 +40,18 @@ Model、OpenAI-compatible Base URL 与 API Key 由部署环境决定，不是产
 MVP 范围是 Docker Compose 与 Kind。GKE 会复用 Kubernetes backend，但不在第一版
 验收范围内。
 
+AgentFrame 对外维护三个边界：
+
+1. 产品开发 SDK：`AgentFrame(identity=...)` 安装到产品现有 FastAPI 应用；
+2. Agent 控制面：身份授权、Session/Thread/Run、Codex、事件补流与多实例租约；
+3. Sandbox Provider SDK：用同一执行契约连接 Docker、Kubernetes 或第三方沙盒。
+
 ## 已实现的能力
 
-- Codex Runtime 位于沙盒外；命令与文件操作经远程 exec-server 进入沙盒。
+- Codex Runtime 与 Executor Gateway 位于沙盒外；Gateway 把 Codex 远程执行协议转换成
+  provider-neutral `SandboxRuntime`。
+- Docker Provider 使用 Docker Exec，Kubernetes Provider 使用 Kubernetes Exec API；
+  沙盒中没有 AgentFrame helper、模型凭证或对外 Service。
 - App Session、Thread、Run、Message 与 AG-UI 事件持久化在 PostgreSQL。
 - Codex 原生 ThreadStore 通过薄 fork 注入 PostgreSQL，支持跨实例
   `thread/list`、`thread/read`、`thread/resume`。
@@ -54,7 +63,8 @@ MVP 范围是 Docker Compose 与 Kind。GKE 会复用 Kubernetes backend，但�
 - 普通用户默认只能看到自己的 Session；产品可以把自己的角色映射为租户级读写能力。
 
 架构与一致性语义见 [docs/architecture.md](docs/architecture.md)，Codex fork 的维护方法见
-[docs/codex-fork.md](docs/codex-fork.md)。
+[docs/codex-fork.md](docs/codex-fork.md)，Sandbox Provider 扩展契约见
+[docs/sandbox-providers.md](docs/sandbox-providers.md)。
 
 ## 产品集成示例
 
@@ -136,7 +146,7 @@ make kind-e2e
 1. 创建一个双节点 `agentframe` Kind 集群；
 2. 构建并加载 App 与 Sandbox 镜像；
 3. 部署一个 PostgreSQL、两个 AgentFrame App 副本；
-4. 安装仅能创建/读取 Pod、Service、PVC 的 namespace 级 RBAC。
+4. 安装仅能管理 Sandbox Pod、PVC 和调用 `pods/exec` 的 namespace 级 RBAC。
 
 `kind-smoke` 不要求真实模型；`kind-e2e` 要求可用模型，并额外验证双 Pod、租户隔离、同一
 Session 的两个并行 Thread、共享 PVC 文件，以及从另一 Pod 使用 `Last-Event-ID` 补流。
@@ -157,6 +167,8 @@ agentframe
 ```
 
 默认数据库地址在 `.env.example` 中。默认 Docker backend 会调用本机 Docker CLI。
+部署时通过 `AGENTFRAME_SANDBOX_PROVIDER=docker|kubernetes` 选择内置 Provider；旧的
+`AGENTFRAME_SANDBOX_BACKEND` 仅作为兼容别名保留。
 
 常规检查：
 
@@ -178,6 +190,37 @@ PostgreSQL 与 Codex Runtime 集成测试：
 AGENTFRAME_TEST_DATABASE_URL=postgresql://agentframe:agentframe@localhost:5432/agentframe \
   uv run pytest -q -m integration
 ```
+
+## Sandbox Provider SDK
+
+公共 SPI 由 `SandboxProvider`、`SandboxRuntime`、不透明的 `WorkspaceHandle` /
+`SandboxHandle` 和显式 `SandboxCapabilities` 组成。框架数据库只保存 Provider 名称、
+`external_ref`、`state_json` 与 fencing lease，不保存特定厂商 endpoint。
+
+自定义 Provider 在进程启动前注册，产品业务代码仍可保持不变：
+
+```python
+from agentframe import AgentFrame
+
+AgentFrame.register_sandbox_provider("company-sandbox", CompanySandboxProvider)
+```
+
+然后由部署环境选择：
+
+```bash
+export AGENTFRAME_SANDBOX_PROVIDER=company-sandbox
+```
+
+Provider 必须通过共享认证套件，才可声明 Coding Agent 兼容：
+
+```bash
+uv run python -m agentframe.sandbox.conformance_cli --provider docker
+uv run python -m agentframe.sandbox.conformance_cli --provider kubernetes
+```
+
+认证覆盖工作区与沙盒幂等、流式执行、stdin、并发进程、PTY、终止、文件 API 和
+stop/start 后的工作区持久性。E2B 等外部 Provider 不在 MVP 内；它们应作为独立适配包接入，
+不修改 AgentFrame 核心。
 
 ## HTTP 与 AG-UI
 

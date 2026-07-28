@@ -17,7 +17,7 @@ from agentframe.events import (
 )
 from agentframe.repository import ConflictError, SystemRepository
 from agentframe.runtime import CodexRuntime
-from agentframe.sandbox import SandboxBackend
+from agentframe.sandbox import SandboxControlPlane, SandboxEnvironment
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +28,12 @@ class RunWorker:
         settings: Settings,
         repository: SystemRepository,
         runtime: CodexRuntime,
-        sandbox_backend: SandboxBackend,
+        sandboxes: SandboxControlPlane,
     ) -> None:
         self._settings = settings
         self._repository = repository
         self._runtime = runtime
-        self._sandbox_backend = sandbox_backend
+        self._sandboxes = sandboxes
         self._stopping = asyncio.Event()
         self._poll_task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
@@ -69,7 +69,7 @@ class RunWorker:
         if self._runs:
             await asyncio.gather(*self._runs, return_exceptions=True)
         await self._runtime.close()
-        await self._sandbox_backend.close()
+        await self._sandboxes.close()
 
     async def _poll_loop(self) -> None:
         while not self._stopping.is_set():
@@ -113,7 +113,12 @@ class RunWorker:
         codex_thread_id = str(run["codex_thread_id"]) if run["codex_thread_id"] else None
         queue: asyncio.Queue[dict[str, Any]] | None = None
         try:
-            sandbox = await self._sandbox_backend.ensure(session_id, run["workspace_ref"])
+            sandbox = await self._sandboxes.ensure(
+                session_id,
+                run["workspace_ref"],
+                owner_id=owner_id,
+                fencing_token=epoch,
+            )
             await self._runtime.ensure_environment(sandbox)
             if codex_thread_id is None:
                 codex_thread_id = await self._runtime.start_thread(sandbox)
@@ -144,7 +149,11 @@ class RunWorker:
             with contextlib.suppress(Exception):
                 await self._repository.release_session_if_idle(session_id, owner_id)
 
-    async def _resume_with_retry(self, thread_id: str, sandbox) -> None:
+    async def _resume_with_retry(
+        self,
+        thread_id: str,
+        sandbox: SandboxEnvironment,
+    ) -> None:
         deadline = asyncio.get_running_loop().time() + self._settings.lease_ttl_seconds + 5
         while True:
             try:

@@ -16,8 +16,11 @@ metadata:
   namespace: agentframe
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "persistentvolumeclaims"]
-    verbs: ["create", "get", "list", "watch"]
+    resources: ["pods", "persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -175,7 +178,7 @@ spec:
                   key: database-url
             - name: AGENTFRAME_RUNTIME_BINARY
               value: /usr/local/bin/agentframe-codex-runtime
-            - name: AGENTFRAME_SANDBOX_BACKEND
+            - name: AGENTFRAME_SANDBOX_PROVIDER
               value: kubernetes
             - name: AGENTFRAME_SANDBOX_IMAGE
               value: agentframe-sandbox:local

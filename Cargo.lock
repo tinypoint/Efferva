@@ -286,16 +286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentframe-sandbox-exec-server"
-version = "0.1.0"
-dependencies = [
- "clap",
- "codex-exec-server",
- "codex-http-client",
- "tokio",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

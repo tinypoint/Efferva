@@ -33,16 +33,6 @@ RUN --mount=type=cache,id=agentframe-cargo-registry,target=/usr/local/cargo/regi
     && mkdir -p /artifacts \
     && cp target/container/agentframe-codex-runtime /artifacts/
 
-FROM rust-source AS sandbox-builder
-
-RUN --mount=type=cache,id=agentframe-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=agentframe-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=agentframe-rust-target-${TARGETARCH},target=/source/agent-framework/target,sharing=locked \
-    cargo build --locked --profile container --jobs 4 \
-        --package agentframe-sandbox-exec-server \
-    && mkdir -p /artifacts \
-    && cp target/container/agentframe-sandbox-exec-server /artifacts/
-
 FROM python:3.13-slim-bookworm AS python-builder
 
 WORKDIR /source/agent-framework
@@ -88,11 +78,7 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /workspace
-COPY --from=sandbox-builder \
-    /artifacts/agentframe-sandbox-exec-server \
-    /usr/local/bin/agentframe-sandbox-exec-server
 
 WORKDIR /workspace
-EXPOSE 8081
-ENTRYPOINT ["/usr/local/bin/agentframe-sandbox-exec-server"]
-CMD ["--listen", "ws://0.0.0.0:8081"]
+ENTRYPOINT ["sleep"]
+CMD ["infinity"]

@@ -22,7 +22,7 @@ from agentframe.repository import (
     SystemRepository,
 )
 from agentframe.runtime import CodexRuntime
-from agentframe.sandbox import create_sandbox_backend
+from agentframe.sandbox import create_sandbox_control_plane, register_sandbox_provider
 from agentframe.worker import RunWorker
 
 
@@ -72,6 +72,7 @@ class AgentFrame:
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             database = Database(settings.database_url)
             worker: RunWorker | None = None
+            sandboxes = None
             await database.open()
             try:
                 await database.migrate(migrations)
@@ -82,8 +83,9 @@ class AgentFrame:
                     openai_base_url=settings.codex_openai_base_url,
                     model=settings.codex_model,
                 )
-                sandbox_backend = create_sandbox_backend(settings, repository)
-                worker = RunWorker(settings, repository, runtime, sandbox_backend)
+                sandboxes = create_sandbox_control_plane(settings, repository)
+                await sandboxes.start()
+                worker = RunWorker(settings, repository, runtime, sandboxes)
                 resources.repository = repository
                 resources.worker = worker
                 await worker.start()
@@ -91,9 +93,13 @@ class AgentFrame:
             finally:
                 resources.worker = None
                 resources.repository = None
-                if worker is not None:
-                    await worker.close()
-                await database.close()
+                try:
+                    if worker is not None:
+                        await worker.close()
+                    elif sandboxes is not None:
+                        await sandboxes.close()
+                finally:
+                    await database.close()
 
         router = APIRouter(lifespan=lifespan)
         router.include_router(
@@ -130,6 +136,10 @@ class AgentFrame:
         """Compatibility alias for asgi_app()."""
 
         return self.asgi_app()
+
+    @classmethod
+    def register_sandbox_provider(cls, name: str, provider) -> None:
+        register_sandbox_provider(name, provider)
 
     @staticmethod
     def _normalize_prefix(prefix: str) -> str:

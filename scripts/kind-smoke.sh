@@ -20,6 +20,12 @@ app_pods="$(kubectl --context "${context}" --namespace "${namespace}" get pods \
 test "$(wc -w <<<"${app_pods}" | tr -d ' ')" -eq 2
 read -r app_pod_one app_pod_two <<<"${app_pods}"
 
+kubectl --context "${context}" --namespace "${namespace}" exec "${app_pod_one}" -- \
+  python -m agentframe.sandbox.conformance_cli --provider kubernetes \
+  | jq --exit-status \
+    '.provider == "kubernetes" and (.checks | index("stop-start-persistence") != null)' \
+  >/dev/null
+
 alice_header="x-agentframe-demo-user: alice"
 bob_header="x-agentframe-demo-user: bob"
 admin_header="x-agentframe-demo-user: admin"
@@ -88,7 +94,7 @@ kubectl --context "${context}" --namespace "${namespace}" wait \
   "pod/${sandbox_name}" \
   --timeout=180s
 kubectl --context "${context}" --namespace "${namespace}" get \
-  "service/${sandbox_name}" "persistentvolumeclaim/${sandbox_name}" >/dev/null
+  "persistentvolumeclaim/${sandbox_name}" >/dev/null
 
 status="$(kubectl --context "${context}" --namespace "${namespace}" exec "${app_pod_two}" -- \
   curl --fail --silent \

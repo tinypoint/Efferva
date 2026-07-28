@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from agentframe.sandbox import Sandbox
+from agentframe.sandbox import SandboxEnvironment
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ class CodexRuntime:
         async with self._write_lock:
             await self._write(message)
 
-    async def ensure_environment(self, sandbox: Sandbox) -> None:
+    async def ensure_environment(self, sandbox: SandboxEnvironment) -> None:
         lock = self._environment_locks.setdefault(sandbox.environment_id, asyncio.Lock())
         async with lock:
             if self._environments.get(sandbox.environment_id) == sandbox.endpoint:
@@ -170,7 +170,7 @@ class CodexRuntime:
                     await asyncio.sleep(0.25)
             self._environments[sandbox.environment_id] = sandbox.endpoint
 
-    async def start_thread(self, sandbox: Sandbox) -> str:
+    async def start_thread(self, sandbox: SandboxEnvironment) -> str:
         params = {
             "cwd": sandbox.workspace_path,
             "approvalPolicy": "never",
@@ -183,7 +183,7 @@ class CodexRuntime:
         response = await self.request("thread/start", params)
         return str(response["thread"]["id"])
 
-    async def resume_thread(self, thread_id: str, sandbox: Sandbox) -> None:
+    async def resume_thread(self, thread_id: str, sandbox: SandboxEnvironment) -> None:
         await self.request(
             "thread/resume",
             {
@@ -195,7 +195,12 @@ class CodexRuntime:
             },
         )
 
-    async def start_turn(self, thread_id: str, prompt: str, sandbox: Sandbox) -> str:
+    async def start_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        sandbox: SandboxEnvironment,
+    ) -> str:
         response = await self.request(
             "turn/start",
             {
@@ -344,7 +349,7 @@ class CodexRuntime:
             )
 
     @staticmethod
-    def _environment_selection(sandbox: Sandbox) -> dict[str, Any]:
+    def _environment_selection(sandbox: SandboxEnvironment) -> dict[str, Any]:
         return {
             "environmentId": sandbox.environment_id,
             "cwd": sandbox.workspace_path,

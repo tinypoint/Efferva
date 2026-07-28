@@ -2,11 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
 from agentframe.runtime import CodexRpcError, CodexRuntime
-from agentframe.sandbox import Sandbox
+from agentframe.sandbox import SandboxEnvironment, SandboxHandle
+
+
+def sandbox_environment() -> SandboxEnvironment:
+    return SandboxEnvironment(
+        environment_id="session",
+        endpoint="ws://gateway/v1/environments/token",
+        workspace_path="/workspace",
+        sandbox=SandboxHandle(
+            provider="test",
+            external_ref="sandbox",
+            workspace_id=uuid4(),
+        ),
+    )
 
 
 def test_runtime_command_uses_codex_provider_overrides() -> None:
@@ -39,12 +53,7 @@ async def test_environment_is_connected_before_it_is_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = CodexRuntime(Path("/not-started"), "postgresql://unused")
-    sandbox = Sandbox(
-        sandbox_id="sandbox",
-        environment_id="session",
-        endpoint="ws://sandbox:8081",
-        workspace_path="/workspace",
-    )
+    sandbox = sandbox_environment()
     requests: list[tuple[str, dict[str, Any] | None, float]] = []
 
     async def request(
@@ -77,12 +86,7 @@ async def test_environment_connection_retries_until_sandbox_is_listening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = CodexRuntime(Path("/not-started"), "postgresql://unused")
-    sandbox = Sandbox(
-        sandbox_id="sandbox",
-        environment_id="session",
-        endpoint="ws://sandbox:8081",
-        workspace_path="/workspace",
-    )
+    sandbox = sandbox_environment()
     info_attempts = 0
     add_attempts = 0
 

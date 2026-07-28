@@ -2,7 +2,6 @@
 members = [
     "crates/postgres-thread-store",
     "crates/codex-runtime",
-    "crates/sandbox-exec-server",
 ]
 resolver = "2"
 

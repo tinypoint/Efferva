@@ -567,6 +567,22 @@ class SystemRepository:
                 """,
                 (lease_ttl_seconds, owner_id),
             )
+            await connection.execute(
+                """
+                UPDATE sandbox_leases sandbox
+                SET expires_at = now() + make_interval(secs => %s),
+                    updated_at = now()
+                FROM workspace_bindings workspace, session_leases session
+                WHERE sandbox.workspace_id = workspace.workspace_id
+                  AND session.session_id = workspace.session_id
+                  AND sandbox.owner_id = %s
+                  AND sandbox.status = 'ready'
+                  AND session.owner_id = sandbox.owner_id
+                  AND session.fencing_epoch = sandbox.fencing_token
+                  AND session.expires_at > now()
+                """,
+                (lease_ttl_seconds, owner_id),
+            )
             await connection.commit()
 
     async def requeue_abandoned_runs(self) -> int:
@@ -613,58 +629,171 @@ class SystemRepository:
         if not await self.run_is_terminal(run_id):
             await self.append_event(run_id, event)
 
-    async def get_sandbox_binding(self, session_id: UUID) -> dict[str, Any] | None:
+    async def get_workspace_binding(self, session_id: UUID) -> dict[str, Any] | None:
         async with self._database.connection() as connection:
             cursor = await connection.execute(
-                "SELECT * FROM sandbox_bindings WHERE session_id = %s",
+                "SELECT * FROM workspace_bindings WHERE session_id = %s",
                 (session_id,),
             )
             return await cursor.fetchone()
 
-    async def upsert_sandbox_binding(
+    async def upsert_workspace_binding(
         self,
         session_id: UUID,
         *,
-        backend: str,
-        sandbox_id: str,
-        endpoint: str,
-        workspace_ref: str,
+        workspace_id: UUID,
+        provider: str,
+        external_ref: str,
+        state: dict[str, Any],
         status: str,
     ) -> dict[str, Any]:
         async with self._database.connection() as connection:
             cursor = await connection.execute(
                 """
-                INSERT INTO sandbox_bindings(
-                    session_id, backend, sandbox_id, endpoint, workspace_ref, status
+                INSERT INTO workspace_bindings(
+                    workspace_id, session_id, provider, external_ref, state_json, status
                 )
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (session_id) DO UPDATE
-                SET backend = EXCLUDED.backend,
-                    sandbox_id = EXCLUDED.sandbox_id,
-                    endpoint = EXCLUDED.endpoint,
-                    workspace_ref = EXCLUDED.workspace_ref,
+                SET provider = EXCLUDED.provider,
+                    external_ref = EXCLUDED.external_ref,
+                    state_json = EXCLUDED.state_json,
                     status = EXCLUDED.status,
                     updated_at = now()
                 RETURNING *
                 """,
-                (session_id, backend, sandbox_id, endpoint, workspace_ref, status),
+                (
+                    workspace_id,
+                    session_id,
+                    provider,
+                    external_ref,
+                    Jsonb(state),
+                    status,
+                ),
             )
             row = await cursor.fetchone()
             await connection.commit()
         return row
 
+    async def upsert_sandbox_lease(
+        self,
+        *,
+        workspace_id: UUID,
+        provider: str,
+        external_ref: str,
+        state: dict[str, Any],
+        owner_id: str,
+        fencing_token: int,
+        lease_ttl_seconds: int,
+    ) -> dict[str, Any]:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                INSERT INTO sandbox_leases(
+                    sandbox_id,
+                    workspace_id,
+                    provider,
+                    external_ref,
+                    state_json,
+                    owner_id,
+                    status,
+                    fencing_token,
+                    expires_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, 'ready', %s,
+                    now() + make_interval(secs => %s)
+                )
+                ON CONFLICT (workspace_id) DO UPDATE
+                SET provider = EXCLUDED.provider,
+                    external_ref = EXCLUDED.external_ref,
+                    state_json = EXCLUDED.state_json,
+                    owner_id = EXCLUDED.owner_id,
+                    status = 'ready',
+                    fencing_token = EXCLUDED.fencing_token,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = now()
+                WHERE sandbox_leases.fencing_token <= EXCLUDED.fencing_token
+                RETURNING *
+                """,
+                (
+                    workspace_id,
+                    workspace_id,
+                    provider,
+                    external_ref,
+                    Jsonb(state),
+                    owner_id,
+                    fencing_token,
+                    lease_ttl_seconds,
+                ),
+            )
+            row = await cursor.fetchone()
+            await connection.commit()
+        if row is None:
+            raise ConflictError(f"workspace {workspace_id} sandbox lease is stale")
+        return row
+
+    async def sandbox_fence_is_current(
+        self,
+        workspace_id: UUID,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT 1
+                FROM sandbox_leases sandbox
+                JOIN workspace_bindings workspace
+                  ON workspace.workspace_id = sandbox.workspace_id
+                JOIN session_leases session
+                  ON session.session_id = workspace.session_id
+                WHERE sandbox.workspace_id = %s
+                  AND sandbox.owner_id = %s
+                  AND sandbox.fencing_token = %s
+                  AND sandbox.status = 'ready'
+                  AND sandbox.expires_at > now()
+                  AND session.owner_id = sandbox.owner_id
+                  AND session.fencing_epoch = sandbox.fencing_token
+                  AND session.expires_at > now()
+                """,
+                (workspace_id, owner_id, fencing_token),
+            )
+            return await cursor.fetchone() is not None
+
     async def release_session_if_idle(self, session_id: UUID, owner_id: str) -> None:
         async with self._database.connection() as connection:
             await connection.execute(
                 """
-                DELETE FROM session_leases lease
-                WHERE lease.session_id = %s
-                  AND lease.owner_id = %s
+                UPDATE session_leases lease
+                SET expires_at = now() - interval '1 microsecond',
+                    updated_at = now()
+                WHERE lease.session_id = %s AND lease.owner_id = %s
                   AND NOT EXISTS (
                       SELECT 1
                       FROM runs active
                       JOIN app_threads thread ON thread.id = active.thread_id
                       WHERE thread.session_id = lease.session_id
+                        AND active.status = 'running'
+                  )
+                """,
+                (session_id, owner_id),
+            )
+            await connection.execute(
+                """
+                UPDATE sandbox_leases sandbox
+                SET status = 'idle',
+                    expires_at = now() - interval '1 microsecond',
+                    updated_at = now()
+                FROM workspace_bindings workspace
+                WHERE sandbox.workspace_id = workspace.workspace_id
+                  AND workspace.session_id = %s
+                  AND sandbox.owner_id = %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM runs active
+                      JOIN app_threads thread ON thread.id = active.thread_id
+                      WHERE thread.session_id = workspace.session_id
                         AND active.status = 'running'
                   )
                 """,

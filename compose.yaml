@@ -43,7 +43,7 @@ services:
     environment:
       AGENTFRAME_DATABASE_URL: postgresql://agentframe:agentframe@postgres:5432/agentframe
       AGENTFRAME_RUNTIME_BINARY: /usr/local/bin/agentframe-codex-runtime
-      AGENTFRAME_SANDBOX_BACKEND: docker
+      AGENTFRAME_SANDBOX_PROVIDER: docker
       AGENTFRAME_SANDBOX_IMAGE: agentframe-sandbox:local
       AGENTFRAME_DOCKER_NETWORK: agentframe
       AGENTFRAME_PUBLIC_BASE_URL: http://localhost:8080

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,9 +16,15 @@ class Settings(BaseSettings):
     runtime_binary: Path = Path("agentframe-codex-runtime")
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
-    sandbox_backend: str = "docker"
+    sandbox_provider: str = Field(
+        default="docker",
+        validation_alias=AliasChoices(
+            "sandbox_provider",
+            "AGENTFRAME_SANDBOX_PROVIDER",
+            "AGENTFRAME_SANDBOX_BACKEND",
+        ),
+    )
     sandbox_image: str = "agentframe-sandbox:local"
-    sandbox_port: int = 8081
     sandbox_cpu_limit: str = "2"
     docker_sandbox_memory_limit: str = "2g"
     kubernetes_sandbox_memory_limit: str = "2Gi"
@@ -35,6 +41,8 @@ class Settings(BaseSettings):
     lease_renew_seconds: int = 10
     max_parallel_threads_per_session: int = 4
     max_parallel_runs_per_instance: int = 16
+    executor_gateway_host: str = "127.0.0.1"
+    executor_gateway_port: int = 0
 
 
 @lru_cache
