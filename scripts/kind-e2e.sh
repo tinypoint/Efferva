@@ -152,10 +152,7 @@ trap cleanup_inspector EXIT
 kubectl --context "${context}" --namespace "${namespace}" get \
   "persistentvolumeclaim/${sandbox_name}" >/dev/null
 # A sandbox Pod is disposable; the workspace PVC is the persistence contract.
-# Remove any still-running Pod so the ReadWriteOnce volume can be mounted by
-# the inspector regardless of which Kind node ran the sandbox.
-kubectl --context "${context}" --namespace "${namespace}" delete \
-  pod "${sandbox_name}" --ignore-not-found --wait=true >/dev/null
+# The scheduler follows the bound volume's node affinity for the inspector.
 kubectl --context "${context}" --namespace "${namespace}" apply --filename=- <<EOF
 apiVersion: v1
 kind: Pod
