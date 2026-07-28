@@ -6,7 +6,7 @@
 |---|---:|---:|
 | Linux | x86_64 | 必须 |
 | Linux | arm64 | 必须 |
-| macOS | arm64 | 必须 |
+| macOS | arm64 | 延后 |
 | macOS | x86_64 | 延后 |
 | Windows | x86_64 | 不支持 |
 
@@ -60,14 +60,14 @@ Smoke test 在没有 Rust、没有 Codex 源码的 Debian 12 `python:3.13-slim-b
 
 `.github/workflows/wheels.yml`：
 
-1. 在 Linux x86_64、Linux arm64 Runner 上使用固定 Debian 12 Builder 编译 Runtime，
-   macOS arm64 使用原生 Runner；
+1. 在 Linux x86_64、Linux arm64 Runner 上并行使用固定 Debian 12 Builder 编译 Runtime；
 2. 构建平台 Wheel；
 3. 在干净环境安装并执行包内 Runtime；
 4. 运行 Python 单测和 PostgreSQL 集成测试；
 5. 运行 Docker Provider conformance；
 6. 使用 Linux x86_64 Wheel 运行双实例 Kind E2E；
-7. 上传三个不可变 Wheel artifact。
+7. 上传两个不可变 Linux Wheel artifact；
+8. `v*` 标签构建通过后，自动创建 GitHub Release 并附加两个 Wheel。
 
 内部 Registry 发布只允许手动触发，并要求：
 
