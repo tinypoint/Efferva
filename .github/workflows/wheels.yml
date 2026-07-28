@@ -48,7 +48,7 @@ jobs:
           repository: tinypoint/codex
           ref: ${{ env.CODEX_REVISION }}
           path: codex
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Set up Docker Buildx
         if: runner.os == 'Linux'
         uses: docker/setup-buildx-action@v3
@@ -153,7 +153,7 @@ jobs:
         with:
           name: wheel-linux-x86_64
           path: Efferva/dist/docker
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Test Debian 12 wheel against PostgreSQL
         working-directory: Efferva
         env:
@@ -213,7 +213,7 @@ jobs:
           pattern: wheel-*
           path: dist
           merge-multiple: true
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Upload
         env:
           TWINE_USERNAME: ${{ secrets.EFFERVA_REGISTRY_USERNAME }}
