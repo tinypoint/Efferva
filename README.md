@@ -162,6 +162,13 @@ OPENAI_API_KEY=... docker compose \
 打开 <http://localhost:8080>。产品代码只使用固定的本地开发身份并安装 Efferva；沙箱
 生命周期、命令和文件访问全部经 OpenSandbox provider，不由接入方直接操作 Docker。
 
+## Vibe-Trading 多用户产品
+
+[`examples/vibe-trading-gcp`](examples/vibe-trading-gcp) 展示如何把一个已有的完整产品
+接到 Efferva，而不是重新写一个演示 UI。该目录固定拉取 HKUDS/Vibe-Trading 的上游版本，
+再应用 example 自己持有的接入代码和最小 patch；本地可用 Docker Compose 体验 Alice/Bob
+用户隔离，并附带 GKE、IAP、Cloud SQL 和 OpenSandbox Kubernetes runtime 的部署清单。
+
 ## OpenSandbox 验收
 
 维护者可以用当前源码构建 Linux Wheel，再把它安装进真实 FastAPI 示例并运行完整回合：

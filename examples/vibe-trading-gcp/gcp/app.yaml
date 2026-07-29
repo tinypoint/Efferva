@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vibe-trading
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vibe-sandboxes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vibe-trading
+  namespace: vibe-trading
+  annotations:
+    iam.gke.io/gcp-service-account: vibe-trading@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: vibe-trading
+  namespace: vibe-trading
+spec:
+  iap:
+    enabled: true
+  healthCheck:
+    requestPath: /live
+    port: 8899
+    type: HTTP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vibe-trading
+  namespace: vibe-trading
+  annotations:
+    cloud.google.com/backend-config: '{"default":"vibe-trading"}'
+    cloud.google.com/neg: '{"ingress":true}'
+spec:
+  selector:
+    app: vibe-trading
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vibe-trading
+  namespace: vibe-trading
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vibe-trading
+  template:
+    metadata:
+      labels:
+        app: vibe-trading
+    spec:
+      serviceAccountName: vibe-trading
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: REGION-docker.pkg.dev/PROJECT_ID/vibe-trading/app:TAG
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+          env:
+            - name: VIBE_TRADING_AGENT_RUNTIME
+              value: efferva
+            - name: VIBE_TRADING_PRODUCT_AUTH_MODE
+              value: iap
+            - name: VIBE_TRADING_PRODUCT_IAP_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-trading-secrets
+                  key: iap-audience
+            - name: EFFERVA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-trading-secrets
+                  key: database-url
+            - name: EFFERVA_SANDBOX_PROVIDER
+              value: opensandbox
+            - name: EFFERVA_SANDBOX_IMAGE
+              value: REGION-docker.pkg.dev/PROJECT_ID/vibe-trading/sandbox:TAG
+            - name: EFFERVA_SANDBOX_CPU_LIMIT
+              value: "2"
+            - name: EFFERVA_SANDBOX_MEMORY_LIMIT
+              value: 4g
+            - name: EFFERVA_OPENSANDBOX_SERVER_URL
+              value: http://opensandbox-server.opensandbox-system.svc.cluster.local
+            - name: EFFERVA_OPENSANDBOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-trading-secrets
+                  key: opensandbox-api-key
+            - name: EFFERVA_OPENSANDBOX_USE_SERVER_PROXY
+              value: "true"
+            - name: EFFERVA_CODEX_OPENAI_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-trading-secrets
+                  key: openai-base-url
+            - name: EFFERVA_CODEX_MODEL
+              value: gpt-5.4
+            - name: CODEX_HOME
+              value: /home/vibe/.codex
+            - name: LANGCHAIN_PROVIDER
+              value: openai
+            - name: LANGCHAIN_MODEL_NAME
+              value: gpt-5.4
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-trading-secrets
+                  key: openai-api-key
+            - name: OPENAI_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-trading-secrets
+                  key: openai-base-url
+          ports:
+            - name: http
+              containerPort: 8899
+          readinessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+          args:
+            - --structured-logs
+            - --port=5432
+            - PROJECT_ID:REGION:INSTANCE_NAME
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: vibe-trading
+  namespace: vibe-trading
+spec:
+  domains:
+    - vibe.example.com
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vibe-trading
+  namespace: vibe-trading
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: vibe-trading
+    networking.gke.io/managed-certificates: vibe-trading
+spec:
+  defaultBackend:
+    service:
+      name: vibe-trading
+      port:
+        number: 80
