@@ -19,7 +19,7 @@ The local product shape combines:
 
 ## Kubernetes
 
-The Kubernetes topology runs multiple identical product pods against PostgreSQL. Session workspaces use per-session PVCs, while leases and fencing preserve execution correctness across instances.
+The Kubernetes topology runs multiple identical product pods against PostgreSQL. OpenSandbox owns sandbox lifecycle and workspace storage, while Efferva leases and fencing preserve execution correctness across instances.
 
 :::note[Guide status]
 Production manifests, readiness guidance, observability, and upgrade procedures are being rewritten before public release.

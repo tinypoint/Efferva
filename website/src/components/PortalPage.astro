@@ -11,7 +11,7 @@ const copy = {
   en: {
     metaTitle: "Efferva — Agent infrastructure that lives inside your product",
     metaDescription:
-      "Efferva is an embeddable, multi-tenant agent runtime for durable FastAPI products running on Docker or Kubernetes.",
+      "Efferva is an embeddable, multi-tenant agent runtime for durable FastAPI products with OpenSandbox-backed execution.",
     navLabel: "Primary navigation",
     nav: {
       capabilities: "Capabilities",
@@ -25,7 +25,7 @@ const copy = {
     readDocs: "Explore the docs",
     viewGithub: "View on GitHub",
     proofLabel: "Framework highlights",
-    proof: ["Open source", "FastAPI native", "Docker + Kubernetes"],
+    proof: ["Open source", "FastAPI native", "OpenSandbox ready"],
     visualLabel: "Efferva system architecture preview",
     visual: {
       product: "Your product",
@@ -58,7 +58,7 @@ const copy = {
       {
         title: "Isolated execution",
         body: "Run tools in provider-backed sandboxes with persistent per-session workspaces and a consistent execution contract.",
-        meta: "Docker / Kubernetes / Providers",
+        meta: "OpenSandbox / Providers",
       },
       {
         title: "Multi-tenant boundaries",
@@ -125,7 +125,7 @@ const copy = {
   "zh-cn": {
     metaTitle: "Efferva — 生长在产品内部的 Agent 基础设施",
     metaDescription:
-      "Efferva 是可嵌入 FastAPI 产品的多租户持久化 Agent Runtime，支持 Docker 与 Kubernetes。",
+      "Efferva 是可嵌入 FastAPI 产品的多租户持久化 Agent Runtime，通过 OpenSandbox 隔离执行。",
     navLabel: "主导航",
     nav: {
       capabilities: "核心能力",
@@ -139,7 +139,7 @@ const copy = {
     readDocs: "浏览文档",
     viewGithub: "查看 GitHub",
     proofLabel: "框架特性",
-    proof: ["开源", "原生 FastAPI", "Docker + Kubernetes"],
+    proof: ["开源", "原生 FastAPI", "OpenSandbox"],
     visualLabel: "Efferva 系统架构预览",
     visual: {
       product: "你的产品",
@@ -172,7 +172,7 @@ const copy = {
       {
         title: "隔离执行",
         body: "通过统一 Provider 契约在沙盒中执行工具，并保留每个 Session 的持久工作区。",
-        meta: "Docker / Kubernetes / Provider",
+        meta: "OpenSandbox / Provider",
       },
       {
         title: "多租户边界",
@@ -431,8 +431,8 @@ Efferva(identity=resolve_principal).install(
             <span class="runtime-ring ring-two"></span>
             <span class="runtime-chip chip-one">AG-UI</span>
             <span class="runtime-chip chip-two">SSE</span>
-            <span class="runtime-chip chip-three">Docker</span>
-            <span class="runtime-chip chip-four">K8s</span>
+            <span class="runtime-chip chip-three">OpenSandbox</span>
+            <span class="runtime-chip chip-four">Provider</span>
           </div>
           <div>
             <p class="section-kicker">{t.runtimeKicker}</p>

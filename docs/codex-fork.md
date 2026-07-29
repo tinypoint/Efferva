@@ -17,9 +17,9 @@ PostgreSQL Store 的具体实现位于 `Efferva/crates/postgres-thread-store`，
 PostgreSQL 驱动。
 
 Sandbox Provider 不增加 fork patch。Efferva 在沙盒外实现 Codex 已有的远程 exec-server
-协议，并在 Executor Gateway 内转换为 `SandboxRuntime`；Docker/Kubernetes/E2B 等差异留在
-Provider SDK。这样上游同步只需要长期维护 ThreadStore 注入，而不需要让 Codex 认识任何
-沙盒厂商。
+协议，并在 Executor Gateway 内转换为 `SandboxRuntime`；OpenSandbox 或第三方执行平台的
+差异留在 Provider SDK。这样上游同步只需要长期维护 ThreadStore 注入，而不需要让 Codex
+认识任何沙盒厂商。
 
 ## Git remote
 

@@ -56,8 +56,8 @@ Efferva.register_sandbox_provider(
 EFFERVA_SANDBOX_PROVIDER=company-sandbox
 ```
 
-`docker`、`opensandbox`、`kubernetes` 与 `kind` 是保留的一方名称。自定义 Provider 不应要求产品把
-API key 或厂商参数写入 `Efferva(...)`；它应从自己的部署配置读取。
+`opensandbox` 是保留的一方名称。自定义 Provider 不应要求产品把 API key 或厂商参数写入
+`Efferva(...)`；它应从自己的部署配置读取。
 
 OpenSandbox Provider 通过官方 Python SDK 连接 OpenSandbox Server。基础本地示例让
 OpenSandbox Server 使用 Docker runtime：
@@ -81,7 +81,7 @@ Codex 不直接依赖 Provider。每个 Efferva 实例中的 Executor Gateway �
 Codex Runtime
   -> loopback Executor Gateway
   -> SandboxRuntime
-  -> Docker Exec / Kubernetes Exec / vendor API
+  -> OpenSandbox execd API / third-party API
 ```
 
 Gateway endpoint 和随机 token 只存在于当前进程内存中，不写入数据库。每个请求都校验当前
@@ -97,8 +97,7 @@ Efferva 实例，永远不传入 Sandbox。
 共享认证入口：
 
 ```bash
-uv run python -m efferva.sandbox.conformance_cli --provider docker
-uv run python -m efferva.sandbox.conformance_cli --provider kubernetes
+uv run python -m efferva.sandbox.conformance_cli --provider opensandbox
 ```
 
 Python 适配包也可以直接调用 `run_provider_conformance(provider)`。认证检查：
@@ -119,9 +118,7 @@ Python 适配包也可以直接调用 `run_provider_conformance(provider)`。认
 
 | Provider | 执行通道 | Workspace | Sandbox 内组件 |
 |---|---|---|---|
-| Docker | Docker Exec | named volume | 基础工具镜像 |
-| OpenSandbox | OpenSandbox execd API | Docker named volume / Kubernetes PVC | OpenSandbox execd |
-| Kubernetes | Kubernetes Exec API | 每 Session 一个 PVC | 基础工具镜像 |
+| OpenSandbox | OpenSandbox execd API | 由 OpenSandbox runtime 管理 | OpenSandbox execd |
 
-Kubernetes Provider 不为 Sandbox 创建 Service，也不运行 Efferva exec-server。E2B 等外部
-Provider 应新增独立适配包并复用本契约，不修改控制面核心。
+Docker 或 Kubernetes 是 OpenSandbox Server 的部署/runtime 选择，不是 Efferva 内的另一套
+Provider。E2B 等外部 Provider 应新增独立适配包并复用本契约，不修改控制面核心。

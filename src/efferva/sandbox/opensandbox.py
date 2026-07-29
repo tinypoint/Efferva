@@ -263,7 +263,7 @@ class OpenSandboxProvider:
                     },
                     resource={
                         "cpu": self._settings.sandbox_cpu_limit,
-                        "memory": self._settings.docker_sandbox_memory_limit,
+                        "memory": self._settings.sandbox_memory_limit,
                     },
                     volumes=[
                         Volume(

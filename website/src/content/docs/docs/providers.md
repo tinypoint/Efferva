@@ -10,9 +10,7 @@ Sandbox providers implement lifecycle and runtime execution behind one contract.
 
 Current provider work covers:
 
-- Docker
-- Kubernetes
-- OpenSandbox as an optional integration
+- OpenSandbox as the built-in integration
 - Application-registered third-party providers
 
 The conformance suite validates workspace persistence, streaming execution, stdin, concurrent processes, termination, file operations, and stop/start behavior.

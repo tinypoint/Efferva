@@ -1,4 +1,4 @@
-.PHONY: check wheel wheel-docker wheel-smoke docker-runtime docker-example docker-up docker-down docker-e2e kind-up kind-up-cliproxy kind-smoke kind-e2e kind-down kind-port-forward
+.PHONY: check wheel wheel-docker wheel-smoke docker-example opensandbox-e2e
 
 check:
 	uv run ruff check .
@@ -14,45 +14,11 @@ wheel-docker:
 wheel-smoke: wheel-docker
 	./scripts/wheel-smoke.sh $$(find dist/docker -maxdepth 1 -name 'efferva-*.whl' -print -quit)
 
-docker-runtime: wheel-docker
-	docker build \
-		--file docker/Dockerfile \
-		--target runtime \
-		--tag efferva-runtime:local \
-		..
-
 docker-example:
 	docker build \
 		--file examples/basic-local-docker/Dockerfile \
 		--tag efferva-basic-local-docker:local \
 		examples/basic-local-docker
 
-docker-up: wheel-docker
-	@docker network inspect efferva >/dev/null 2>&1 || docker network create efferva
-	docker compose up --build --detach
-	docker compose ps
-
-docker-down:
-	docker compose down
-
-docker-e2e:
-	./scripts/docker-e2e.sh
-
-kind-up:
-	./scripts/kind-up.sh
-
-kind-up-cliproxy:
-	./scripts/kind-up-cliproxy.sh
-
-kind-smoke:
-	./scripts/kind-smoke.sh
-
-kind-e2e:
-	./scripts/kind-e2e.sh
-
-kind-down:
-	kind delete cluster --name "$${EFFERVA_KIND_CLUSTER:-efferva}"
-
-kind-port-forward:
-	kubectl --context "kind-$${EFFERVA_KIND_CLUSTER:-efferva}" \
-		--namespace efferva port-forward service/efferva 8080:80
+opensandbox-e2e: wheel-docker
+	./scripts/opensandbox-e2e.sh

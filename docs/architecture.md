@@ -22,8 +22,8 @@ flowchart LR
 ```
 
 App 实例包含无状态 HTTP 层、Run worker、沙盒外 Codex Runtime 与 Executor Gateway。
-Gateway 把 Codex 远程执行协议转换为统一 `SandboxRuntime`，再由 Docker Exec、Kubernetes
-Exec 或第三方 API 执行。PostgreSQL 是控制面真相来源；工作区只挂载给 Session sandbox，
+Gateway 把 Codex 远程执行协议转换为统一 `SandboxRuntime`，再由 OpenSandbox execd API
+或第三方 Provider 执行。PostgreSQL 是控制面真相来源；工作区只挂载给 Session sandbox，
 不挂载给 Web/App 实例。
 
 ## 产品身份与三层资源
@@ -39,8 +39,8 @@ Principal 使用 `tenant_id + issuer + subject` 形成身份边界。Efferva 不
 表；产品把现有角色即时映射为框架 Capability。Session 保存租户和所有者，Thread、Run、
 Message 与 Event 均通过 Session 继承权限。
 
-一个 Session 的多个 Thread 共用一个 Docker volume 或 PVC。多个 Thread 可以同时执行；
-同一 Thread 同一时刻只允许一个 Run 执行，避免 Codex 对话历史发生分叉写入。
+一个 Session 的多个 Thread 共用一个由 OpenSandbox 管理的持久工作区。多个 Thread
+可以同时执行；同一 Thread 同一时刻只允许一个 Run 执行，避免 Codex 对话历史发生分叉写入。
 
 ## 授权边界
 
@@ -85,25 +85,21 @@ MVP 的崩溃恢复语义是 **at-least-once**：如果旧实例在崩溃前已�
 重放 prompt 可能重复该副作用。浏览器断线不触发重放，因此正常断线补流没有这个问题。生产版
 需要为有副作用的 Tool 增加幂等键或提交日志。
 
-## PostgreSQL 与 PVC 的职责
+## PostgreSQL 与工作区存储的职责
 
-PostgreSQL 保存可查询、可补流、可跨实例恢复的结构化状态。PVC/volume 只保存用户工作区文件。
-多个 App 实例不共用一个 PVC；每个 Session 有独立 PVC，并且只由该 Session 的 sandbox 使用。
+PostgreSQL 保存可查询、可补流、可跨实例恢复的结构化状态。OpenSandbox 的持久卷只保存
+用户工作区文件。App 实例不挂载用户工作区；每个 Session 的工作区只由对应 sandbox 使用。
 
 `workspace_bindings` 与 `sandbox_leases` 只保存 Provider 名称、不透明 `external_ref/state_json`
 和 fencing 状态，不保存假设某种沙盒拓扑的 endpoint。Thread、Run 与 Event 仍通过 Session
 继承身份边界，不重复存租户字段。
 
-Kind 默认 storage class 的 `ReadWriteOnce` 足够，因为 Session 执行租约保证同一时刻只有一个
-Runtime 使用这个 sandbox。未来跨节点热迁移可改用支持 `ReadWriteMany` 的存储，但不是当前
-正确性前提。
+具体使用 Docker named volume、Kubernetes PVC 或厂商存储由 OpenSandbox 部署决定，不进入
+Efferva 的 Provider 状态模型。
 
 ## Sandbox 信任边界
 
-Codex Runtime 和 API key 留在 App 容器/Pod；sandbox 不接收 API key，也不挂载 Docker
-Socket 或 Kubernetes 凭据。Executor Gateway 也位于 App 实例中，仅监听 loopback，并在
-每个协议请求上验证 Sandbox lease fencing。Sandbox 只运行基础工具镜像并挂载对应 Session
-工作区，不运行 Efferva helper，也不暴露 WebSocket Service。
-
-Docker backend 的 App 为创建沙盒而挂载宿主 Docker Socket，只适用于本地开发。Kind backend
-通过 namespace Role 管理 Pod、PVC 并调用 Kubernetes Exec API，是 GKE 路径的基础。
+Codex Runtime 和 API key 留在 App 容器/Pod；sandbox 不接收 API key，App 也不需要 Docker
+Socket 或 Kubernetes 凭据。Executor Gateway 位于 App 实例中，仅监听 loopback，并在每个
+协议请求上验证 Sandbox lease fencing。沙箱创建、命令执行和文件访问统一通过 OpenSandbox
+Server；Docker Socket 或 Kubernetes 凭据只属于 OpenSandbox 自己的部署边界。

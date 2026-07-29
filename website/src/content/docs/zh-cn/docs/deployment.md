@@ -19,7 +19,7 @@ Efferva 面向使用 Docker 本地运行或部署在 Kubernetes 上的产品应�
 
 ## Kubernetes
 
-Kubernetes 拓扑由多个相同产品 Pod 连接 PostgreSQL。Session 工作区使用独立 PVC，租约与 fencing 保证跨实例执行的正确性。
+Kubernetes 拓扑由多个相同产品 Pod 连接 PostgreSQL。OpenSandbox 管理沙箱生命周期和工作区存储，Efferva 的租约与 fencing 保证跨实例执行的正确性。
 
 :::note[指南状态]
 生产 Manifest、Ready 检查、可观测性和升级流程将在公开发布前重写。

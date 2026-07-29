@@ -20,7 +20,7 @@ def register_sandbox_provider(
         raise ValueError(
             "sandbox provider name must contain only lowercase letters, digits, '-' or '_'"
         )
-    if normalized in {"docker", "kubernetes", "kind"}:
+    if normalized == "opensandbox":
         raise ValueError(f"{normalized} is a reserved first-party sandbox provider")
     _custom_providers[normalized] = provider
 

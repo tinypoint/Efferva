@@ -10,9 +10,7 @@ sidebar:
 
 当前 Provider 工作覆盖：
 
-- Docker
-- Kubernetes
-- 可选的 OpenSandbox 集成
+- 内置的 OpenSandbox 集成
 - 由应用注册的第三方 Provider
 
 一致性测试覆盖工作区持久化、流式执行、stdin、并发进程、终止、文件操作以及 stop/start 行为。

@@ -64,8 +64,8 @@ Smoke test 在没有 Rust、没有 Codex 源码的 Debian 12 `python:3.13-slim-b
 2. 构建平台 Wheel；
 3. 在干净环境安装并执行包内 Runtime；
 4. 运行 Python 单测和 PostgreSQL 集成测试；
-5. 运行 Docker Provider conformance；
-6. 使用 Linux x86_64 Wheel 运行双实例 Kind E2E；
+5. 将 Linux x86_64 Wheel 安装进真实 FastAPI 示例；
+6. 通过 OpenSandbox Docker runtime 运行完整 Agent E2E；
 7. 上传两个不可变 Linux Wheel artifact；
 8. `v*` 标签构建通过后，自动创建 GitHub Release 并附加两个 Wheel。
 
@@ -81,7 +81,7 @@ PyPI 发布应在内部 Registry 与真实产品接入稳定后作为单独审�
 
 ## 后续公共发布工程
 
-以下工作不属于 Docker + Kind MVP：
+以下工作不属于当前 Linux Wheel MVP：
 
 - 在 manylinux 构建环境中确定最低 glibc 基线；
 - 静态链接不在 manylinux 白名单内的依赖，或用 `auditwheel` 正确打包共享库；

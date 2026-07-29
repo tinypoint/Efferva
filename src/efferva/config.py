@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,27 +16,14 @@ class Settings(BaseSettings):
     runtime_binary: Path | None = None
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
-    sandbox_provider: str = Field(
-        default="docker",
-        validation_alias=AliasChoices(
-            "sandbox_provider",
-            "EFFERVA_SANDBOX_PROVIDER",
-            "EFFERVA_SANDBOX_BACKEND",
-        ),
-    )
+    sandbox_provider: str = "opensandbox"
     sandbox_image: str = "efferva-sandbox:local"
     sandbox_cpu_limit: str = "2"
-    docker_sandbox_memory_limit: str = "2g"
+    sandbox_memory_limit: str = "2g"
     opensandbox_server_url: str = "http://localhost:8080"
     opensandbox_api_key: str | None = None
     opensandbox_use_server_proxy: bool = True
-    kubernetes_sandbox_memory_limit: str = "2Gi"
-    sandbox_pids_limit: int = 512
     workspace_path: str = "/workspace"
-    docker_network: str = "efferva"
-    kubernetes_namespace: str = "default"
-    kubernetes_storage_class: str | None = None
-    kubernetes_workspace_size: str = "5Gi"
     public_base_url: str = "http://localhost:8080"
     instance_id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
     worker_poll_seconds: float = 0.25

@@ -1,9 +1,8 @@
-name: efferva-basic-local-docker
+name: efferva-opensandbox-e2e
 
 services:
   postgres:
     image: postgres:17-alpine
-    restart: unless-stopped
     environment:
       POSTGRES_DB: efferva
       POSTGRES_USER: efferva
@@ -13,23 +12,20 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
     networks:
-      - efferva-local
+      - e2e
 
   sandbox-image:
-    image: efferva-sandbox:local
+    image: efferva-e2e-sandbox:local
     build:
       context: ../..
       dockerfile: docker/Sandbox.Dockerfile
     entrypoint: ["/bin/true"]
     networks:
-      - efferva-local
+      - e2e
 
   opensandbox-server:
     image: opensandbox/server:v0.2.2
-    restart: unless-stopped
     depends_on:
       sandbox-image:
         condition: service_completed_successfully
@@ -46,43 +42,46 @@ services:
       interval: 2s
       timeout: 3s
       retries: 60
-    ports:
-      - "${OPENSANDBOX_HTTP_PORT:-8090}:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./opensandbox.toml:/etc/opensandbox/config.toml:ro
       - opensandbox-data:/var/lib/opensandbox
     networks:
-      - efferva-local
+      - e2e
+
+  model-proxy:
+    image: efferva-model-proxy:local
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Mock.Dockerfile
+    networks:
+      - e2e
 
   app:
-    image: efferva-basic-local-docker:local
-    restart: unless-stopped
+    image: efferva-e2e-product:local
     build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        EFFERVA_VERSION: ${EFFERVA_VERSION:-0.1.0}
-        EFFERVA_WHEEL_URL: ${EFFERVA_WHEEL_URL:-}
+      context: ../..
+      dockerfile: tests/e2e/Product.Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
       opensandbox-server:
         condition: service_healthy
+      model-proxy:
+        condition: service_started
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
       EFFERVA_SANDBOX_PROVIDER: opensandbox
-      EFFERVA_SANDBOX_IMAGE: efferva-sandbox:local
+      EFFERVA_SANDBOX_IMAGE: efferva-e2e-sandbox:local
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
-      EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
+      EFFERVA_OPENSANDBOX_API_KEY: e2e-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "true"
-      EFFERVA_PUBLIC_BASE_URL: http://localhost:8080
+      EFFERVA_CODEX_OPENAI_BASE_URL: http://model-proxy:18090/v1
+      EFFERVA_CODEX_MODEL: mock
+      OPENAI_API_KEY: mock
       CODEX_HOME: /var/lib/efferva/codex
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
-      - "${EFFERVA_HTTP_PORT:-8080}:8080"
-    volumes:
-      - codex-home:/var/lib/efferva/codex
+      - "${EFFERVA_E2E_PORT:-18080}:8080"
     healthcheck:
       test:
         [
@@ -95,13 +94,11 @@ services:
       timeout: 3s
       retries: 60
     networks:
-      - efferva-local
+      - e2e
 
 volumes:
-  postgres-data:
   opensandbox-data:
-  codex-home:
 
 networks:
-  efferva-local:
-    name: efferva-local
+  e2e:
+    name: efferva-e2e

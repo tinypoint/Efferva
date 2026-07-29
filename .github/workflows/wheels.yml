@@ -103,7 +103,7 @@ jobs:
           generate_release_notes: true
 
   linux-validation:
-    name: PostgreSQL, Docker and dual-instance Kind
+    name: PostgreSQL and OpenSandbox product E2E
     needs: build
     runs-on: ubuntu-24.04
     services:
@@ -151,33 +151,11 @@ jobs:
               EFFERVA_TEST_RUNTIME_BINARY="${runtime}" \
                 python -m pytest -q /workspace/tests/integration
             '
-      - name: Build wheel-only application and sandbox images
-        working-directory: Efferva
-        run: |
-          docker build --file docker/Dockerfile --target app \
-            --tag efferva-app:local ..
-          docker build --file docker/Dockerfile --target sandbox \
-            --tag efferva-sandbox:local ..
-          docker build --file tests/e2e/Mock.Dockerfile \
-            --tag efferva-model-proxy:local ..
-      - name: Install Kind
-        uses: helm/kind-action@v1
-        with:
-          install_only: true
-      - name: Run dual-instance Kind E2E
+      - name: Run real FastAPI product with OpenSandbox
         working-directory: Efferva
         env:
           EFFERVA_SKIP_WHEEL_BUILD: "1"
-          OPENAI_API_KEY: mock
-          EFFERVA_CODEX_OPENAI_BASE_URL: http://model-proxy:8000/v1
-          EFFERVA_CODEX_MODEL: mock
-        run: |
-          ./scripts/kind-up.sh
-          kind load docker-image --name efferva efferva-model-proxy:local
-          kubectl apply --filename tests/e2e/kind-mock.yaml
-          kubectl --namespace efferva rollout status deployment/model-proxy --timeout=180s
-          ./scripts/kind-smoke.sh
-          ./scripts/kind-e2e.sh
+        run: ./scripts/opensandbox-e2e.sh
 
   publish-internal:
     name: Publish to internal registry

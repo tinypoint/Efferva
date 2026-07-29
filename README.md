@@ -6,17 +6,19 @@ AG-UI、持久事件、多实例执行租约和基础 WebUI。
 
 ## 产品接入
 
-安装当前平台的 Wheel：
+安装当前平台的 Wheel 和 OpenSandbox Provider：
 
 ```bash
-pip install efferva
+pip install "efferva[opensandbox]"
 ```
 
 提供运行环境：
 
 ```bash
 export EFFERVA_DATABASE_URL=postgresql://user:password@postgres/efferva
-export EFFERVA_SANDBOX_PROVIDER=docker
+export EFFERVA_SANDBOX_PROVIDER=opensandbox
+export EFFERVA_OPENSANDBOX_SERVER_URL=http://opensandbox-server:8090
+export EFFERVA_OPENSANDBOX_API_KEY=...
 export OPENAI_API_KEY=...
 # 使用 OpenAI-compatible Responses API 代理时可选：
 export EFFERVA_CODEX_OPENAI_BASE_URL=https://llm-proxy.example.com/v1
@@ -63,7 +65,7 @@ app = Efferva(identity=resolve_principal).asgi_app()
 ## 安装包边界
 
 平台 Wheel 包含 Python SDK、FastAPI Router、WebUI、Worker、Repository、迁移、AG-UI、
-Executor Gateway、Docker/Kubernetes Provider 和当前平台的
+Executor Gateway、OpenSandbox Provider 和当前平台的
 `efferva/bin/efferva-codex-runtime`。
 
 最终用户不需要：
@@ -92,7 +94,7 @@ Wheel 缺失时启动会返回包含 OS/架构的明确错误。
 - 浏览器断线不取消 Run，`Last-Event-ID` 可从任意实例补流；
 - 一个 Session 的多个 Thread 可并行并共享同一工作区；
 - 同一 Thread 的 Run 串行；
-- Docker 使用每 Session 一个 named volume，Kubernetes 使用每 Session 一个 PVC。
+- 工作区由 OpenSandbox 管理，并通过 Provider 状态与 Session 绑定。
 
 详细一致性语义见 [架构文档](docs/architecture.md)。
 
@@ -117,47 +119,20 @@ OPENAI_API_KEY=... docker compose \
 打开 <http://localhost:8080>。产品代码只使用固定的本地开发身份并安装 Efferva；沙箱
 生命周期、命令和文件访问全部经 OpenSandbox provider，不由接入方直接操作 Docker。
 
-## Docker 与 Kind 验收
+## OpenSandbox 验收
 
-要求 Docker Desktop；Kind 还要求 `kind`、`kubectl` 和 `jq`。
-
-```bash
-export OPENAI_API_KEY=...
-make docker-up
-```
-
-Compose 会先构建 Linux 平台 Wheel，最终 App 镜像只安装 Wheel，不从源码编译 Python 包或
-Codex。MVP 的 Linux Wheel 以 Debian 12 / glibc 2.36 为受控运行基线，不宣称通用
-manylinux 兼容。打开 <http://localhost:8080>，停止时执行：
+维护者可以用当前源码构建 Linux Wheel，再把它安装进真实 FastAPI 示例并运行完整回合：
 
 ```bash
-make docker-down
+make opensandbox-e2e
 ```
 
-Kind 双实例：
-
-```bash
-export OPENAI_API_KEY=...
-export EFFERVA_CODEX_OPENAI_BASE_URL=http://host.docker.internal:8317/v1
-export EFFERVA_CODEX_MODEL=gpt-5.4
-make kind-up
-make kind-smoke
-make kind-e2e
-```
-
-本机已有名为 `cli-proxy-api` 的 CLIProxyAPI 容器时：
-
-```bash
-make kind-up-cliproxy
-make kind-e2e
-```
-
-Kind E2E 验证两个产品 Pod、租户隔离、同 Session 两个并行 Thread、共享 PVC 文件，以及
-浏览器从另一实例按 `Last-Event-ID` 补流。
+这条测试启动 PostgreSQL、OpenSandbox Server、模型 Mock 和
+`examples/basic-local-docker` 产品应用，验证 Wheel 内 Runtime、沙箱执行和持久事件。
 
 ## Provider SDK
 
-内置 `docker` 和 `kubernetes` Provider。高级用户可以在进程启动前注册第三方 Provider：
+内置 `opensandbox` Provider。高级用户可以在进程启动前注册第三方 Provider：
 
 ```python
 from efferva import Efferva
@@ -174,8 +149,7 @@ export EFFERVA_SANDBOX_PROVIDER=company-sandbox
 Provider 必须满足统一契约：
 
 ```bash
-uv run python -m efferva.sandbox.conformance_cli --provider docker
-uv run python -m efferva.sandbox.conformance_cli --provider kubernetes
+uv run python -m efferva.sandbox.conformance_cli --provider opensandbox
 ```
 
 契约覆盖工作区和沙盒幂等、流式执行、stdin、并发进程、PTY、终止、文件 API 与
@@ -191,7 +165,7 @@ make check
 uv run pytest -q
 make wheel
 make wheel-smoke
-make docker-e2e
+make opensandbox-e2e
 ```
 
 源码工作区保持两个相邻仓库：
