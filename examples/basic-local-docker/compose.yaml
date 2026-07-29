@@ -18,21 +18,9 @@ services:
     networks:
       - efferva-local
 
-  sandbox-image:
-    image: efferva-sandbox:local
-    build:
-      context: ../..
-      dockerfile: docker/Sandbox.Dockerfile
-    entrypoint: ["/bin/true"]
-    networks:
-      - efferva-local
-
   opensandbox-server:
     image: opensandbox/server:v0.2.2
     restart: unless-stopped
-    depends_on:
-      sandbox-image:
-        condition: service_completed_successfully
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
     healthcheck:
@@ -72,7 +60,7 @@ services:
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
       EFFERVA_SANDBOX_PROVIDER: opensandbox
-      EFFERVA_SANDBOX_IMAGE: efferva-sandbox:local
+      EFFERVA_SANDBOX_IMAGE: ghcr.io/openai/codex-universal:latest
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "true"

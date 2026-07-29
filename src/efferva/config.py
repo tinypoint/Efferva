@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
     sandbox_provider: str = "opensandbox"
-    sandbox_image: str = "efferva-sandbox:local"
+    sandbox_image: str = "ghcr.io/openai/codex-universal:latest"
     sandbox_cpu_limit: str = "2"
     sandbox_memory_limit: str = "2g"
     opensandbox_server_url: str = "http://localhost:8080"
