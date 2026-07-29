@@ -5,12 +5,32 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from efferva.sandbox import SandboxEnvironment
 
 logger = logging.getLogger(__name__)
+
+SANDBOX_ENVIRONMENT_ID = "$EFFERVA_SANDBOX_ENVIRONMENT_ID"
+SANDBOX_WORKSPACE_PATH = "$EFFERVA_SANDBOX_WORKSPACE_PATH"
+
+
+def _resolve_sandbox_config(
+    value: Any,
+    sandbox: SandboxEnvironment,
+) -> Any:
+    if value == SANDBOX_ENVIRONMENT_ID:
+        return sandbox.environment_id
+    if value == SANDBOX_WORKSPACE_PATH:
+        return sandbox.workspace_path
+    if isinstance(value, Mapping):
+        return {key: _resolve_sandbox_config(item, sandbox) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_sandbox_config(item, sandbox) for item in value]
+    return deepcopy(value)
 
 
 class CodexRpcError(RuntimeError):
@@ -29,12 +49,14 @@ class CodexRuntime:
         developer_instructions: str | None = None,
         openai_base_url: str | None = None,
         model: str | None = None,
+        codex_config: Mapping[str, Any] | None = None,
     ) -> None:
         self._binary = binary
         self._database_url = database_url
         self._developer_instructions = developer_instructions
         self._openai_base_url = openai_base_url
         self._model = model
+        self._codex_config = deepcopy(dict(codex_config or {}))
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -91,21 +113,22 @@ class CodexRuntime:
             await self.notify("notifications/initialized")
 
     def _runtime_command(self) -> list[str]:
-        command = [str(self._binary)]
+        return [str(self._binary)]
+
+    def _thread_config(self, sandbox: SandboxEnvironment) -> dict[str, Any]:
+        config = _resolve_sandbox_config(self._codex_config, sandbox)
         if self._openai_base_url:
-            provider = "efferva_proxy"
-            provider_overrides = (
-                ("model_provider", provider),
-                (f"model_providers.{provider}.name", "Efferva LLM proxy"),
-                (f"model_providers.{provider}.base_url", self._openai_base_url),
-                (f"model_providers.{provider}.env_key", "OPENAI_API_KEY"),
-                (f"model_providers.{provider}.wire_api", "responses"),
-            )
-            for key, value in provider_overrides:
-                command.extend(["--config", f"{key}={json.dumps(value)}"])
-        if self._model:
-            command.extend(["--config", f"model={json.dumps(self._model)}"])
-        return command
+            providers = config.setdefault("model_providers", {})
+            if not isinstance(providers, dict):
+                raise ValueError("Codex config model_providers must be a table")
+            providers["efferva_proxy"] = {
+                "name": "Efferva LLM proxy",
+                "base_url": self._openai_base_url,
+                "env_key": "OPENAI_API_KEY",
+                "wire_api": "responses",
+            }
+            config["model_provider"] = "efferva_proxy"
+        return config
 
     async def request(
         self,
@@ -178,22 +201,34 @@ class CodexRuntime:
             "environments": [self._environment_selection(sandbox)],
             "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
+        config = self._thread_config(sandbox)
+        if config:
+            params["config"] = config
+        if self._openai_base_url:
+            params["modelProvider"] = "efferva_proxy"
+        if self._model:
+            params["model"] = self._model
         if self._developer_instructions is not None:
             params["developerInstructions"] = self._developer_instructions
         response = await self.request("thread/start", params)
         return str(response["thread"]["id"])
 
     async def resume_thread(self, thread_id: str, sandbox: SandboxEnvironment) -> None:
-        await self.request(
-            "thread/resume",
-            {
-                "threadId": thread_id,
-                "cwd": sandbox.workspace_path,
-                "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
-                "runtimeWorkspaceRoots": [sandbox.workspace_path],
-            },
-        )
+        params = {
+            "threadId": thread_id,
+            "cwd": sandbox.workspace_path,
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+            "runtimeWorkspaceRoots": [sandbox.workspace_path],
+        }
+        config = self._thread_config(sandbox)
+        if config:
+            params["config"] = config
+        if self._openai_base_url:
+            params["modelProvider"] = "efferva_proxy"
+        if self._model:
+            params["model"] = self._model
+        await self.request("thread/resume", params)
 
     async def start_turn(
         self,

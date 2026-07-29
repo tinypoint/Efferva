@@ -1,14 +1,19 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from efferva.api import create_api_router, principal_dependency
-from efferva.config import Settings, get_settings
+from efferva.config import (
+    Settings,
+    get_settings,
+    load_codex_config,
+    merge_codex_config,
+)
 from efferva.db import Database
 from efferva.identity import (
     ForbiddenError,
@@ -49,9 +54,11 @@ class Efferva:
         *,
         identity: IdentityResolver,
         settings: Settings | None = None,
+        codex_config: Mapping[str, Any] | None = None,
     ) -> None:
         self.identity = identity
         self.settings = settings or get_settings()
+        self.codex_config = dict(codex_config or {})
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
         normalized_prefix = self._normalize_prefix(prefix)
@@ -72,6 +79,10 @@ class Efferva:
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             runtime_binary = locate_runtime_binary(settings.runtime_binary)
+            codex_config = merge_codex_config(
+                load_codex_config(settings.codex_config_file),
+                self.codex_config,
+            )
             database = Database(settings.database_url)
             runtime: CodexRuntime | None = None
             worker: RunWorker | None = None
@@ -85,6 +96,7 @@ class Efferva:
                     settings.database_url,
                     openai_base_url=settings.codex_openai_base_url,
                     model=settings.codex_model,
+                    codex_config=codex_config,
                 )
                 await runtime.start()
                 sandboxes = create_sandbox_control_plane(settings, repository)

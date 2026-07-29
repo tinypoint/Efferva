@@ -60,10 +60,12 @@ services:
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
       EFFERVA_SANDBOX_PROVIDER: opensandbox
-      EFFERVA_SANDBOX_IMAGE: ghcr.io/openai/codex-universal:latest
+      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.12-slim}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "true"
+      EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
+      EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-gpt-5.4}
       EFFERVA_PUBLIC_BASE_URL: http://localhost:8080
       CODEX_HOME: /var/lib/efferva/codex
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -71,6 +73,8 @@ services:
       - "${EFFERVA_HTTP_PORT:-8080}:8080"
     volumes:
       - codex-home:/var/lib/efferva/codex
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test:
         [

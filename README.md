@@ -46,6 +46,49 @@ app = FastAPI()
 Efferva(identity=resolve_principal).install(app, prefix="/agent")
 ```
 
+需要使用 Codex 原生配置时，可以直接传入可信的配置映射：
+
+```python
+Efferva(
+    identity=resolve_principal,
+    codex_config={
+        "model_reasoning_effort": "high",
+        "web_search": "live",
+        "features": {"unified_exec": True},
+    },
+).install(app, prefix="/agent")
+```
+
+部署管理员也可以提供 TOML 文件：
+
+```bash
+export EFFERVA_CODEX_CONFIG_FILE=/etc/efferva/codex.toml
+```
+
+文件配置与 Python 配置会深度合并，Python 显式配置优先。Efferva 在
+`thread/start` 和 `thread/resume` 时把合并结果作为线程配置层注入 Codex App Server；
+不要求在共享 `CODEX_HOME` 中维护基础 `config.toml`。模型 Base URL、模型名称及 Efferva
+管理的运行环境和安全参数仍由对应的类型化配置覆盖。
+
+需要把 stdio MCP 启动在每个 Session 的远程沙箱时，可在配置值中使用：
+
+- `$EFFERVA_SANDBOX_ENVIRONMENT_ID`：当前 Session 的 Codex environment id；
+- `$EFFERVA_SANDBOX_WORKSPACE_PATH`：当前 Session 的 workspace 绝对路径。
+
+Efferva 会在每次 `thread/start` 和 `thread/resume` 注入真实值。例如：
+
+```python
+codex_config={
+    "mcp_servers": {
+        "domain_tools": {
+            "command": "domain-mcp",
+            "environment_id": "$EFFERVA_SANDBOX_ENVIRONMENT_ID",
+            "cwd": "$EFFERVA_SANDBOX_WORKSPACE_PATH",
+        }
+    }
+}
+```
+
 没有现有 FastAPI 宿主时：
 
 ```python

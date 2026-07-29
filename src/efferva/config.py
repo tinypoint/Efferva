@@ -1,5 +1,9 @@
+import tomllib
+from collections.abc import Mapping
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +18,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://efferva:efferva@localhost:5432/efferva"
     runtime_binary: Path | None = None
+    codex_config_file: Path | None = None
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
     sandbox_provider: str = "opensandbox"
@@ -38,3 +43,27 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def load_codex_config(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    with path.open("rb") as stream:
+        value = tomllib.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"Codex config must be a TOML table: {path}")
+    return value
+
+
+def merge_codex_config(
+    base: Mapping[str, Any],
+    override: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(dict(base))
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, Mapping):
+            merged[key] = merge_codex_config(existing, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
