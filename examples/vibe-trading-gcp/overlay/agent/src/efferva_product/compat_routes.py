@@ -10,7 +10,6 @@ from typing import Any
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse, StreamingResponse
-
 from src.api.sessions_routes import (
     CreateSessionRequest,
     MessageResponse,
@@ -59,7 +58,10 @@ class _EffervaApi:
         return response.json()
 
 
-def _session_response(session: dict[str, Any], last_attempt_id: str | None = None) -> dict[str, Any]:
+def _session_response(
+    session: dict[str, Any],
+    last_attempt_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "session_id": session["id"],
         "title": session["name"],

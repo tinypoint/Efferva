@@ -6,9 +6,9 @@ import asyncio
 import re
 
 from fastapi import Request
+from src.config.accessor import get_env_config
 
 from efferva import Principal, UnauthenticatedError
-from src.config.accessor import get_env_config
 
 _DEV_USER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"

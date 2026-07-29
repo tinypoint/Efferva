@@ -28,6 +28,7 @@ from efferva.sandbox import (
     WorkspaceHandle,
     run_provider_conformance,
 )
+from efferva.tools import Tool, ToolContext
 
 __all__ = [
     "Efferva",
@@ -47,6 +48,8 @@ __all__ = [
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
+    "Tool",
+    "ToolContext",
     "UnauthenticatedError",
     "WorkspaceHandle",
     "locate_runtime_binary",

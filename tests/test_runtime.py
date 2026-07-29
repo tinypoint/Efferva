@@ -8,6 +8,7 @@ import pytest
 
 from efferva.runtime import CodexRpcError, CodexRuntime
 from efferva.sandbox import SandboxEnvironment, SandboxHandle
+from efferva.tools import Tool, ToolContext
 
 
 def sandbox_environment() -> SandboxEnvironment:
@@ -198,3 +199,108 @@ async def test_environment_connection_retries_until_sandbox_is_listening(
 
     assert add_attempts == 2
     assert info_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_registers_and_executes_an_application_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocations: list[tuple[ToolContext, dict[str, Any]]] = []
+
+    async def calculate(
+        context: ToolContext,
+        arguments: dict[str, Any],
+    ) -> dict[str, int]:
+        invocations.append((context, arguments))
+        return {"total": int(arguments["left"]) + int(arguments["right"])}
+
+    runtime = CodexRuntime(
+        Path("/not-started"),
+        "postgresql://unused",
+        tools=[
+            Tool(
+                name="add_numbers",
+                description="Add two integers.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "left": {"type": "integer"},
+                        "right": {"type": "integer"},
+                    },
+                    "required": ["left", "right"],
+                    "additionalProperties": False,
+                },
+                handler=calculate,
+            )
+        ],
+    )
+    sandbox = sandbox_environment()
+    requests: list[tuple[str, dict[str, Any] | None]] = []
+    writes: list[dict[str, Any]] = []
+
+    async def request(
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        request_timeout: float = 120,
+    ) -> dict[str, Any]:
+        requests.append((method, params))
+        return {"thread": {"id": "codex-thread"}}
+
+    async def write(message: dict[str, Any]) -> None:
+        writes.append(message)
+
+    monkeypatch.setattr(runtime, "request", request)
+    monkeypatch.setattr(runtime, "_write", write)
+
+    assert await runtime.start_thread(sandbox) == "codex-thread"
+    assert requests[0][1] is not None
+    assert requests[0][1]["dynamicTools"] == [
+        {
+            "type": "function",
+            "name": "add_numbers",
+            "description": "Add two integers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "left": {"type": "integer"},
+                    "right": {"type": "integer"},
+                },
+                "required": ["left", "right"],
+                "additionalProperties": False,
+            },
+            "deferLoading": False,
+        }
+    ]
+
+    await runtime._handle_server_request(
+        {
+            "id": 41,
+            "method": "item/tool/call",
+            "params": {
+                "threadId": "codex-thread",
+                "turnId": "turn-1",
+                "callId": "call-1",
+                "namespace": None,
+                "tool": "add_numbers",
+                "arguments": {"left": 20, "right": 22},
+            },
+        }
+    )
+
+    assert len(invocations) == 1
+    context, arguments = invocations[0]
+    assert context.thread_id == "codex-thread"
+    assert context.turn_id == "turn-1"
+    assert context.call_id == "call-1"
+    assert context.sandbox is sandbox
+    assert arguments == {"left": 20, "right": 22}
+    assert writes == [
+        {
+            "id": 41,
+            "result": {
+                "contentItems": [{"type": "inputText", "text": '{"total":42}'}],
+                "success": True,
+            },
+        }
+    ]

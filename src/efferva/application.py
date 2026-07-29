@@ -29,6 +29,7 @@ from efferva.repository import (
 from efferva.runtime import CodexRuntime
 from efferva.runtime_binary import locate_runtime_binary
 from efferva.sandbox import create_sandbox_control_plane, register_sandbox_provider
+from efferva.tools import Tool
 from efferva.worker import RunWorker
 
 
@@ -55,10 +56,15 @@ class Efferva:
         identity: IdentityResolver,
         settings: Settings | None = None,
         codex_config: Mapping[str, Any] | None = None,
+        tools: list[Tool] | tuple[Tool, ...] | None = None,
     ) -> None:
         self.identity = identity
         self.settings = settings or get_settings()
         self.codex_config = dict(codex_config or {})
+        self.tools = tuple(tools or ())
+        tool_names = [tool.name for tool in self.tools]
+        if len(tool_names) != len(set(tool_names)):
+            raise ValueError("Efferva tool names must be unique")
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
         normalized_prefix = self._normalize_prefix(prefix)
@@ -97,6 +103,7 @@ class Efferva:
                     openai_base_url=settings.codex_openai_base_url,
                     model=settings.codex_model,
                     codex_config=codex_config,
+                    tools=self.tools,
                 )
                 await runtime.start()
                 sandboxes = create_sandbox_control_plane(settings, repository)

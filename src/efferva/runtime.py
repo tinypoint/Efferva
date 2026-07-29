@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from efferva.sandbox import SandboxEnvironment
+from efferva.tools import Tool, ToolContext, tool_result_text
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class CodexRuntime:
         openai_base_url: str | None = None,
         model: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
+        tools: tuple[Tool, ...] | list[Tool] | None = None,
     ) -> None:
         self._binary = binary
         self._database_url = database_url
@@ -57,11 +59,14 @@ class CodexRuntime:
         self._openai_base_url = openai_base_url
         self._model = model
         self._codex_config = deepcopy(dict(codex_config or {}))
+        self._tools = {tool.name: tool for tool in tools or ()}
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._pending: dict[int, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._thread_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._thread_sandboxes: dict[str, SandboxEnvironment] = {}
+        self._server_request_tasks: set[asyncio.Task[None]] = set()
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._next_id = 1
@@ -84,6 +89,8 @@ class CodexRuntime:
                         await task
             self._environments.clear()
             self._environment_locks.clear()
+            self._thread_sandboxes.clear()
+            await self._cancel_server_request_tasks()
             environment = os.environ.copy()
             environment["EFFERVA_DATABASE_URL"] = self._database_url
             process = await asyncio.create_subprocess_exec(
@@ -210,8 +217,12 @@ class CodexRuntime:
             params["model"] = self._model
         if self._developer_instructions is not None:
             params["developerInstructions"] = self._developer_instructions
+        if self._tools:
+            params["dynamicTools"] = [tool.codex_spec() for tool in self._tools.values()]
         response = await self.request("thread/start", params)
-        return str(response["thread"]["id"])
+        thread_id = str(response["thread"]["id"])
+        self._thread_sandboxes[thread_id] = sandbox
+        return thread_id
 
     async def resume_thread(self, thread_id: str, sandbox: SandboxEnvironment) -> None:
         params = {
@@ -229,6 +240,7 @@ class CodexRuntime:
         if self._model:
             params["model"] = self._model
         await self.request("thread/resume", params)
+        self._thread_sandboxes[thread_id] = sandbox
 
     async def start_turn(
         self,
@@ -274,7 +286,10 @@ class CodexRuntime:
         )
 
     async def unload_thread(self, thread_id: str) -> None:
-        await self.request("thread/unsubscribe", {"threadId": thread_id})
+        try:
+            await self.request("thread/unsubscribe", {"threadId": thread_id})
+        finally:
+            self._thread_sandboxes.pop(thread_id, None)
 
     async def close(self) -> None:
         process = self._process
@@ -296,6 +311,7 @@ class CodexRuntime:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        await self._cancel_server_request_tasks()
         self._fail_pending(RuntimeError("Codex runtime closed"))
 
     async def _ensure_process(self) -> None:
@@ -316,7 +332,9 @@ class CodexRuntime:
                 if "id" in message and ("result" in message or "error" in message):
                     self._resolve_response(message)
                 elif "id" in message and "method" in message:
-                    await self._reject_server_request(message)
+                    task = asyncio.create_task(self._handle_server_request(message))
+                    self._server_request_tasks.add(task)
+                    task.add_done_callback(self._server_request_completed)
                 elif "method" in message:
                     self._route_notification(message)
         except asyncio.CancelledError:
@@ -345,16 +363,106 @@ class CodexRuntime:
         else:
             future.set_result(message.get("result") or {})
 
-    async def _reject_server_request(self, message: dict[str, Any]) -> None:
+    async def _handle_server_request(self, message: dict[str, Any]) -> None:
+        if message["method"] != "item/tool/call":
+            await self._send_server_error(
+                message["id"],
+                -32601,
+                f"Efferva cannot handle server request {message['method']}",
+            )
+            return
+
+        params = message.get("params") or {}
+        thread_id = str(params.get("threadId") or "")
+        turn_id = str(params.get("turnId") or "")
+        call_id = str(params.get("callId") or "")
+        namespace = params.get("namespace")
+        tool_name = str(params.get("tool") or "")
+        arguments = params.get("arguments")
+        tool = self._tools.get(tool_name) if namespace is None else None
+        sandbox = self._thread_sandboxes.get(thread_id)
+
+        if tool is None:
+            await self._send_tool_result(
+                message["id"],
+                f"Unknown Efferva tool: {tool_name}",
+                success=False,
+            )
+            return
+        if sandbox is None:
+            await self._send_tool_result(
+                message["id"],
+                f"No active sandbox is bound to Codex thread {thread_id}",
+                success=False,
+            )
+            return
+        if not isinstance(arguments, Mapping):
+            await self._send_tool_result(
+                message["id"],
+                f"Tool {tool_name} arguments must be a JSON object",
+                success=False,
+            )
+            return
+
+        context = ToolContext(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            call_id=call_id,
+            sandbox=sandbox,
+        )
+        try:
+            result = await tool.invoke(context, arguments)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.exception("Efferva tool %s failed", tool_name)
+            await self._send_tool_result(
+                message["id"],
+                f"{type(error).__name__}: {error}",
+                success=False,
+            )
+            return
+        await self._send_tool_result(message["id"], tool_result_text(result), success=True)
+
+    async def _send_tool_result(self, request_id: Any, text: str, *, success: bool) -> None:
+        await self._send_server_result(
+            request_id,
+            {
+                "contentItems": [{"type": "inputText", "text": text}],
+                "success": success,
+            },
+        )
+
+    async def _send_server_result(self, request_id: Any, result: dict[str, Any]) -> None:
         async with self._write_lock:
-            await self._write(
-                {
-                    "id": message["id"],
-                    "error": {
-                        "code": -32601,
-                        "message": f"Efferva cannot handle server request {message['method']}",
-                    },
-                }
+            await self._write({"id": request_id, "result": result})
+
+    async def _send_server_error(
+        self,
+        request_id: Any,
+        code: int,
+        message: str,
+    ) -> None:
+        async with self._write_lock:
+            await self._write({"id": request_id, "error": {"code": code, "message": message}})
+
+    async def _cancel_server_request_tasks(self) -> None:
+        tasks = tuple(self._server_request_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._server_request_tasks.clear()
+
+    def _server_request_completed(self, task: asyncio.Task[None]) -> None:
+        self._server_request_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Efferva failed to handle a Codex server request",
+                exc_info=(type(error), error, error.__traceback__),
             )
 
     def _route_notification(self, message: dict[str, Any]) -> None:

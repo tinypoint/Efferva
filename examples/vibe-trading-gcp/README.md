@@ -24,10 +24,12 @@ vibe-trading-gcp/
 - Vibe-Trading 原有前端、研究页、回测页、报告页和设置页保持不变。
 - 原 `/sessions`、消息和 SSE 契约由
   `overlay/agent/src/efferva_product/compat_routes.py` 适配到 Efferva。
+- `calculate_position_size` 作为 App 端 Python Tool 注册；Efferva 通过 Codex
+  `dynamicTools` 暴露 schema，并处理 `item/tool/call` 请求。它不会启动 MCP Server，
+  也不会下单。
 - 本地用开发 Cookie 区分用户；GCP 用经过签名验证的 IAP JWT 映射
   `Efferva.Principal`。
-- Efferva 为每个 Session 创建 OpenSandbox，并在启动 Codex 时注入模型配置和
-  Vibe-Trading 工具配置。
+- Efferva 为每个 Session 创建 OpenSandbox，并在启动 Codex 时注入模型配置。
 
 当前还是一个纵向切片：Session 创建/列表/消息/事件已经接入；取消、重命名、删除以及
 Vibe-Trading 的全局 Goal、账户和产物状态还需要继续改造成按 Principal 隔离。未完成的
@@ -67,6 +69,12 @@ docker compose up
 - <http://localhost:8899/dev/login/bob>
 
 两个地址会进入同一个 Vibe-Trading 产品，但 Session 数据按 Efferva Principal 隔离。
+可以发送下面的消息验证原生 Tool 调用：
+
+```text
+账户资金 100000，单笔风险 1%，计划 100 买入、95 止损。
+请必须调用 calculate_position_size 工具计算最大仓位。
+```
 
 停止服务但保留数据：
 

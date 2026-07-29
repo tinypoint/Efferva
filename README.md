@@ -78,7 +78,7 @@ export EFFERVA_CODEX_CONFIG_FILE=/etc/efferva/codex.toml
 Efferva 会在每次 `thread/start` 和 `thread/resume` 注入真实值。例如：
 
 ```python
-codex_config={
+codex_config = {
     "mcp_servers": {
         "domain_tools": {
             "command": "domain-mcp",
@@ -88,6 +88,43 @@ codex_config={
     }
 }
 ```
+
+应用内的 Python 能力不需要包装成 MCP Server，可以注册为 Codex App Server 原生
+`dynamicTools`：
+
+```python
+from efferva import Tool, ToolContext
+
+
+async def add_numbers(_: ToolContext, arguments):
+    return {"total": arguments["left"] + arguments["right"]}
+
+
+add_tool = Tool(
+    name="add_numbers",
+    description="Add two numbers.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "left": {"type": "number"},
+            "right": {"type": "number"},
+        },
+        "required": ["left", "right"],
+        "additionalProperties": False,
+    },
+    handler=add_numbers,
+)
+
+Efferva(
+    identity=resolve_principal,
+    tools=[add_tool],
+).install(app, prefix="/agent")
+```
+
+Efferva 在 `thread/start` 发送 Tool schema，收到 `item/tool/call` server request 后在 App
+进程执行 handler，并把结果交回 Codex 继续推理。`ToolContext` 中的 Thread、Turn、Call
+和 Sandbox 信息由 Efferva 提供，不能由模型参数覆盖。`dynamicTools` 当前属于 Codex App
+Server 实验 API。
 
 没有现有 FastAPI 宿主时：
 
