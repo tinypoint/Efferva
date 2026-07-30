@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from uuid import UUID
 
 from efferva.config import Settings
 from efferva.repository import SystemRepository
-from efferva.sandbox.gateway import ExecutorGateway
 from efferva.sandbox.registry import create_registered_provider
 from efferva.sandbox.types import (
     SandboxContext,
     SandboxEnvironment,
     SandboxFiles,
+    SandboxHandle,
     SandboxProvider,
 )
 
@@ -30,14 +29,10 @@ class SandboxControlPlane:
         self._settings = settings
         self._repository = repository
         self.provider = provider
-        self.gateway = ExecutorGateway(
-            settings.executor_gateway_host,
-            settings.executor_gateway_port,
-        )
         self._locks: dict[UUID, asyncio.Lock] = {}
 
     async def start(self) -> None:
-        await self.gateway.start()
+        return None
 
     async def ensure(
         self,
@@ -83,23 +78,52 @@ class SandboxControlPlane:
                     fencing_token,
                 )
 
-            environment = self.gateway.register(
+            return SandboxEnvironment(
                 environment_id=str(session_id),
-                runtime=runtime,
+                endpoint=f"sandbox://{sandbox.external_ref}",
                 workspace_path=context.workspace_path,
                 sandbox=sandbox,
-                validate_fence=validate_fence,
-            )
-            return replace(
-                environment,
+                runtime=runtime,
                 files=SandboxFiles(runtime=runtime, validate_fence=validate_fence),
             )
 
     async def close(self) -> None:
-        await self.gateway.close()
         close = getattr(self.provider, "close", None)
         if close is not None:
             await close()
+
+    async def reap_idle(self) -> int:
+        rows = await self._repository.claim_idle_sandboxes(
+            self._settings.sandbox_idle_timeout_seconds
+        )
+        reaped = 0
+        for row in rows:
+            succeeded = False
+            try:
+                if row["provider"] != self.provider.name:
+                    continue
+                await self.provider.destroy(
+                    SandboxHandle(
+                        provider=row["provider"],
+                        external_ref=row["external_ref"],
+                        workspace_id=row["workspace_id"],
+                        state=dict(row["state_json"] or {}),
+                    )
+                )
+                succeeded = True
+                reaped += 1
+            except Exception:
+                __import__("logging").getLogger(__name__).exception(
+                    "failed to reap idle Session sandbox %s",
+                    row["external_ref"],
+                )
+            finally:
+                await self._repository.finish_sandbox_reap(
+                    row["workspace_id"],
+                    row["external_ref"],
+                    succeeded=succeeded,
+                )
+        return reaped
 
 
 def create_sandbox_provider(settings: Settings) -> SandboxProvider:

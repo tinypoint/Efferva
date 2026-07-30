@@ -19,6 +19,8 @@ class Session(BaseModel):
     name: str
     status: str
     workspace_ref: str
+    codex_version: str
+    codex_runtime_sha256: str
     created_at: datetime
     updated_at: datetime
 

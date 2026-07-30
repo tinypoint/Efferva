@@ -236,7 +236,12 @@ class OpenSandboxProvider:
         return WorkspaceHandle(
             provider=self.name,
             external_ref=volume,
-            state={"mountPath": context.workspace_path},
+            state={
+                "mountPath": self._settings.session_volume_path,
+                "workspacePath": context.workspace_path,
+                "codexHomePath": self._settings.codex_home_path,
+                "size": self._settings.session_volume_size,
+            },
         )
 
     async def start(
@@ -272,8 +277,9 @@ class OpenSandboxProvider:
                                 claim_name=workspace.external_ref,
                                 create_if_not_exists=True,
                                 delete_on_sandbox_termination=False,
+                                storage=self._settings.session_volume_size,
                             ),
-                            mount_path=context.workspace_path,
+                            mount_path=self._settings.session_volume_path,
                         )
                     ],
                     connection_config=self._connection_config(),

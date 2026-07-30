@@ -67,6 +67,7 @@ class SandboxEnvironment:
     endpoint: str
     workspace_path: str
     sandbox: SandboxHandle
+    runtime: SandboxRuntime = field(repr=False, compare=False)
     files: SandboxFiles | None = field(default=None, repr=False, compare=False)
 
 

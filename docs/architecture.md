@@ -11,20 +11,16 @@ flowchart LR
   L --> A2["Efferva instance B"]
   A1 --> P[("PostgreSQL")]
   A2 --> P
-  A1 --> R1["Codex Runtime A"]
-  A2 --> R2["Codex Runtime B"]
-  R1 -->|"loopback WebSocket"| G1["Executor Gateway A"]
-  R2 -->|"loopback WebSocket"| G2["Executor Gateway B"]
-  G1 -->|"SandboxRuntime"| S1["Session sandbox"]
-  G2 -->|"SandboxRuntime"| S2["Session sandbox"]
-  S1 --> W1[("Session workspace")]
-  S2 --> W2[("Session workspace")]
+  A1 -->|"stdio JSON-RPC proxy"| S1["Session sandbox<br/>Codex app-server"]
+  A2 -->|"stdio JSON-RPC proxy"| S2["Session sandbox<br/>Codex app-server"]
+  S1 --> W1[("Persistent Session volume<br/>workspace + CODEX_HOME")]
+  S2 --> W2[("Persistent Session volume<br/>workspace + CODEX_HOME")]
 ```
 
-App 实例包含无状态 HTTP 层、Run worker、沙盒外 Codex Runtime 与 Executor Gateway。
-Gateway 把 Codex 远程执行协议转换为统一 `SandboxRuntime`，再由 OpenSandbox execd API
-或第三方 Provider 执行。PostgreSQL 是控制面真相来源；工作区只挂载给 Session sandbox，
-不挂载给 Web/App 实例。
+App 实例包含无状态 HTTP 层与 Run worker。每个 Session 的 Codex app-server 与执行环境位于
+同一个 sandbox；App 通过 Provider 的进程通道代理 JSON-RPC，浏览器永远不直连 sandbox。
+PostgreSQL 是产品控制面真相来源；Codex 原生 Thread 状态与工作区文件一起位于 Session
+持久卷，不挂载给 Web/App 实例。
 
 ## 产品身份与三层资源
 
@@ -32,7 +28,7 @@ Gateway 把 Codex 远程执行协议转换为统一 `SandboxRuntime`，再由 Op
 |---|---|---|
 | Principal | 当前产品用户、活动租户与即时能力 | 不持久化，由产品逐请求解析 |
 | Session | 用户所有权、产品工作区与调度边界 | `app_sessions` |
-| Thread | 同一工作区中的独立多轮对话 | `app_threads` + `codex_engine.threads` |
+| Thread | 同一工作区中的独立多轮对话 | `app_threads` + Session 卷内 Codex SQLite/rollout |
 | Run | Thread 上的一次用户输入与执行 | `runs` + `run_events` + `messages` |
 
 Principal 使用 `tenant_id + issuer + subject` 形成身份边界。Efferva 不复制产品用户表或角色
@@ -72,7 +68,7 @@ SSE 本身也使用同一个 AuthorizedRepository，因此补流不会绕开用�
 
 - `session_leases` 使一个 Session 在任一时刻归一个 App Runtime 管理；
 - `fencing_epoch` 防止过期实例继续写 Run 事件；
-- Codex PostgreSQL ThreadStore 另有 writer lease，防止同一 Codex Thread 双写；
+- Session lease 保证同一持久卷上的 Codex app-server 只有一个 App owner；
 - `FOR UPDATE SKIP LOCKED` 让多个实例竞争队列时只领取一次。
 
 租约默认 30 秒、每 10 秒续约。同一 owner 可领取该 Session 的多个不同 Thread，所以共享
@@ -87,19 +83,22 @@ MVP 的崩溃恢复语义是 **at-least-once**：如果旧实例在崩溃前已�
 
 ## PostgreSQL 与工作区存储的职责
 
-PostgreSQL 保存可查询、可补流、可跨实例恢复的结构化状态。OpenSandbox 的持久卷只保存
-用户工作区文件。App 实例不挂载用户工作区；每个 Session 的工作区只由对应 sandbox 使用。
+PostgreSQL 保存身份、Session/Thread 映射、Run 队列和可补流事件。OpenSandbox 的持久卷保存
+`/session/workspace` 与 `/session/codex-home`；后者是 Codex 原生 SQLite、rollout 与配置目录。
+app-server 进程和 sandbox 计算实例都可丢弃，恢复时重新注入 Session 记录的 Runtime 并执行
+`thread/resume`。
 
 `workspace_bindings` 与 `sandbox_leases` 只保存 Provider 名称、不透明 `external_ref/state_json`
 和 fencing 状态，不保存假设某种沙盒拓扑的 endpoint。Thread、Run 与 Event 仍通过 Session
 继承身份边界，不重复存租户字段。
 
-具体使用 Docker named volume、Kubernetes PVC 或厂商存储由 OpenSandbox 部署决定，不进入
-Efferva 的 Provider 状态模型。
+默认卷容量为 10Gi。Session 存在期间永久保留；显式删除后的保留策略默认 30 天。空闲
+12 小时后只销毁 sandbox 计算实例，不删除持久卷。具体使用 Docker named volume、
+Kubernetes PVC 或厂商存储由 OpenSandbox 部署决定。
 
 ## Sandbox 信任边界
 
-Codex Runtime 和 API key 留在 App 容器/Pod；sandbox 不接收 API key，App 也不需要 Docker
-Socket 或 Kubernetes 凭据。Executor Gateway 位于 App 实例中，仅监听 loopback，并在每个
-协议请求上验证 Sandbox lease fencing。沙箱创建、命令执行和文件访问统一通过 OpenSandbox
-Server；Docker Socket 或 Kubernetes 凭据只属于 OpenSandbox 自己的部署边界。
+Codex app-server 位于 sandbox，App 不需要 Docker Socket 或 Kubernetes 凭据。沙箱创建、
+命令执行和文件访问统一通过 OpenSandbox Server；Docker Socket 或 Kubernetes 凭据只属于
+OpenSandbox 自己的部署边界。模型凭证后续由 OpenSandbox Credential Proxy 注入；本地
+非标准端口代理可使用受控开发凭证。

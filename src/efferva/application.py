@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from importlib.resources import files
 from typing import Annotated, Any
 
@@ -29,7 +30,7 @@ from efferva.repository import (
     SystemRepository,
 )
 from efferva.runtime import CodexRuntime
-from efferva.runtime_binary import locate_runtime_binary
+from efferva.runtime_binary import locate_runtime_binary, runtime_build_info
 from efferva.sandbox import create_sandbox_control_plane, register_sandbox_provider
 from efferva.tools import Tool
 from efferva.worker import RunWorker
@@ -48,12 +49,6 @@ class _RuntimeResources:
 
     def worker_healthy(self) -> bool:
         return self.worker is not None and self.worker.healthy
-
-    def require_runtime(self) -> CodexRuntime:
-        if self.runtime is None:
-            raise RuntimeError("Efferva application has not started")
-        return self.runtime
-
 
 class Efferva:
     """Product-facing facade for installing Efferva into an authenticated application."""
@@ -115,7 +110,18 @@ class Efferva:
             await database.open()
             try:
                 await database.migrate(migrations)
-                repository = SystemRepository(database)
+                build_info = runtime_build_info()
+                repository = SystemRepository(
+                    database,
+                    codex_version=(
+                        build_info.codex_revision if build_info is not None else "development"
+                    ),
+                    codex_runtime_sha256=(
+                        build_info.runtime_sha256
+                        if build_info is not None
+                        else sha256(runtime_binary.read_bytes()).hexdigest()
+                    ),
+                )
                 tools = (
                     *self.tools,
                     create_publish_artifact_tool(
@@ -125,7 +131,7 @@ class Efferva:
                 )
                 runtime = CodexRuntime(
                     runtime_binary,
-                    settings.database_url,
+                    codex_home_path=settings.codex_home_path,
                     developer_instructions=self.developer_instructions,
                     openai_base_url=settings.codex_openai_base_url,
                     model=settings.codex_model,
@@ -163,7 +169,6 @@ class Efferva:
             create_api_router(
                 identity=self.identity,
                 system_repository=resources.require_repository,
-                runtime=resources.require_runtime,
                 worker_healthy=resources.worker_healthy,
                 skill_root_ids=tuple(root.id for root in self.skill_roots),
                 native_memory_enabled=self.native_memory_enabled,

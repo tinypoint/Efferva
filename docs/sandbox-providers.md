@@ -74,23 +74,18 @@ export EFFERVA_OPENSANDBOX_API_KEY=...
 
 ## Codex 适配
 
-Codex 不直接依赖 Provider。每个 Efferva 实例中的 Executor Gateway 实现 Codex 已有的
-远程 exec-server WebSocket 协议，并把请求转换到 `SandboxRuntime`：
+Codex 不直接依赖 Provider。Efferva 通过 `SandboxRuntime` 将 Wheel 内的 Codex CLI 注入
+Session sandbox，并启动本地 app-server：
 
 ```text
-Codex Runtime
-  -> loopback Executor Gateway
-  -> SandboxRuntime
-  -> OpenSandbox execd API / third-party API
+Efferva App
+  -> SandboxRuntime process channel
+  -> Session sandbox / Codex app-server
+  -> persistent workspace + CODEX_HOME
 ```
 
-Gateway endpoint 和随机 token 只存在于当前进程内存中，不写入数据库。每个请求都校验当前
-Sandbox lease 的 fencing token，过期实例无法继续执行。模型 Base URL 与 API key 留在
-Efferva 实例，永远不传入 Sandbox。
-
-当前 Gateway 覆盖 Codex Coding Agent 使用的进程与文件协议。远程环境的通用 HTTP proxy
-能力不是 MVP 契约；未来如需支持依赖该能力的外部 MCP，应作为显式 capability 扩展，而不是
-让 Provider 猜测 Codex 协议。
+App-server 不暴露给浏览器或负载均衡器。每次 Session owner 变化都由数据库 fencing
+约束；进程丢失后从持久化 `CODEX_HOME` 恢复 Thread。
 
 ## Conformance
 

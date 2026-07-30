@@ -43,9 +43,18 @@ def _public_artifact(row: dict[str, Any]) -> dict[str, Any]:
 class AuthorizedRepository:
     """Request-scoped repository whose every lookup is constrained by one Principal."""
 
-    def __init__(self, database: Database, principal: Principal) -> None:
+    def __init__(
+        self,
+        database: Database,
+        principal: Principal,
+        *,
+        codex_version: str,
+        codex_runtime_sha256: str,
+    ) -> None:
         self._database = database
         self.principal = principal
+        self._codex_version = codex_version
+        self._codex_runtime_sha256 = codex_runtime_sha256
 
     def _session_scope(
         self,
@@ -84,9 +93,11 @@ class AuthorizedRepository:
                     owner_issuer,
                     owner_subject,
                     name,
-                    workspace_ref
+                    workspace_ref,
+                    codex_version,
+                    codex_runtime_sha256
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -96,6 +107,8 @@ class AuthorizedRepository:
                     self.principal.subject,
                     name,
                     workspace_ref,
+                    self._codex_version,
+                    self._codex_runtime_sha256,
                 ),
             )
             row = await cursor.fetchone()
@@ -496,11 +509,24 @@ class AuthorizedRepository:
 class SystemRepository:
     """Unscoped control-plane access used only by workers and sandbox management."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        codex_version: str = "development",
+        codex_runtime_sha256: str = "development",
+    ) -> None:
         self._database = database
+        self._codex_version = codex_version
+        self._codex_runtime_sha256 = codex_runtime_sha256
 
     def for_principal(self, principal: Principal) -> AuthorizedRepository:
-        return AuthorizedRepository(self._database, principal)
+        return AuthorizedRepository(
+            self._database,
+            principal,
+            codex_version=self._codex_version,
+            codex_runtime_sha256=self._codex_runtime_sha256,
+        )
 
     async def ping(self) -> None:
         async with self._database.connection() as connection:
@@ -1021,9 +1047,9 @@ class SystemRepository:
             )
             return await cursor.fetchone() is not None
 
-    async def release_session_if_idle(self, session_id: UUID, owner_id: str) -> None:
+    async def release_session_if_idle(self, session_id: UUID, owner_id: str) -> bool:
         async with self._database.connection() as connection:
-            await connection.execute(
+            cursor = await connection.execute(
                 """
                 UPDATE session_leases lease
                 SET expires_at = now() - interval '1 microsecond',
@@ -1039,6 +1065,7 @@ class SystemRepository:
                 """,
                 (session_id, owner_id),
             )
+            released = cursor.rowcount > 0
             await connection.execute(
                 """
                 UPDATE sandbox_leases sandbox
@@ -1058,6 +1085,63 @@ class SystemRepository:
                   )
                 """,
                 (session_id, owner_id),
+            )
+            await connection.commit()
+            return released
+
+    async def claim_idle_sandboxes(
+        self,
+        idle_timeout_seconds: int,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                WITH candidates AS (
+                    SELECT sandbox.workspace_id
+                    FROM sandbox_leases sandbox
+                    JOIN workspace_bindings workspace
+                      ON workspace.workspace_id = sandbox.workspace_id
+                    LEFT JOIN session_leases session
+                      ON session.session_id = workspace.session_id
+                    WHERE sandbox.status = 'idle'
+                      AND sandbox.updated_at
+                          <= now() - make_interval(secs => %s)
+                      AND (session.session_id IS NULL OR session.expires_at < now())
+                    ORDER BY sandbox.updated_at
+                    FOR UPDATE OF sandbox SKIP LOCKED
+                    LIMIT %s
+                )
+                UPDATE sandbox_leases sandbox
+                SET status = 'reaping', updated_at = now()
+                FROM candidates
+                WHERE sandbox.workspace_id = candidates.workspace_id
+                RETURNING sandbox.*
+                """,
+                (idle_timeout_seconds, limit),
+            )
+            rows = await cursor.fetchall()
+            await connection.commit()
+            return rows
+
+    async def finish_sandbox_reap(
+        self,
+        workspace_id: UUID,
+        external_ref: str,
+        *,
+        succeeded: bool,
+    ) -> None:
+        async with self._database.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE sandbox_leases
+                SET status = %s, updated_at = now()
+                WHERE workspace_id = %s
+                  AND external_ref = %s
+                  AND status = 'reaping'
+                """,
+                ("stopped" if succeeded else "idle", workspace_id, external_ref),
             )
             await connection.commit()
 

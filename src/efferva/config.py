@@ -22,13 +22,18 @@ class Settings(BaseSettings):
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
     sandbox_provider: str = "opensandbox"
-    sandbox_image: str = "ghcr.io/openai/codex-universal:latest"
+    sandbox_image: str = "python:3.13-slim-bookworm"
     sandbox_cpu_limit: str = "2"
     sandbox_memory_limit: str = "2g"
     opensandbox_server_url: str = "http://localhost:8080"
     opensandbox_api_key: str | None = None
     opensandbox_use_server_proxy: bool = True
-    workspace_path: str = "/workspace"
+    session_volume_path: str = "/session"
+    workspace_path: str = "/session/workspace"
+    codex_home_path: str = "/session/codex-home"
+    session_volume_size: str = "10Gi"
+    sandbox_idle_timeout_seconds: int = 12 * 60 * 60
+    deleted_session_volume_retention_days: int = 30
     public_base_url: str = "http://localhost:8080"
     instance_id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
     worker_poll_seconds: float = 0.25
@@ -37,8 +42,6 @@ class Settings(BaseSettings):
     max_parallel_threads_per_session: int = 4
     max_parallel_runs_per_instance: int = 16
     artifact_max_bytes: int = 10 * 1024 * 1024
-    executor_gateway_host: str = "127.0.0.1"
-    executor_gateway_port: int = 0
 
 
 @lru_cache

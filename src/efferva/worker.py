@@ -38,6 +38,7 @@ class RunWorker:
         self._stopping = asyncio.Event()
         self._poll_task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
+        self._reap_task: asyncio.Task[None] | None = None
         self._runs: set[asyncio.Task[None]] = set()
 
     @property
@@ -48,6 +49,8 @@ class RunWorker:
             and not self._poll_task.done()
             and self._lease_task is not None
             and not self._lease_task.done()
+            and self._reap_task is not None
+            and not self._reap_task.done()
         )
 
     async def start(self) -> None:
@@ -55,13 +58,14 @@ class RunWorker:
         await self._repository.requeue_abandoned_runs()
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._lease_task = asyncio.create_task(self._lease_loop())
+        self._reap_task = asyncio.create_task(self._reap_loop())
 
     async def close(self) -> None:
         self._stopping.set()
-        for task in (self._poll_task, self._lease_task):
+        for task in (self._poll_task, self._lease_task, self._reap_task):
             if task is not None:
                 task.cancel()
-        for task in (self._poll_task, self._lease_task):
+        for task in (self._poll_task, self._lease_task, self._reap_task):
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -105,6 +109,16 @@ class RunWorker:
             )
             await self._repository.requeue_abandoned_runs()
 
+    async def _reap_loop(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await self._sandboxes.reap_idle()
+            except Exception:
+                logger.exception("failed to reap idle Session sandboxes")
+            await asyncio.sleep(
+                max(1, min(60, self._settings.sandbox_idle_timeout_seconds))
+            )
+
     async def _process_run(self, run: dict[str, Any]) -> None:
         run_id = run["id"]
         thread_id = run["thread_id"]
@@ -113,6 +127,7 @@ class RunWorker:
         epoch = run["fencing_epoch"]
         codex_thread_id = str(run["codex_thread_id"]) if run["codex_thread_id"] else None
         queue: asyncio.Queue[dict[str, Any]] | None = None
+        session_runtime: Any | None = None
         try:
             sandbox = await self._sandboxes.ensure(
                 session_id,
@@ -120,23 +135,28 @@ class RunWorker:
                 owner_id=owner_id,
                 fencing_token=epoch,
             )
-            await self._runtime.ensure_environment(sandbox)
+            session_runtime = await self._runtime.ensure_environment(sandbox)
             runtime_config = dict(run.get("runtime_config_json") or {})
             if codex_thread_id is None:
-                codex_thread_id = await self._runtime.start_thread(sandbox, runtime_config)
+                codex_thread_id = await session_runtime.start_thread(sandbox, runtime_config)
                 await self._repository.set_codex_thread_id(thread_id, UUID(codex_thread_id))
             else:
-                await self._resume_with_retry(codex_thread_id, sandbox, runtime_config)
+                await self._resume_with_retry(
+                    session_runtime,
+                    codex_thread_id,
+                    sandbox,
+                    runtime_config,
+                )
 
-            await self._runtime.set_memory_mode(
+            await session_runtime.set_memory_mode(
                 codex_thread_id,
                 str(runtime_config.get("memory_mode", "disabled")),
             )
 
-            self._runtime.bind_run_context(codex_thread_id, run)
-            queue = self._runtime.subscribe(codex_thread_id)
+            session_runtime.bind_run_context(codex_thread_id, run)
+            queue = session_runtime.subscribe(codex_thread_id)
             run_input = run.get("input") or {}
-            turn_id = await self._runtime.start_turn(
+            turn_id = await session_runtime.start_turn(
                 codex_thread_id,
                 run["prompt"],
                 sandbox,
@@ -146,7 +166,7 @@ class RunWorker:
             await self._repository.set_codex_turn_id(run_id, turn_id)
             stored_goal = run.get("goal_json")
             if isinstance(stored_goal, dict):
-                native_goal = await self._runtime.set_goal(
+                native_goal = await session_runtime.set_goal(
                     codex_thread_id,
                     objective=stored_goal.get("objective"),
                     status=stored_goal.get("status"),
@@ -156,8 +176,14 @@ class RunWorker:
                     ),
                 )
                 await self._repository.set_thread_goal_snapshot(thread_id, native_goal)
-            await self._consume_notifications(run, codex_thread_id, turn_id, queue)
-            goal = await self._runtime.get_goal(codex_thread_id)
+            await self._consume_notifications(
+                session_runtime,
+                run,
+                codex_thread_id,
+                turn_id,
+                queue,
+            )
+            goal = await session_runtime.get_goal(codex_thread_id)
             if goal is not None:
                 await self._repository.set_thread_goal_snapshot(thread_id, goal)
         except asyncio.CancelledError:
@@ -172,15 +198,21 @@ class RunWorker:
                     epoch,
                 )
         finally:
-            if queue is not None and codex_thread_id is not None:
-                self._runtime.unsubscribe(codex_thread_id)
+            if queue is not None and codex_thread_id is not None and session_runtime is not None:
+                session_runtime.unsubscribe(codex_thread_id)
                 with contextlib.suppress(Exception):
-                    await self._runtime.unload_thread(codex_thread_id)
+                    await session_runtime.unload_thread(codex_thread_id)
             with contextlib.suppress(Exception):
-                await self._repository.release_session_if_idle(session_id, owner_id)
+                released = await self._repository.release_session_if_idle(
+                    session_id,
+                    owner_id,
+                )
+                if released:
+                    await self._runtime.release_environment(str(session_id))
 
     async def _resume_with_retry(
         self,
+        runtime: Any,
         thread_id: str,
         sandbox: SandboxEnvironment,
         runtime_config: dict[str, Any],
@@ -188,7 +220,7 @@ class RunWorker:
         deadline = asyncio.get_running_loop().time() + self._settings.lease_ttl_seconds + 5
         while True:
             try:
-                await self._runtime.resume_thread(thread_id, sandbox, runtime_config)
+                await runtime.resume_thread(thread_id, sandbox, runtime_config)
                 return
             except Exception:
                 if asyncio.get_running_loop().time() >= deadline:
@@ -197,6 +229,7 @@ class RunWorker:
 
     async def _consume_notifications(
         self,
+        runtime: Any,
         run: dict[str, Any],
         codex_thread_id: str,
         turn_id: str,
@@ -218,7 +251,7 @@ class RunWorker:
                     not interrupt_sent
                     and await self._repository.run_cancel_requested(run_id)
                 ):
-                    await self._runtime.interrupt_turn(codex_thread_id, active_turn_id)
+                    await runtime.interrupt_turn(codex_thread_id, active_turn_id)
                     interrupt_sent = True
                 continue
             method = notification["method"]
@@ -312,7 +345,7 @@ class RunWorker:
                 if interrupt_sent or await self._repository.run_cancel_requested(run_id):
                     event = run_cancelled()
                 elif turn.get("status") == "completed":
-                    goal = await self._runtime.get_goal(codex_thread_id)
+                    goal = await runtime.get_goal(codex_thread_id)
                     if goal is not None:
                         await self._repository.set_thread_goal_snapshot(
                             run["thread_id"],

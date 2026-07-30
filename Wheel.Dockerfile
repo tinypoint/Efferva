@@ -17,29 +17,30 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /source
-COPY codex /source/codex
-COPY Efferva/Cargo.toml Efferva/Cargo.lock Efferva/rust-toolchain.toml \
-    /source/Efferva/
-COPY Efferva/crates /source/Efferva/crates
-WORKDIR /source/Efferva
+COPY codex-fork /source/codex
+WORKDIR /source/codex/codex-rs
 
 RUN --mount=type=cache,id=efferva-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=efferva-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=efferva-rust-target-${TARGETARCH},target=/source/Efferva/target,sharing=locked \
-    cargo build --locked --profile container --jobs 4 \
-        --package efferva-codex-runtime \
+    --mount=type=cache,id=efferva-rust-target-${TARGETARCH},target=/source/codex/codex-rs/target,sharing=locked \
+    CARGO_PROFILE_RELEASE_LTO=false \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --locked --release --jobs 4 \
+        --package codex-cli \
+        --bin codex \
     && mkdir -p /artifacts \
-    && cp target/container/efferva-codex-runtime /artifacts/
+    && cp target/release/codex /artifacts/efferva-codex-runtime
 
 FROM python:3.13-slim-bookworm AS wheel-builder
 
 ARG CODEX_REVISION
 ARG EFFERVA_REVISION
 
-WORKDIR /source/Efferva
-COPY Efferva/pyproject.toml Efferva/README.md ./
-COPY Efferva/build_hooks ./build_hooks
-COPY Efferva/src ./src
+WORKDIR /source/agent-framework
+COPY agent-framework/pyproject.toml agent-framework/README.md ./
+COPY agent-framework/build_hooks ./build_hooks
+COPY agent-framework/src ./src
 COPY --from=runtime-builder \
     /artifacts/efferva-codex-runtime \
     /artifacts/efferva-codex-runtime

@@ -12,7 +12,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-codex_revision="$(git -C "${workspace_dir}/codex" rev-parse HEAD)"
+codex_revision="$(git -C "${workspace_dir}/codex-fork" rev-parse HEAD)"
 efferva_revision="$(git -C "${project_dir}" rev-parse HEAD)"
 cache_args=()
 if [[ -n "${EFFERVA_DOCKER_CACHE_FROM:-}" ]]; then
@@ -23,7 +23,7 @@ if [[ -n "${EFFERVA_DOCKER_CACHE_TO:-}" ]]; then
 fi
 
 docker buildx build \
-  --file "${project_dir}/docker/Wheel.Dockerfile" \
+  --file "${project_dir}/Wheel.Dockerfile" \
   --target wheel \
   --build-arg "CODEX_REVISION=${codex_revision}" \
   --build-arg "EFFERVA_REVISION=${efferva_revision}" \

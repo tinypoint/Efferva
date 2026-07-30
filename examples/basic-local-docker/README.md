@@ -13,7 +13,7 @@ Browser
   │
   ▼
 basic-local-docker app
-  ├── Efferva / Codex Runtime
+  ├── Efferva App / Run Worker
   ├── PostgreSQL
   └── OpenSandbox Python SDK
           │
@@ -21,12 +21,12 @@ basic-local-docker app
       OpenSandbox Server
           │ Docker runtime
           ▼
-      per-Session sandbox + named workspace volume
+      per-Session Codex app-server + persistent Session volume
 ```
 
 OpenSandbox Server 通过挂载的 Docker socket 创建沙箱；Efferva 不直接操作 Docker
-daemon。每个 Session 对应一个 OpenSandbox sandbox，并挂载一个持久 Docker named volume
-到 `/workspace`。
+daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载到 `/session`：
+工作区为 `/session/workspace`，Codex 原生状态为 `/session/codex-home`。
 
 ## 启动
 

@@ -25,7 +25,6 @@ from efferva.models import (
     ThreadGoalSet,
 )
 from efferva.repository import AuthorizedRepository, NotFoundError, SystemRepository
-from efferva.runtime import CodexRuntime
 
 
 def principal_dependency(
@@ -100,7 +99,6 @@ def create_api_router(
     *,
     identity: IdentityResolver,
     system_repository: Callable[[], SystemRepository],
-    runtime: Callable[[], CodexRuntime],
     worker_healthy: Callable[[], bool],
     skill_root_ids: tuple[str, ...] = (),
     native_memory_enabled: bool = False,
@@ -177,8 +175,7 @@ def create_api_router(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "Native Codex memory is disabled for this shared runtime. "
-                    "Use an isolated runtime before enabling it."
+                    "Native Codex memory is disabled by product configuration."
                 ),
             )
         runtime_config = {
@@ -302,15 +299,7 @@ def create_api_router(
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
         repository = authorized(principal)
-        thread = await repository.get_thread(thread_id)
         goal = await repository.get_thread_goal(thread_id)
-        if thread["codex_thread_id"] is not None and not (goal or {}).get("pending"):
-            try:
-                native_goal = await runtime().get_goal(str(thread["codex_thread_id"]))
-            except Exception:
-                native_goal = None
-            if native_goal is not None:
-                goal = await repository.set_thread_goal(thread_id, native_goal)
         if goal is None:
             raise HTTPException(status_code=404, detail=f"No goal for thread {thread_id}")
         return _goal_to_api(goal, thread_id)
@@ -321,12 +310,9 @@ def create_api_router(
         principal: PrincipalParameter,
     ) -> dict[str, bool]:
         repository = authorized(principal)
-        thread = await repository.get_thread_for_write(thread_id)
-        native_cleared = False
-        if thread["codex_thread_id"] is not None:
-            native_cleared = await runtime().clear_goal(str(thread["codex_thread_id"]))
+        await repository.get_thread_for_write(thread_id)
         stored_cleared = await repository.clear_thread_goal(thread_id)
-        return {"cleared": native_cleared or stored_cleared}
+        return {"cleared": stored_cleared}
 
     @router.get("/api/runs/{run_id}/events")
     async def list_run_events(

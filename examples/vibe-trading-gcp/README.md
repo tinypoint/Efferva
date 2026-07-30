@@ -54,7 +54,7 @@ vibe-trading-gcp/
 
 ```bash
 cd Efferva
-./scripts/build-docker-wheel.sh
+make wheel
 python3 -m http.server 8765 --directory dist/docker
 ```
 

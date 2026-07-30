@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from efferva.capabilities import SkillRoot
-from efferva.sandbox import SandboxEnvironment
+from efferva.sandbox import ProcessHandle, ProcessSpec, SandboxEnvironment
 from efferva.tools import Tool, ToolContext, tool_result_text
 
 logger = logging.getLogger(__name__)
@@ -42,12 +42,13 @@ class CodexRpcError(RuntimeError):
         super().__init__(f"{method}: {error.get('message', error)}")
 
 
-class CodexRuntime:
+class _SessionCodexRuntime:
     def __init__(
         self,
         binary: Path,
-        database_url: str,
+        sandbox: SandboxEnvironment,
         *,
+        codex_home_path: str,
         developer_instructions: str | None = None,
         openai_base_url: str | None = None,
         model: str | None = None,
@@ -57,7 +58,11 @@ class CodexRuntime:
         native_memory_enabled: bool = False,
     ) -> None:
         self._binary = binary
-        self._database_url = database_url
+        self._binary_bytes = binary.read_bytes()
+        self._sandbox = sandbox
+        self._sandbox_runtime = sandbox.runtime
+        self._sandbox_binary = "/tmp/efferva-codex-runtime"
+        self._codex_home_path = codex_home_path
         self._developer_instructions = developer_instructions
         self._openai_base_url = openai_base_url
         self._model = model
@@ -67,9 +72,8 @@ class CodexRuntime:
         if len(self._skill_roots) != len(skill_roots or ()):
             raise ValueError("Efferva SkillRoot ids must be unique")
         self._native_memory_enabled = native_memory_enabled
-        self._process: asyncio.subprocess.Process | None = None
+        self._process: ProcessHandle | None = None
         self._reader_task: asyncio.Task[None] | None = None
-        self._stderr_task: asyncio.Task[None] | None = None
         self._pending: dict[int, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._thread_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._thread_sandboxes: dict[str, SandboxEnvironment] = {}
@@ -78,40 +82,58 @@ class CodexRuntime:
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._next_id = 1
-        self._environments: dict[str, str] = {}
-        self._environment_locks: dict[str, asyncio.Lock] = {}
+        self._closed = False
 
     async def start(self) -> None:
         async with self._start_lock:
             if self.healthy:
                 return
             previous_process = self._process
-            if previous_process is not None and previous_process.returncode is None:
-                previous_process.terminate()
+            if previous_process is not None:
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(previous_process.wait(), 10)
-            for task in (self._reader_task, self._stderr_task):
+                    await self._sandbox_runtime.terminate_process(previous_process)
+            for task in (self._reader_task,):
                 if task is not None and not task.done():
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
-            self._environments.clear()
-            self._environment_locks.clear()
             self._thread_sandboxes.clear()
             self._thread_run_contexts.clear()
             await self._cancel_server_request_tasks()
-            environment = os.environ.copy()
-            environment["EFFERVA_DATABASE_URL"] = self._database_url
-            process = await asyncio.create_subprocess_exec(
-                *self._runtime_command(),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=environment,
+            self._closed = False
+            await self._sandbox_runtime.write_file(
+                self._sandbox_binary,
+                self._binary_bytes,
+            )
+            await self._run_sandbox_command(
+                (
+                    "sh",
+                    "-lc",
+                    (
+                        f"mkdir -p {self._codex_home_path} "
+                        f"{self._sandbox.workspace_path} && "
+                        f"chmod 755 {self._sandbox_binary}"
+                    ),
+                ),
+                cwd="/",
+            )
+            environment = {
+                "CODEX_HOME": self._codex_home_path,
+                "HOME": self._codex_home_path,
+            }
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                environment["OPENAI_API_KEY"] = api_key
+            process = await self._sandbox_runtime.start_process(
+                ProcessSpec(
+                    argv=(self._sandbox_binary, "app-server"),
+                    cwd=self._sandbox.workspace_path,
+                    env=environment,
+                    pipe_stdin=True,
+                )
             )
             self._process = process
             self._reader_task = asyncio.create_task(self._read_loop(process))
-            self._stderr_task = asyncio.create_task(self._read_stderr(process))
             await self.request(
                 "initialize",
                 {
@@ -129,7 +151,7 @@ class CodexRuntime:
             await self.notify("notifications/initialized")
 
     def _runtime_command(self) -> list[str]:
-        return [str(self._binary)]
+        return [self._sandbox_binary, "app-server"]
 
     def _thread_config(
         self,
@@ -196,36 +218,9 @@ class CodexRuntime:
             await self._write(message)
 
     async def ensure_environment(self, sandbox: SandboxEnvironment) -> None:
-        lock = self._environment_locks.setdefault(sandbox.environment_id, asyncio.Lock())
-        async with lock:
-            if self._environments.get(sandbox.environment_id) == sandbox.endpoint:
-                return
-            # environment/add registers the endpoint but the connection is lazy. Force
-            # the handshake before a thread can select it, otherwise a fast first turn
-            # can race the remote executor. Re-register after a failed handshake because
-            # Codex intentionally caches the failed environment connection.
-            deadline = asyncio.get_running_loop().time() + 30
-            while True:
-                await self.request(
-                    "environment/add",
-                    {
-                        "environmentId": sandbox.environment_id,
-                        "execServerUrl": sandbox.endpoint,
-                        "connectTimeoutMs": 30_000,
-                    },
-                )
-                try:
-                    await self.request(
-                        "environment/info",
-                        {"environmentId": sandbox.environment_id},
-                        request_timeout=5,
-                    )
-                    break
-                except CodexRpcError:
-                    if asyncio.get_running_loop().time() >= deadline:
-                        raise
-                    await asyncio.sleep(0.25)
-            self._environments[sandbox.environment_id] = sandbox.endpoint
+        if sandbox.sandbox.external_ref != self._sandbox.sandbox.external_ref:
+            raise RuntimeError("Codex runtime is bound to another Session sandbox")
+        await self.start()
 
     async def start_thread(
         self,
@@ -237,8 +232,6 @@ class CodexRuntime:
             "cwd": sandbox.workspace_path,
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
-            "environments": [self._environment_selection(sandbox)],
-            "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
         config = self._thread_config(sandbox, thread_config)
         if config:
@@ -256,9 +249,6 @@ class CodexRuntime:
             params["developerInstructions"] = self._developer_instructions
         if self._tools:
             params["dynamicTools"] = [tool.codex_spec() for tool in self._tools.values()]
-        selected_roots = self._selected_skill_roots(sandbox, thread_config)
-        if selected_roots:
-            params["selectedCapabilityRoots"] = selected_roots
         response = await self.request("thread/start", params)
         thread_id = str(response["thread"]["id"])
         self._thread_sandboxes[thread_id] = sandbox
@@ -276,7 +266,6 @@ class CodexRuntime:
             "cwd": sandbox.workspace_path,
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
-            "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
         config = self._thread_config(sandbox, thread_config)
         if config:
@@ -310,9 +299,7 @@ class CodexRuntime:
                     "textElements": [],
                 }
             ],
-            "environments": [self._environment_selection(sandbox)],
             "cwd": sandbox.workspace_path,
-            "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
         if model:
             params["model"] = model
@@ -366,7 +353,7 @@ class CodexRuntime:
     async def set_memory_mode(self, thread_id: str, mode: str) -> None:
         if mode == "enabled" and not self._native_memory_enabled:
             raise ValueError(
-                "Native Codex memory is disabled because this Efferva runtime is shared"
+                "Native Codex memory is disabled by product configuration"
             )
         await self.request(
             "thread/memoryMode/set",
@@ -396,9 +383,9 @@ class CodexRuntime:
     def healthy(self) -> bool:
         return (
             self._process is not None
-            and self._process.returncode is None
             and self._reader_task is not None
             and not self._reader_task.done()
+            and not self._closed
         )
 
     async def unload_thread(self, thread_id: str) -> None:
@@ -411,19 +398,12 @@ class CodexRuntime:
     async def close(self) -> None:
         process = self._process
         self._process = None
+        self._closed = True
         if process is None:
             return
-        if process.stdin is not None:
-            process.stdin.close()
-            with contextlib.suppress(Exception):
-                await process.stdin.wait_closed()
-        try:
-            await asyncio.wait_for(process.wait(), 10)
-        except TimeoutError:
-            process.terminate()
-            with contextlib.suppress(Exception):
-                await process.wait()
-        for task in (self._reader_task, self._stderr_task):
+        with contextlib.suppress(Exception):
+            await self._sandbox_runtime.terminate_process(process)
+        for task in (self._reader_task,):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -432,28 +412,39 @@ class CodexRuntime:
         self._fail_pending(RuntimeError("Codex runtime closed"))
 
     async def _ensure_process(self) -> None:
-        if self._process is None or self._process.returncode is not None:
+        if self._process is None or self._closed:
             raise RuntimeError("Codex runtime is not running")
 
     async def _write(self, message: dict[str, Any]) -> None:
-        assert self._process is not None and self._process.stdin is not None
+        assert self._process is not None
         payload = json.dumps(message, separators=(",", ":")).encode() + b"\n"
-        self._process.stdin.write(payload)
-        await self._process.stdin.drain()
+        await self._sandbox_runtime.write_stdin(self._process, payload)
 
-    async def _read_loop(self, process: asyncio.subprocess.Process) -> None:
-        assert process.stdout is not None
+    async def _read_loop(self, process: ProcessHandle) -> None:
+        cursor = 0
+        stdout_buffer = b""
         try:
-            while line := await process.stdout.readline():
-                message = json.loads(line)
-                if "id" in message and ("result" in message or "error" in message):
-                    self._resolve_response(message)
-                elif "id" in message and "method" in message:
-                    task = asyncio.create_task(self._handle_server_request(message))
-                    self._server_request_tasks.add(task)
-                    task.add_done_callback(self._server_request_completed)
-                elif "method" in message:
-                    self._route_notification(message)
+            while True:
+                output = await self._sandbox_runtime.read_process(process, cursor)
+                cursor = output.next_cursor
+                for chunk in output.chunks:
+                    if chunk.stream == "stderr":
+                        logger.info(
+                            "codex-runtime[%s]: %s",
+                            self._sandbox.environment_id,
+                            chunk.data.decode(errors="replace").rstrip(),
+                        )
+                        continue
+                    stdout_buffer += chunk.data
+                    while b"\n" in stdout_buffer:
+                        line, stdout_buffer = stdout_buffer.split(b"\n", 1)
+                        if line.strip():
+                            self._handle_message(json.loads(line))
+                if output.exited or output.closed:
+                    if stdout_buffer.strip():
+                        self._handle_message(json.loads(stdout_buffer))
+                    break
+                await asyncio.sleep(0.02)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -463,10 +454,44 @@ class CodexRuntime:
             self._fail_pending(error)
             self._fail_subscribers(error)
 
-    async def _read_stderr(self, process: asyncio.subprocess.Process) -> None:
-        assert process.stderr is not None
-        while line := await process.stderr.readline():
-            logger.info("codex-runtime: %s", line.decode(errors="replace").rstrip())
+    def _handle_message(self, message: dict[str, Any]) -> None:
+        if "id" in message and ("result" in message or "error" in message):
+            self._resolve_response(message)
+        elif "id" in message and "method" in message:
+            task = asyncio.create_task(self._handle_server_request(message))
+            self._server_request_tasks.add(task)
+            task.add_done_callback(self._server_request_completed)
+        elif "method" in message:
+            self._route_notification(message)
+
+    async def _run_sandbox_command(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: str,
+        timeout: float = 30,
+    ) -> None:
+        process = await self._sandbox_runtime.start_process(
+            ProcessSpec(argv=argv, cwd=cwd)
+        )
+        deadline = asyncio.get_running_loop().time() + timeout
+        cursor = 0
+        output = None
+        while asyncio.get_running_loop().time() < deadline:
+            output = await self._sandbox_runtime.read_process(process, cursor)
+            cursor = output.next_cursor
+            if output.exited or output.closed:
+                break
+            await asyncio.sleep(0.02)
+        if output is None or not output.exited:
+            with contextlib.suppress(Exception):
+                await self._sandbox_runtime.terminate_process(process)
+            raise TimeoutError(f"sandbox command timed out: {argv[0]}")
+        if output.exit_code != 0:
+            detail = b"".join(chunk.data for chunk in output.chunks).decode(
+                errors="replace"
+            )
+            raise RuntimeError(f"sandbox command failed ({output.exit_code}): {detail}")
 
     def _resolve_response(self, message: dict[str, Any]) -> None:
         pending = self._pending.get(message["id"])
@@ -636,3 +661,88 @@ class CodexRuntime:
                 raise ValueError(f"Unknown SkillRoot ids: {names}")
             roots = [self._skill_roots[root_id] for root_id in requested]
         return [root.codex_spec(sandbox.environment_id) for root in roots]
+
+
+class CodexRuntime:
+    """Application-side pool of Codex app-servers, one per Session sandbox."""
+
+    def __init__(
+        self,
+        binary: Path,
+        *,
+        codex_home_path: str,
+        developer_instructions: str | None = None,
+        openai_base_url: str | None = None,
+        model: str | None = None,
+        codex_config: Mapping[str, Any] | None = None,
+        tools: tuple[Tool, ...] | list[Tool] | None = None,
+        skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
+        native_memory_enabled: bool = False,
+    ) -> None:
+        self._binary = binary
+        self._codex_home_path = codex_home_path
+        self._options = {
+            "developer_instructions": developer_instructions,
+            "openai_base_url": openai_base_url,
+            "model": model,
+            "codex_config": deepcopy(dict(codex_config or {})),
+            "tools": tuple(tools or ()),
+            "skill_roots": tuple(skill_roots or ()),
+            "native_memory_enabled": native_memory_enabled,
+        }
+        self._sessions: dict[str, _SessionCodexRuntime] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._started = False
+
+    async def start(self) -> None:
+        self._started = True
+
+    @property
+    def healthy(self) -> bool:
+        return self._started
+
+    async def ensure_environment(
+        self,
+        sandbox: SandboxEnvironment,
+    ) -> _SessionCodexRuntime:
+        if not self._started:
+            raise RuntimeError("Codex runtime pool is not running")
+        key = sandbox.environment_id
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            current = self._sessions.get(key)
+            if (
+                current is not None
+                and current.healthy
+                and current._sandbox.sandbox.external_ref
+                == sandbox.sandbox.external_ref
+            ):
+                return current
+            if current is not None:
+                await current.close()
+            runtime = _SessionCodexRuntime(
+                self._binary,
+                sandbox,
+                codex_home_path=self._codex_home_path,
+                **self._options,
+            )
+            await runtime.start()
+            self._sessions[key] = runtime
+            return runtime
+
+    async def release_environment(self, session_id: str) -> None:
+        runtime = self._sessions.pop(session_id, None)
+        self._locks.pop(session_id, None)
+        if runtime is not None:
+            await runtime.close()
+
+    async def close(self) -> None:
+        self._started = False
+        runtimes = tuple(self._sessions.values())
+        self._sessions.clear()
+        self._locks.clear()
+        if runtimes:
+            await asyncio.gather(
+                *(runtime.close() for runtime in runtimes),
+                return_exceptions=True,
+            )

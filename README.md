@@ -196,8 +196,8 @@ app = Efferva(identity=resolve_principal).asgi_app()
 
 1. 建立 PostgreSQL 连接池；
 2. 使用 advisory lock 并发安全地执行包内迁移；
-3. 定位并启动 Wheel 内的 Codex Runtime；
-4. 启动 loopback Executor Gateway 和 Run Worker；
+3. 定位 Wheel 内的 Codex CLI，供 Session 启动时注入 sandbox；
+4. 启动 Run Worker 与空闲 sandbox 回收器；
 5. 关闭时按依赖顺序释放资源。
 
 迁移或 Runtime 启动失败时，应用不会进入 Ready。
@@ -205,7 +205,7 @@ app = Efferva(identity=resolve_principal).asgi_app()
 ## 安装包边界
 
 平台 Wheel 包含 Python SDK、FastAPI Router、WebUI、Worker、Repository、迁移、AG-UI、
-Executor Gateway、OpenSandbox Provider 和当前平台的
+OpenSandbox Provider 和当前平台的
 `efferva/bin/efferva-codex-runtime`。
 
 最终用户不需要：
@@ -215,9 +215,9 @@ Executor Gateway、OpenSandbox Provider 和当前平台的
 - 设置 `EFFERVA_RUNTIME_BINARY`；
 - 单独部署 Efferva 控制面；
 - 手动执行数据库迁移；
-- 理解 Executor Gateway。
+- 理解 Codex app-server 或沙盒内部进程。
 
-`EFFERVA_RUNTIME_BINARY`、Gateway host/port 仍是高级诊断覆盖项，不属于正常接入路径。
+`EFFERVA_RUNTIME_BINARY` 仍是高级诊断覆盖项，不属于正常接入路径。
 Runtime 定位不做首次启动联网下载：显式高级覆盖优先，其次使用当前 Wheel 内置二进制；平台
 Wheel 缺失时启动会返回包含 OS/架构的明确错误。
 
@@ -250,7 +250,7 @@ Compose 文件启动：
 - OpenSandbox Docker runtime 创建的每 Session 沙箱和持久工作区。
 
 ```bash
-make wheel-docker
+make wheel
 OPENAI_API_KEY=... docker compose \
   --file examples/basic-local-docker/compose.yaml \
   up --build
@@ -265,17 +265,6 @@ OPENAI_API_KEY=... docker compose \
 接到 Efferva，而不是重新写一个演示 UI。该目录固定拉取 HKUDS/Vibe-Trading 的上游版本，
 再应用 example 自己持有的接入代码和最小 patch；本地可用 Docker Compose 体验 Alice/Bob
 用户隔离，并附带 GKE、IAP、Cloud SQL 和 OpenSandbox Kubernetes runtime 的部署清单。
-
-## OpenSandbox 验收
-
-维护者可以用当前源码构建 Linux Wheel，再把它安装进真实 FastAPI 示例并运行完整回合：
-
-```bash
-make opensandbox-e2e
-```
-
-这条测试启动 PostgreSQL、OpenSandbox Server、模型 Mock 和
-`examples/basic-local-docker` 产品应用，验证 Wheel 内 Runtime、沙箱执行和持久事件。
 
 ## Provider SDK
 
@@ -307,20 +296,15 @@ stop/start 持久性。详细接口见 [Provider 文档](docs/sandbox-providers.
 以下命令只面向 Efferva 维护者，不是产品接入步骤：
 
 ```bash
-uv sync --extra dev
-make check
-uv run pytest -q
 make wheel
-make wheel-smoke
-make opensandbox-e2e
 ```
 
 源码工作区保持两个相邻仓库：
 
 ```text
-agent-framework/
-├── codex/       # 仅发布构建和上游同步需要
-└── Efferva/      # SDK、控制面、Provider、构建和交付
+codex-cloud-framwork/
+├── codex-fork/       # 仅发布构建和上游同步需要
+└── agent-framework/  # SDK、控制面、Provider、构建和交付
 ```
 
 平台 Wheel 的构建矩阵、版本追踪和内部 Registry 发布见
