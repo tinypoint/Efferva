@@ -5,7 +5,7 @@
 OpenSandbox 管理的 sandbox/PVC。
 
 ```bash
-make wheel
+uv build --wheel --out-dir dist
 docker compose --file examples/basic-local-docker/compose.yaml build app
 
 kind create cluster \

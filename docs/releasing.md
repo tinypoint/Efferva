@@ -4,7 +4,7 @@ Efferva 发布一个与平台无关的纯 Python Wheel。Codex 不进入 Wheel�
 源码编译。
 
 ```bash
-make wheel
+uv build --wheel --out-dir dist
 ```
 
 产物写入 `dist/`。产品镜像安装这个 Wheel；应用启动时从 OpenAI 官方 GitHub Release 获取

@@ -34,15 +34,18 @@ daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载
 
 - Docker Desktop 或 Docker Engine；
 - 可用的 `OPENAI_API_KEY`；
-- 已通过根目录 `make wheel` 构建 Efferva 纯 Python Wheel。
+- 已通过根目录 `uv build --wheel --out-dir dist` 构建 Efferva 纯 Python Wheel。
 
 在仓库根目录执行：
 
 ```bash
-OPENAI_API_KEY=... make docker-up
+uv build --wheel --out-dir dist
+OPENAI_API_KEY=... docker compose \
+  --file examples/basic-local-docker/compose.yaml \
+  up --build
 ```
 
-`make wheel` 只构建 Efferva Python 包；产品启动时下载并校验固定版本的 OpenAI 官方
+`uv build --wheel --out-dir dist` 只构建 Efferva Python 包；产品启动时下载并校验固定版本的 OpenAI 官方
 Codex，随后将它注入 Session sandbox。产品镜像只安装该
 Wheel，不包含 Rust 或 Codex 源码。FastAPI、Uvicorn、`efferva[opensandbox]` 仍由本目录
 的 `pyproject.toml` 明确声明。
@@ -76,4 +79,4 @@ EFFERVA_OPENSANDBOX_USE_SERVER_PROXY=true
 
 标准 HTTP/HTTPS 模型端点默认启用 OpenSandbox Credential Proxy，真实 API Key 不进入
 sandbox 环境变量。像本地 `cliproxyapi` 这类非 80/443 端口会自动退回开发凭证环境变量；
-Base URL 和 Key 直接通过启动 `make docker-up` 的环境传入即可。
+Base URL 和 Key 直接通过启动 `docker compose` 的环境传入即可。
