@@ -17,7 +17,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql://efferva:efferva@localhost:5432/efferva"
-    runtime_binary: Path | None = None
+    codex_version: str = "0.146.0"
+    codex_release_target: str | None = None
+    codex_archive_sha256: str | None = None
+    codex_release_cache_dir: Path = Path("/tmp/efferva-codex")
     codex_config_file: Path | None = None
     codex_openai_base_url: str | None = None
     codex_model: str | None = None

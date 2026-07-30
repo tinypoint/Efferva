@@ -88,8 +88,8 @@ PostgreSQL 保存身份、Session/Thread 映射、Run 队列和可补流事件�
 app-server 进程和 sandbox 计算实例都可丢弃，恢复时重新注入 Session 记录的 Runtime 并执行
 `thread/resume`。
 
-Runtime 二进制按 SHA 保存为 `/session/runtimes/<sha>/codex`。新 Session 固定当前 Wheel
-版本；旧 Session 即使在 App 升级后，也继续从自己的持久卷启动原版本。
+Codex 二进制按 SHA 保存为 `/session/runtimes/<sha>/codex`。新 Session 固定 App 当前选择的
+OpenAI 官方版本；旧 Session 即使在 App 升级后，也继续从自己的持久卷启动原版本。
 
 `workspace_bindings` 与 `sandbox_leases` 只保存 Provider 名称、不透明 `external_ref/state_json`
 和 fencing 状态，不保存假设某种沙盒拓扑的 endpoint。Thread、Run 与 Event 仍通过 Session

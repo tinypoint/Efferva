@@ -54,7 +54,7 @@ class _SessionCodexRuntime:
         binary_bytes: bytes,
         codex_home_path: str,
         runtime_sha256: str,
-        bundled_runtime_sha256: str,
+        current_release_sha256: str,
         developer_instructions: str | None = None,
         openai_base_url: str | None = None,
         model: str | None = None,
@@ -66,7 +66,7 @@ class _SessionCodexRuntime:
         self._binary = binary
         self._binary_bytes = binary_bytes
         self._runtime_sha256 = runtime_sha256
-        self._bundled_runtime_sha256 = bundled_runtime_sha256
+        self._current_release_sha256 = current_release_sha256
         self._sandbox = sandbox
         self._sandbox_runtime = sandbox.runtime
         self._codex_home_path = codex_home_path
@@ -118,12 +118,12 @@ class _SessionCodexRuntime:
             try:
                 await self._sandbox_runtime.stat(self._sandbox_binary)
             except FileNotFoundError:
-                if self._runtime_sha256 != self._bundled_runtime_sha256:
+                if self._runtime_sha256 != self._current_release_sha256:
                     raise RuntimeError(
                         "Session requires Codex runtime "
                         f"{self._runtime_sha256}, but it is not present on the "
-                        "persistent volume and the current Wheel contains "
-                        f"{self._bundled_runtime_sha256}"
+                        "persistent volume and the current official release provides "
+                        f"{self._current_release_sha256}"
                     )
                 await self._run_sandbox_command(
                     (
@@ -731,7 +731,7 @@ class CodexRuntime:
     ) -> None:
         self._binary = binary
         self._binary_bytes = binary.read_bytes()
-        self._bundled_runtime_sha256 = sha256(self._binary_bytes).hexdigest()
+        self._current_release_sha256 = sha256(self._binary_bytes).hexdigest()
         self._codex_home_path = codex_home_path
         self._options = {
             "developer_instructions": developer_instructions,
@@ -767,7 +767,7 @@ class CodexRuntime:
             if runtime_sha256 is not None
             and len(runtime_sha256) == 64
             and all(character in "0123456789abcdefABCDEF" for character in runtime_sha256)
-            else self._bundled_runtime_sha256
+            else self._current_release_sha256
         )
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -788,7 +788,7 @@ class CodexRuntime:
                 binary_bytes=self._binary_bytes,
                 codex_home_path=self._codex_home_path,
                 runtime_sha256=requested_sha256,
-                bundled_runtime_sha256=self._bundled_runtime_sha256,
+                current_release_sha256=self._current_release_sha256,
                 **self._options,
             )
             await runtime.start()

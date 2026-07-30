@@ -6,7 +6,7 @@ sidebar:
   label: 快速开始
 ---
 
-Efferva 目前处于内部预览阶段。各平台 Wheel 和完整安装指南将在首次公开发布前提供。
+Efferva 目前处于内部预览阶段。Python Wheel 和完整安装指南将在首次公开发布前提供。
 
 ## 接入形态
 

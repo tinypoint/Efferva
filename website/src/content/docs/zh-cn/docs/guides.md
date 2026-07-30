@@ -15,7 +15,7 @@ sidebar:
 - 通过 PostgreSQL 运行多个应用实例
 - 断线后恢复 AG-UI 与 SSE 事件流
 - 增加并验证自定义沙盒 Provider
-- 打包和部署平台 Wheel
+- 构建和部署纯 Python Wheel
 
 :::tip[关注进展]
 关注 [Efferva 仓库](https://github.com/tinypoint/Efferva)，即可看到新指南的更新。

@@ -15,7 +15,7 @@ Planned guides include:
 - Run multiple application instances against PostgreSQL
 - Resume AG-UI and SSE streams after disconnects
 - Add and validate a custom sandbox provider
-- Package and deploy platform wheels
+- Build and deploy the pure Python wheel
 
 :::tip[Follow the work]
 Watch the [Efferva repository](https://github.com/tinypoint/Efferva) to follow new guides as they land.

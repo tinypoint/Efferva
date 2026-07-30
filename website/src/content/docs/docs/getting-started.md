@@ -6,7 +6,7 @@ sidebar:
   label: Getting started
 ---
 
-Efferva is currently in private preview. Platform wheels and the complete installation guide will be published before the first public release.
+Efferva is currently in private preview. The Python wheel and complete installation guide will be published before the first public release.
 
 ## Integration shape
 

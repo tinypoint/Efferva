@@ -15,7 +15,7 @@ Efferva 面向使用 Docker 本地运行或部署在 Kubernetes 上的产品应�
 - 安装 Efferva Wheel 的 FastAPI 应用
 - 作为持久化控制面存储的 PostgreSQL
 - 支持的沙盒执行后端
-- 打包在平台 Wheel 中的 Codex Runtime
+- 注入每个 Session 沙箱的固定、已校验 OpenAI 官方 Codex
 
 ## Kubernetes
 

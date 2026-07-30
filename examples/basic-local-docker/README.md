@@ -34,7 +34,7 @@ daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载
 
 - Docker Desktop 或 Docker Engine；
 - 可用的 `OPENAI_API_KEY`；
-- 已通过根目录 `make wheel` 构建当前架构的 Efferva Linux Wheel。
+- 已通过根目录 `make wheel` 构建 Efferva 纯 Python Wheel。
 
 在仓库根目录执行：
 
@@ -42,7 +42,8 @@ daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载
 OPENAI_API_KEY=... make docker-up
 ```
 
-`make wheel` 在固定 Debian 12 Builder 中编译 Codex 并生成 Wheel；产品镜像只安装该
+`make wheel` 只构建 Efferva Python 包；产品启动时下载并校验固定版本的 OpenAI 官方
+Codex，随后将它注入 Session sandbox。产品镜像只安装该
 Wheel，不包含 Rust 或 Codex 源码。FastAPI、Uvicorn、`efferva[opensandbox]` 仍由本目录
 的 `pyproject.toml` 明确声明。
 

@@ -6,7 +6,7 @@ sidebar:
   label: Sandbox providers
 ---
 
-Sandbox providers implement lifecycle and runtime execution behind one contract. Codex remains outside the sandbox; only commands and filesystem operations cross the execution boundary.
+Sandbox providers implement lifecycle and runtime execution behind one contract. The official Codex App Server runs inside the Session sandbox; the Efferva App routes its stdio protocol through the provider process channel.
 
 Current provider work covers:
 

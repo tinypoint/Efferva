@@ -1,7 +1,7 @@
 .PHONY: wheel image docker-up docker-down
 
 wheel:
-	./scripts/build-docker-wheel.sh
+	uv build --wheel --out-dir dist
 
 image: wheel
 	docker build \

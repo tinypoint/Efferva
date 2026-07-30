@@ -74,8 +74,8 @@ export EFFERVA_OPENSANDBOX_API_KEY=...
 
 ## Codex 适配
 
-Codex 不直接依赖 Provider。Efferva 通过 `SandboxRuntime` 将 Wheel 内的 Codex CLI 注入
-Session sandbox，并启动本地 app-server：
+Codex 不直接依赖 Provider。Efferva 通过 `SandboxRuntime` 将经过 SHA-256 校验的 OpenAI
+官方 Codex CLI 注入 Session sandbox，并启动本地 app-server：
 
 ```text
 Efferva App

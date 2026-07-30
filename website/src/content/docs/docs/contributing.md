@@ -11,10 +11,9 @@ Efferva is developed in the open under the Apache-2.0 license.
 ## Start a contribution
 
 1. Read the repository engineering constraints.
-2. Keep product behavior in Efferva and the Codex fork thin.
-3. Add tests for changed behavior.
-4. Run Python, Rust, and relevant integration checks.
-5. Open a focused pull request with the problem and verification described clearly.
+2. Use the official Codex App Server protocol; do not add a runtime fork.
+3. Keep the public Python package independent from Rust and Codex source.
+4. Open a focused pull request with the problem described clearly.
 
 Documentation changes should update English and Simplified Chinese pages together. The website build rejects missing language counterparts.
 

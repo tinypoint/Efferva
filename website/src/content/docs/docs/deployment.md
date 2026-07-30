@@ -15,7 +15,7 @@ The local product shape combines:
 - A FastAPI application with the Efferva wheel installed
 - PostgreSQL as the durable control-plane store
 - A supported sandbox execution backend
-- The Codex Runtime bundled inside the platform wheel
+- A pinned, verified official Codex release injected into each Session sandbox
 
 ## Kubernetes
 

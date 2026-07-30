@@ -1,7 +1,7 @@
 FROM python:3.13-slim-bookworm
 
 WORKDIR /product
-COPY dist/docker/efferva-*.whl /tmp/wheels/
+COPY dist/efferva-*.whl /tmp/wheels/
 COPY examples/basic-local-docker/pyproject.toml ./
 COPY examples/basic-local-docker/src ./src
 RUN pip install --no-cache-dir /tmp/wheels/*.whl \

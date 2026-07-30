@@ -1,7 +1,6 @@
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from hashlib import sha256
 from importlib.resources import files
 from typing import Annotated, Any
 
@@ -11,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from efferva.api import create_api_router, principal_dependency
 from efferva.artifacts import create_publish_artifact_tool
 from efferva.capabilities import SkillRoot
+from efferva.codex_release import prepare_official_codex
 from efferva.config import (
     Settings,
     get_settings,
@@ -30,7 +30,6 @@ from efferva.repository import (
     SystemRepository,
 )
 from efferva.runtime import CodexRuntime
-from efferva.runtime_binary import locate_runtime_binary, runtime_build_info
 from efferva.sandbox import create_sandbox_control_plane, register_sandbox_provider
 from efferva.tools import Tool
 from efferva.worker import RunWorker
@@ -98,7 +97,7 @@ class Efferva:
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-            runtime_binary = locate_runtime_binary(settings.runtime_binary)
+            codex_release = await prepare_official_codex(settings)
             codex_config = merge_codex_config(
                 load_codex_config(settings.codex_config_file),
                 self.codex_config,
@@ -110,22 +109,10 @@ class Efferva:
             await database.open()
             try:
                 await database.migrate(migrations)
-                build_info = runtime_build_info()
-                runtime_sha256 = sha256(runtime_binary.read_bytes()).hexdigest()
-                bundled_build = (
-                    build_info
-                    if build_info is not None
-                    and build_info.runtime_sha256 == runtime_sha256
-                    else None
-                )
                 repository = SystemRepository(
                     database,
-                    codex_version=(
-                        bundled_build.codex_revision
-                        if bundled_build is not None
-                        else f"override:{runtime_sha256[:12]}"
-                    ),
-                    codex_runtime_sha256=runtime_sha256,
+                    codex_version=codex_release.version,
+                    codex_runtime_sha256=codex_release.binary_sha256,
                 )
                 tools = (
                     *self.tools,
@@ -135,7 +122,7 @@ class Efferva:
                     ),
                 )
                 runtime = CodexRuntime(
-                    runtime_binary,
+                    codex_release.binary,
                     codex_home_path=settings.codex_home_path,
                     developer_instructions=self.developer_instructions,
                     openai_base_url=settings.codex_openai_base_url,

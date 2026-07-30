@@ -9,12 +9,6 @@ from efferva.identity import (
     UnauthenticatedError,
 )
 from efferva.models import Artifact
-from efferva.runtime_binary import (
-    RuntimeBinaryNotFoundError,
-    RuntimeBuildInfo,
-    locate_runtime_binary,
-    runtime_build_info,
-)
 from efferva.sandbox import (
     DirectoryEntry,
     FileMetadata,
@@ -46,8 +40,6 @@ __all__ = [
     "ProcessSpec",
     "Principal",
     "ProviderConformanceReport",
-    "RuntimeBinaryNotFoundError",
-    "RuntimeBuildInfo",
     "SandboxCapabilities",
     "SandboxContext",
     "SandboxFiles",
@@ -60,8 +52,6 @@ __all__ = [
     "UnauthenticatedError",
     "WorkspaceHandle",
     "Workflow",
-    "locate_runtime_binary",
     "run_provider_conformance",
-    "runtime_build_info",
     "workflow_tool",
 ]
