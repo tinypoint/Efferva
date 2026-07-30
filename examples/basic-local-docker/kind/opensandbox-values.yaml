@@ -4,13 +4,11 @@ opensandbox-controller:
     image:
       repository: opensandbox/controller
       tag: v0.2.0
-    snapshot:
-      imageCommitterImage: opensandbox/image-committer:v0.1.1
 
 opensandbox-server:
   namespaceOverride: opensandbox-system
   server:
-    replicaCount: 2
+    replicaCount: 1
     image:
       repository: opensandbox/server
       tag: v0.2.2
@@ -39,7 +37,7 @@ opensandbox-server:
 
     [kubernetes]
     kubeconfig_path = ""
-    namespace = "vibe-sandboxes"
+    namespace = "efferva-sandboxes"
     informer_enabled = true
     workload_provider = "batchsandbox"
     image_pull_policy = "IfNotPresent"

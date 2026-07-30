@@ -34,26 +34,17 @@ daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载
 
 - Docker Desktop 或 Docker Engine；
 - 可用的 `OPENAI_API_KEY`；
-- GitHub Releases 中存在对应版本和架构的 Efferva Linux Wheel。
+- 已通过根目录 `make wheel` 构建当前架构的 Efferva Linux Wheel。
 
 在仓库根目录执行：
 
 ```bash
-OPENAI_API_KEY=... docker compose \
-  --file examples/basic-local-docker/compose.yaml \
-  up --build
+OPENAI_API_KEY=... make docker-up
 ```
 
-应用镜像根据 Docker 架构从 GitHub Release 下载 Linux Wheel，不会在
-`docker compose up` 时编译 Codex。FastAPI、Uvicorn、`efferva[opensandbox]`
-仍由本目录的 `pyproject.toml` 明确声明。
-
-测试尚未正式发布的 Wheel 时，可以覆盖下载地址：
-
-```bash
-EFFERVA_WHEEL_URL=https://example.test/efferva-test.whl \
-  docker compose --file examples/basic-local-docker/compose.yaml up --build
-```
+`make wheel` 在固定 Debian 12 Builder 中编译 Codex 并生成 Wheel；产品镜像只安装该
+Wheel，不包含 Rust 或 Codex 源码。FastAPI、Uvicorn、`efferva[opensandbox]` 仍由本目录
+的 `pyproject.toml` 明确声明。
 
 打开 <http://localhost:8080>。停止服务但保留 PostgreSQL、OpenSandbox 元数据和 Session
 工作区：
@@ -81,3 +72,7 @@ EFFERVA_OPENSANDBOX_SERVER_URL=http://opensandbox-server:8090
 EFFERVA_OPENSANDBOX_API_KEY=local-dev-key
 EFFERVA_OPENSANDBOX_USE_SERVER_PROXY=true
 ```
+
+标准 HTTP/HTTPS 模型端点默认启用 OpenSandbox Credential Proxy，真实 API Key 不进入
+sandbox 环境变量。像本地 `cliproxyapi` 这类非 80/443 端口会自动退回开发凭证环境变量；
+Base URL 和 Key 直接通过启动 `make docker-up` 的环境传入即可。

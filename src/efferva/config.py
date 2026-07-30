@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     opensandbox_server_url: str = "http://localhost:8080"
     opensandbox_api_key: str | None = None
     opensandbox_use_server_proxy: bool = True
+    opensandbox_credential_proxy_enabled: bool = True
     session_volume_path: str = "/session"
     workspace_path: str = "/session/workspace"
     codex_home_path: str = "/session/codex-home"

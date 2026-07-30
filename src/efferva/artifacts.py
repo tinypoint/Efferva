@@ -115,7 +115,10 @@ def create_publish_artifact_tool(
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Absolute workspace path or path relative to /workspace.",
+                    "description": (
+                        "Absolute workspace path or path relative to "
+                        "/session/workspace."
+                    ),
                 },
                 "name": {
                     "type": "string",

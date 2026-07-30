@@ -5,8 +5,11 @@ import contextlib
 import json
 import logging
 import os
+import posixpath
+import shlex
 from collections.abc import Mapping
 from copy import deepcopy
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +51,10 @@ class _SessionCodexRuntime:
         binary: Path,
         sandbox: SandboxEnvironment,
         *,
+        binary_bytes: bytes,
         codex_home_path: str,
+        runtime_sha256: str,
+        bundled_runtime_sha256: str,
         developer_instructions: str | None = None,
         openai_base_url: str | None = None,
         model: str | None = None,
@@ -58,11 +64,19 @@ class _SessionCodexRuntime:
         native_memory_enabled: bool = False,
     ) -> None:
         self._binary = binary
-        self._binary_bytes = binary.read_bytes()
+        self._binary_bytes = binary_bytes
+        self._runtime_sha256 = runtime_sha256
+        self._bundled_runtime_sha256 = bundled_runtime_sha256
         self._sandbox = sandbox
         self._sandbox_runtime = sandbox.runtime
-        self._sandbox_binary = "/tmp/efferva-codex-runtime"
         self._codex_home_path = codex_home_path
+        session_root = posixpath.dirname(codex_home_path.rstrip("/"))
+        self._sandbox_binary = posixpath.join(
+            session_root,
+            "runtimes",
+            runtime_sha256,
+            "codex",
+        )
         self._developer_instructions = developer_instructions
         self._openai_base_url = openai_base_url
         self._model = model
@@ -101,18 +115,37 @@ class _SessionCodexRuntime:
             self._thread_run_contexts.clear()
             await self._cancel_server_request_tasks()
             self._closed = False
-            await self._sandbox_runtime.write_file(
-                self._sandbox_binary,
-                self._binary_bytes,
-            )
+            try:
+                await self._sandbox_runtime.stat(self._sandbox_binary)
+            except FileNotFoundError:
+                if self._runtime_sha256 != self._bundled_runtime_sha256:
+                    raise RuntimeError(
+                        "Session requires Codex runtime "
+                        f"{self._runtime_sha256}, but it is not present on the "
+                        "persistent volume and the current Wheel contains "
+                        f"{self._bundled_runtime_sha256}"
+                    )
+                await self._run_sandbox_command(
+                    (
+                        "sh",
+                        "-lc",
+                        "mkdir -p "
+                        f"{shlex.quote(posixpath.dirname(self._sandbox_binary))}",
+                    ),
+                    cwd="/",
+                )
+                await self._sandbox_runtime.write_file(
+                    self._sandbox_binary,
+                    self._binary_bytes,
+                )
             await self._run_sandbox_command(
                 (
                     "sh",
                     "-lc",
                     (
-                        f"mkdir -p {self._codex_home_path} "
-                        f"{self._sandbox.workspace_path} && "
-                        f"chmod 755 {self._sandbox_binary}"
+                        f"mkdir -p {shlex.quote(self._codex_home_path)} "
+                        f"{shlex.quote(self._sandbox.workspace_path)} && "
+                        f"chmod 755 {shlex.quote(self._sandbox_binary)}"
                     ),
                 ),
                 cwd="/",
@@ -123,7 +156,11 @@ class _SessionCodexRuntime:
             }
             api_key = os.environ.get("OPENAI_API_KEY")
             if api_key:
-                environment["OPENAI_API_KEY"] = api_key
+                environment["OPENAI_API_KEY"] = (
+                    "efferva-credential-proxy"
+                    if self._sandbox.sandbox.state.get("credentialProxy")
+                    else api_key
+                )
             process = await self._sandbox_runtime.start_process(
                 ProcessSpec(
                     argv=(self._sandbox_binary, "app-server"),
@@ -408,6 +445,8 @@ class _SessionCodexRuntime:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        with contextlib.suppress(Exception):
+            await self._forget_process(process)
         await self._cancel_server_request_tasks()
         self._fail_pending(RuntimeError("Codex runtime closed"))
 
@@ -486,12 +525,23 @@ class _SessionCodexRuntime:
         if output is None or not output.exited:
             with contextlib.suppress(Exception):
                 await self._sandbox_runtime.terminate_process(process)
+            with contextlib.suppress(Exception):
+                await self._forget_process(process)
             raise TimeoutError(f"sandbox command timed out: {argv[0]}")
         if output.exit_code != 0:
             detail = b"".join(chunk.data for chunk in output.chunks).decode(
                 errors="replace"
             )
+            with contextlib.suppress(Exception):
+                await self._forget_process(process)
             raise RuntimeError(f"sandbox command failed ({output.exit_code}): {detail}")
+        with contextlib.suppress(Exception):
+            await self._forget_process(process)
+
+    async def _forget_process(self, process: ProcessHandle) -> None:
+        forget = getattr(self._sandbox_runtime, "forget_process", None)
+        if forget is not None:
+            await forget(process)
 
     def _resolve_response(self, message: dict[str, Any]) -> None:
         pending = self._pending.get(message["id"])
@@ -680,6 +730,8 @@ class CodexRuntime:
         native_memory_enabled: bool = False,
     ) -> None:
         self._binary = binary
+        self._binary_bytes = binary.read_bytes()
+        self._bundled_runtime_sha256 = sha256(self._binary_bytes).hexdigest()
         self._codex_home_path = codex_home_path
         self._options = {
             "developer_instructions": developer_instructions,
@@ -704,10 +756,19 @@ class CodexRuntime:
     async def ensure_environment(
         self,
         sandbox: SandboxEnvironment,
+        *,
+        runtime_sha256: str | None = None,
     ) -> _SessionCodexRuntime:
         if not self._started:
             raise RuntimeError("Codex runtime pool is not running")
         key = sandbox.environment_id
+        requested_sha256 = (
+            runtime_sha256.lower()
+            if runtime_sha256 is not None
+            and len(runtime_sha256) == 64
+            and all(character in "0123456789abcdefABCDEF" for character in runtime_sha256)
+            else self._bundled_runtime_sha256
+        )
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             current = self._sessions.get(key)
@@ -716,6 +777,7 @@ class CodexRuntime:
                 and current.healthy
                 and current._sandbox.sandbox.external_ref
                 == sandbox.sandbox.external_ref
+                and current._runtime_sha256 == requested_sha256
             ):
                 return current
             if current is not None:
@@ -723,7 +785,10 @@ class CodexRuntime:
             runtime = _SessionCodexRuntime(
                 self._binary,
                 sandbox,
+                binary_bytes=self._binary_bytes,
                 codex_home_path=self._codex_home_path,
+                runtime_sha256=requested_sha256,
+                bundled_runtime_sha256=self._bundled_runtime_sha256,
                 **self._options,
             )
             await runtime.start()

@@ -668,6 +668,8 @@ class SystemRepository:
                        s.tenant_id,
                        s.owner_issuer,
                        s.owner_subject,
+                       s.codex_version,
+                       s.codex_runtime_sha256,
                        (
                            SELECT content
                            FROM messages
@@ -1096,6 +1098,23 @@ class SystemRepository:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         async with self._database.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE sandbox_leases sandbox
+                SET status = 'idle', updated_at = now()
+                FROM workspace_bindings workspace
+                WHERE sandbox.workspace_id = workspace.workspace_id
+                  AND sandbox.status = 'ready'
+                  AND sandbox.expires_at < now()
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM runs active
+                      JOIN app_threads thread ON thread.id = active.thread_id
+                      WHERE thread.session_id = workspace.session_id
+                        AND active.status = 'running'
+                  )
+                """
+            )
             cursor = await connection.execute(
                 """
                 WITH candidates AS (

@@ -35,3 +35,7 @@ pids_limit = 4096
 
 [ingress]
 mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.1.5"
+mode = "dns+nft"

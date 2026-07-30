@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import os.path
 import shlex
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.execd import ExecutionHandlers, RunCommandOpts
 from opensandbox.models.filesystem import DirectoryListEntry
-from opensandbox.models.sandboxes import PVC, SandboxFilter, Volume
+from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
+    PVC,
+    SandboxFilter,
+    Volume,
+)
 
 from efferva.config import Settings
 from efferva.sandbox.runtime import (
@@ -35,6 +42,7 @@ from efferva.sandbox.types import (
 
 _SESSION_METADATA_KEY = "efferva.session"
 _WORKSPACE_METADATA_KEY = "efferva.workspace"
+_CREDENTIAL_PROXY_METADATA_KEY = "efferva.credential-proxy"
 
 
 class _OpenSandboxExecTransport(ProcessTransport):
@@ -241,6 +249,9 @@ class OpenSandboxProvider:
                 "workspacePath": context.workspace_path,
                 "codexHomePath": self._settings.codex_home_path,
                 "size": self._settings.session_volume_size,
+                "deletedRetentionDays": (
+                    self._settings.deleted_session_volume_retention_days
+                ),
             },
         )
 
@@ -251,7 +262,12 @@ class OpenSandboxProvider:
     ) -> SandboxHandle:
         async with self._lock:
             info = await self._find_sandbox(context)
+            credential_proxy = self._credential_proxy_target()
+            credential_proxy_active = False
             if info is not None:
+                credential_proxy_active = (
+                    (info.metadata or {}).get(_CREDENTIAL_PROXY_METADATA_KEY) == "true"
+                )
                 if info.status.state.upper() == "PAUSED":
                     await (await self._get_manager()).resume_sandbox(info.id)
                 sandbox = await Sandbox.connect(
@@ -265,11 +281,19 @@ class OpenSandboxProvider:
                     metadata={
                         _SESSION_METADATA_KEY: str(context.session_id),
                         _WORKSPACE_METADATA_KEY: str(context.workspace_id),
+                        _CREDENTIAL_PROXY_METADATA_KEY: str(
+                            credential_proxy is not None
+                        ).lower(),
                     },
                     resource={
                         "cpu": self._settings.sandbox_cpu_limit,
                         "memory": self._settings.sandbox_memory_limit,
                     },
+                    credential_proxy=(
+                        CredentialProxyConfig(enabled=True)
+                        if credential_proxy is not None
+                        else None
+                    ),
                     volumes=[
                         Volume(
                             name="workspace",
@@ -284,12 +308,22 @@ class OpenSandboxProvider:
                     ],
                     connection_config=self._connection_config(),
                 )
+                if credential_proxy is not None:
+                    await self._configure_credential_proxy(
+                        sandbox,
+                        host=credential_proxy[0],
+                        scheme=credential_proxy[1],
+                    )
+                    credential_proxy_active = True
             self._sandboxes[sandbox.id] = sandbox
         return SandboxHandle(
             provider=self.name,
             external_ref=sandbox.id,
             workspace_id=context.workspace_id,
-            state={"workspacePath": context.workspace_path},
+            state={
+                "workspacePath": context.workspace_path,
+                "credentialProxy": credential_proxy_active,
+            },
         )
 
     async def connect(self, sandbox: SandboxHandle) -> OpenSandboxRuntime:
@@ -360,6 +394,50 @@ class OpenSandboxProvider:
         if runtime is not None:
             await runtime.close()
         self._sandboxes.pop(sandbox_id, None)
+
+    def _credential_proxy_target(self) -> tuple[str, str] | None:
+        if not self._settings.opensandbox_credential_proxy_enabled:
+            return None
+        if not os.environ.get("OPENAI_API_KEY"):
+            return None
+        parsed = urlparse(
+            self._settings.codex_openai_base_url or "https://api.openai.com/v1"
+        )
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        default_port = 443 if parsed.scheme == "https" else 80
+        if parsed.port not in {None, default_port}:
+            return None
+        return parsed.hostname, parsed.scheme
+
+    async def _configure_credential_proxy(
+        self,
+        sandbox: Sandbox,
+        *,
+        host: str,
+        scheme: str,
+    ) -> None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return
+        await sandbox.credential_vault.create(
+            credentials=[
+                {
+                    "name": "efferva-openai-api-key",
+                    "source": {"type": "inline", "value": api_key},
+                }
+            ],
+            bindings=[
+                {
+                    "name": "efferva-openai-bearer",
+                    "match": {"schemes": [scheme], "hosts": [host]},
+                    "auth": {
+                        "type": "bearer",
+                        "credential": "efferva-openai-api-key",
+                    },
+                }
+            ],
+        )
 
 
 def _b64(data: bytes) -> str:

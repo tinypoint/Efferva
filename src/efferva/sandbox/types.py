@@ -42,7 +42,7 @@ class SandboxContext:
     session_id: UUID
     workspace_id: UUID
     workspace_ref: str
-    workspace_path: str = "/workspace"
+    workspace_path: str = "/session/workspace"
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 

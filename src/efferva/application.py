@@ -62,7 +62,7 @@ class Efferva:
         tools: list[Tool] | tuple[Tool, ...] | None = None,
         developer_instructions: str | None = None,
         skill_roots: list[SkillRoot] | tuple[SkillRoot, ...] | None = None,
-        native_memory_enabled: bool = False,
+        native_memory_enabled: bool = True,
     ) -> None:
         self.identity = identity
         self.settings = settings or get_settings()
@@ -111,16 +111,21 @@ class Efferva:
             try:
                 await database.migrate(migrations)
                 build_info = runtime_build_info()
+                runtime_sha256 = sha256(runtime_binary.read_bytes()).hexdigest()
+                bundled_build = (
+                    build_info
+                    if build_info is not None
+                    and build_info.runtime_sha256 == runtime_sha256
+                    else None
+                )
                 repository = SystemRepository(
                     database,
                     codex_version=(
-                        build_info.codex_revision if build_info is not None else "development"
+                        bundled_build.codex_revision
+                        if bundled_build is not None
+                        else f"override:{runtime_sha256[:12]}"
                     ),
-                    codex_runtime_sha256=(
-                        build_info.runtime_sha256
-                        if build_info is not None
-                        else sha256(runtime_binary.read_bytes()).hexdigest()
-                    ),
+                    codex_runtime_sha256=runtime_sha256,
                 )
                 tools = (
                     *self.tools,

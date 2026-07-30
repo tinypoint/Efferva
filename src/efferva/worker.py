@@ -135,7 +135,10 @@ class RunWorker:
                 owner_id=owner_id,
                 fencing_token=epoch,
             )
-            session_runtime = await self._runtime.ensure_environment(sandbox)
+            session_runtime = await self._runtime.ensure_environment(
+                sandbox,
+                runtime_sha256=run.get("codex_runtime_sha256"),
+            )
             runtime_config = dict(run.get("runtime_config_json") or {})
             if codex_thread_id is None:
                 codex_thread_id = await session_runtime.start_thread(sandbox, runtime_config)

@@ -47,11 +47,8 @@ services:
     image: efferva-basic-local-docker:local
     restart: unless-stopped
     build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        EFFERVA_VERSION: ${EFFERVA_VERSION:-0.1.0}
-        EFFERVA_WHEEL_URL: ${EFFERVA_WHEEL_URL:-}
+      context: ../..
+      dockerfile: examples/basic-local-docker/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,14 +62,11 @@ services:
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "true"
       EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
-      EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-gpt-5.4}
+      EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-}
       EFFERVA_PUBLIC_BASE_URL: http://localhost:8080
-      CODEX_HOME: /var/lib/efferva/codex
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${EFFERVA_HTTP_PORT:-8080}:8080"
-    volumes:
-      - codex-home:/var/lib/efferva/codex
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -92,7 +86,6 @@ services:
 volumes:
   postgres-data:
   opensandbox-data:
-  codex-home:
 
 networks:
   efferva-local:

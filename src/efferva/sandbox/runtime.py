@@ -178,6 +178,9 @@ class BufferedSandboxRuntime(ABC):
         if transport is not None:
             await transport.terminate()
 
+    async def forget_process(self, process: ProcessHandle) -> None:
+        self._states.pop(process.id, None)
+
     async def read_file(self, path: str) -> bytes:
         stdout, _ = await self._capture(
             (

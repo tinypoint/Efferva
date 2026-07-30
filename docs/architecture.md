@@ -88,6 +88,9 @@ PostgreSQL 保存身份、Session/Thread 映射、Run 队列和可补流事件�
 app-server 进程和 sandbox 计算实例都可丢弃，恢复时重新注入 Session 记录的 Runtime 并执行
 `thread/resume`。
 
+Runtime 二进制按 SHA 保存为 `/session/runtimes/<sha>/codex`。新 Session 固定当前 Wheel
+版本；旧 Session 即使在 App 升级后，也继续从自己的持久卷启动原版本。
+
 `workspace_bindings` 与 `sandbox_leases` 只保存 Provider 名称、不透明 `external_ref/state_json`
 和 fencing 状态，不保存假设某种沙盒拓扑的 endpoint。Thread、Run 与 Event 仍通过 Session
 继承身份边界，不重复存租户字段。
@@ -100,5 +103,5 @@ Kubernetes PVC 或厂商存储由 OpenSandbox 部署决定。
 
 Codex app-server 位于 sandbox，App 不需要 Docker Socket 或 Kubernetes 凭据。沙箱创建、
 命令执行和文件访问统一通过 OpenSandbox Server；Docker Socket 或 Kubernetes 凭据只属于
-OpenSandbox 自己的部署边界。模型凭证后续由 OpenSandbox Credential Proxy 注入；本地
+OpenSandbox 自己的部署边界。标准端口的模型凭证默认由 OpenSandbox Credential Proxy 注入；本地
 非标准端口代理可使用受控开发凭证。

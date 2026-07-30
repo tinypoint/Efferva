@@ -157,8 +157,8 @@ run_workflow = workflow_tool([
 `workflow_tool()` 对 Codex 暴露统一的 `run_workflow`；workflow 名称、DAG 状态、worker
 选择和产物策略仍由应用控制。
 
-沙箱镜像里的默认 Skills 和用户写入 Session 工作区的 Skills，可以注册为远程
-Capability Roots：
+沙箱镜像里的默认 Skills 和用户写入 Session 工作区的 Skills，可以注册为 Session
+本地 Skill Roots：
 
 ```python
 from efferva import SkillRoot
@@ -167,19 +167,18 @@ Efferva(
     identity=resolve_principal,
     skill_roots=[
         SkillRoot(id="product-defaults", path="/opt/product/skills"),
-        SkillRoot(id="session-custom", path="/workspace/.agents/skills"),
+        SkillRoot(id="session-custom", path="/session/workspace/.agents/skills"),
     ],
 ).install(app, prefix="/agent")
 ```
 
-Efferva 将启用的 root 作为 `selectedCapabilityRoots` 交给 Codex；Codex 通过该 Session
-的 Executor Gateway 扫描 `SKILL.md`。创建 Thread 时可用 `skill_roots` 选择开关。模型、
-model provider 和推理强度可设在 Thread，模型及推理强度还可在每次 Run 覆盖。
+Efferva 在 Session sandbox 内让 Codex 扫描 `SKILL.md`。模型、model provider 和推理强度
+可设在 Thread，模型及推理强度还可在每次 Run 覆盖。
 
 Codex 原生 Goal 已映射为 Thread API，取消请求是 PostgreSQL 中的持久控制信号，由持有
-Run lease 的 worker 执行 `turn/interrupt`。Codex 原生 Memory 默认关闭：单个共享
-Runtime 的 `CODEX_HOME` 不是多租户隔离边界。只有部署方真的为租户提供隔离 Runtime
-时，才应设置 `native_memory_enabled=True`。
+Run lease 的 worker 执行 `turn/interrupt`。每个 Session 都有独立且持久化的
+`CODEX_HOME`，因此启用 Codex 原生 Memory 不会跨 Session 共享状态；产品仍可通过
+`native_memory_enabled=False` 全局关闭。
 
 Efferva 还会自动注册 `publish_artifact` Dynamic Tool。Agent 只能发布当前 Session
 workspace 内的普通文件；读取前后都会校验 sandbox fencing token。文件内容、哈希和元数据
@@ -250,21 +249,11 @@ Compose 文件启动：
 - OpenSandbox Docker runtime 创建的每 Session 沙箱和持久工作区。
 
 ```bash
-make wheel
-OPENAI_API_KEY=... docker compose \
-  --file examples/basic-local-docker/compose.yaml \
-  up --build
+OPENAI_API_KEY=... make docker-up
 ```
 
 打开 <http://localhost:8080>。产品代码只使用固定的本地开发身份并安装 Efferva；沙箱
 生命周期、命令和文件访问全部经 OpenSandbox provider，不由接入方直接操作 Docker。
-
-## Vibe-Trading 多用户产品
-
-[`examples/vibe-trading-gcp`](examples/vibe-trading-gcp) 展示如何把一个已有的完整产品
-接到 Efferva，而不是重新写一个演示 UI。该目录固定拉取 HKUDS/Vibe-Trading 的上游版本，
-再应用 example 自己持有的接入代码和最小 patch；本地可用 Docker Compose 体验 Alice/Bob
-用户隔离，并附带 GKE、IAP、Cloud SQL 和 OpenSandbox Kubernetes runtime 的部署清单。
 
 ## Provider SDK
 
