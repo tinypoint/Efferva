@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
-from efferva import Tool, ToolContext
+from efferva import Tool, ToolContext, Workflow, workflow_tool
 
 
 async def calculate_position_size(
@@ -81,3 +85,65 @@ POSITION_SIZE_TOOL = Tool(
     },
     handler=calculate_position_size,
 )
+
+
+async def run_vibe_research_workflow(
+    context: ToolContext,
+    inputs: Mapping[str, Any],
+) -> Any:
+    """Execute Vibe-Trading's preset DAG without blocking Codex's RPC reader."""
+    prompt = inputs.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt is required")
+    preset_name = inputs.get("preset_name")
+    if preset_name is not None and not isinstance(preset_name, str):
+        raise ValueError("preset_name must be a string")
+
+    from src.tools.swarm_tool import SwarmTool
+
+    tenant_key = hashlib.sha256(
+        (context.tenant_id or "unknown").encode("utf-8")
+    ).hexdigest()[:24]
+    session_key = str(context.session_id or "unknown")
+    base_dir = (
+        Path("/home/vibe/.vibe-trading/efferva")
+        / tenant_key
+        / session_key
+        / "swarm"
+    )
+    result = await asyncio.to_thread(
+        SwarmTool(include_shell_tools=False, base_dir=base_dir).execute,
+        prompt=prompt,
+        preset_name=preset_name,
+    )
+    try:
+        return json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return result
+
+
+VIBE_RESEARCH_WORKFLOW = Workflow(
+    name="vibe_research",
+    description=(
+        "Run one of Vibe-Trading's preset multi-agent DAGs for complex investment research. "
+        "The workflow chooses a preset automatically unless preset_name is supplied."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The complete research assignment.",
+            },
+            "preset_name": {
+                "type": "string",
+                "description": "Optional Vibe-Trading preset name.",
+            },
+        },
+        "required": ["prompt"],
+        "additionalProperties": False,
+    },
+    handler=run_vibe_research_workflow,
+)
+
+RUN_WORKFLOW_TOOL = workflow_tool([VIBE_RESEARCH_WORKFLOW])

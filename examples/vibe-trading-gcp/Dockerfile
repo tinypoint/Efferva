@@ -91,4 +91,4 @@ RUN apt-get update \
     && chown vibe:vibe /workspace
 USER vibe
 WORKDIR /workspace
-CMD ["sleep", "infinity"]
+CMD ["sh", "-lc", "mkdir -p /workspace/.agents/skills && exec sleep infinity"]

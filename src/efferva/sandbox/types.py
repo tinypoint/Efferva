@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from uuid import UUID
@@ -67,6 +67,7 @@ class SandboxEnvironment:
     endpoint: str
     workspace_path: str
     sandbox: SandboxHandle
+    files: SandboxFiles | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +150,30 @@ class SandboxRuntime(Protocol):
     async def list_directory(self, path: str) -> list[DirectoryEntry]: ...
 
     async def stat(self, path: str) -> FileMetadata: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxFiles:
+    """Fence-checked file access for trusted application-side tools."""
+
+    runtime: SandboxRuntime = field(repr=False, compare=False)
+    validate_fence: Callable[[], Awaitable[bool]] = field(repr=False, compare=False)
+
+    async def read_file(self, path: str) -> bytes:
+        await self._require_current_fence()
+        value = await self.runtime.read_file(path)
+        await self._require_current_fence()
+        return value
+
+    async def stat(self, path: str) -> FileMetadata:
+        await self._require_current_fence()
+        value = await self.runtime.stat(path)
+        await self._require_current_fence()
+        return value
+
+    async def _require_current_fence(self) -> None:
+        if not await self.validate_fence():
+            raise PermissionError("sandbox fencing token is stale")
 
 
 class SandboxProvider(Protocol):

@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 from src.api.sessions_routes import (
+    CreateGoalRequest,
     CreateSessionRequest,
     MessageResponse,
     SendMessageRequest,
@@ -113,6 +115,44 @@ def _assistant_summary(detail: dict[str, Any], run_id: str) -> str:
     return messages[-1]["content"] if messages else ""
 
 
+def _goal_snapshot(session_id: str, goal: dict[str, Any]) -> dict[str, Any]:
+    goal_id = str(goal["thread_id"])
+
+    def timestamp(value: Any) -> str:
+        try:
+            return datetime.fromtimestamp(int(value), UTC).isoformat()
+        except (TypeError, ValueError, OSError):
+            return datetime.now(UTC).isoformat()
+
+    return {
+        "goal": {
+            "goal_id": goal_id,
+            "session_id": session_id,
+            "status": goal["status"],
+            "objective": goal["objective"],
+            "ui_summary": goal["objective"],
+            "source": "efferva",
+            "protocol": "codex_native",
+            "risk_tier": "research_general",
+            "token_budget": goal.get("token_budget"),
+            "tokens_used": goal.get("tokens_used", 0),
+            "turn_budget": None,
+            "turns_used": 0,
+            "time_budget_seconds": None,
+            "time_used_seconds": goal.get("time_used_seconds", 0),
+            "budget_wrapup_sent": False,
+            "created_at": timestamp(goal.get("created_at")),
+            "updated_at": timestamp(goal.get("updated_at")),
+            "completed_at": None,
+            "recap": None,
+        },
+        "claims": [],
+        "criteria": [],
+        "evidence": [],
+        "evidence_count": 0,
+    }
+
+
 async def _event_stream(
     api: _EffervaApi,
     request: Request,
@@ -198,6 +238,14 @@ async def _event_stream(
                         "attempt_id": watched_run_id,
                         "error": event.get("message", "Execution failed"),
                     },
+                )
+                yield _sse(event_id, "done", {"attempt_id": watched_run_id})
+                return
+            elif event_type == "RUN_CANCELLED":
+                yield _sse(
+                    event_id,
+                    "attempt.cancelled",
+                    {"attempt_id": watched_run_id, "status": "cancelled"},
                 )
                 yield _sse(event_id, "done", {"attempt_id": watched_run_id})
                 return
@@ -338,16 +386,50 @@ def register_efferva_compat_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.post(
+        "/sessions/{session_id}/goal",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[require_principal],
+    )
+    async def create_goal(
+        session_id: str,
+        payload: CreateGoalRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        thread = await _primary_thread(api, request, session_id, create=True)
+        goal = await api.request(
+            request,
+            "PUT",
+            f"/threads/{thread['id']}/goal",
+            payload={
+                "objective": payload.objective,
+                "token_budget": payload.token_budget,
+            },
+        )
+        return _goal_snapshot(session_id, goal)
+
     @app.get("/sessions/{session_id}/goal", dependencies=[require_principal])
-    async def get_goal(session_id: str) -> None:
-        raise HTTPException(status_code=404, detail=f"No current goal for {session_id}")
+    async def get_goal(
+        session_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        thread = await _primary_thread(api, request, session_id, create=False)
+        if thread is None:
+            raise HTTPException(status_code=404, detail="No current goal")
+        goal = await api.request(request, "GET", f"/threads/{thread['id']}/goal")
+        return _goal_snapshot(session_id, goal)
 
     @app.post("/sessions/{session_id}/cancel", dependencies=[require_principal])
-    async def cancel_session(session_id: str) -> dict[str, str]:
-        raise HTTPException(
-            status_code=501,
-            detail=f"Efferva run cancellation is not implemented for {session_id}",
-        )
+    async def cancel_session(session_id: str, request: Request) -> dict[str, str]:
+        thread = await _primary_thread(api, request, session_id, create=False)
+        if thread is None:
+            return {"status": "idle"}
+        detail = await api.request(request, "GET", f"/threads/{thread['id']}")
+        latest = _latest_run(detail)
+        if latest is None or latest["status"] not in {"queued", "running"}:
+            return {"status": "idle"}
+        await api.request(request, "POST", f"/runs/{latest['id']}/cancel")
+        return {"status": "cancelling"}
 
     @app.delete("/sessions/{session_id}", dependencies=[require_principal])
     async def delete_session(session_id: str) -> None:

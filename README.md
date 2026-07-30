@@ -122,9 +122,69 @@ Efferva(
 ```
 
 Efferva 在 `thread/start` 发送 Tool schema，收到 `item/tool/call` server request 后在 App
-进程执行 handler，并把结果交回 Codex 继续推理。`ToolContext` 中的 Thread、Turn、Call
-和 Sandbox 信息由 Efferva 提供，不能由模型参数覆盖。`dynamicTools` 当前属于 Codex App
-Server 实验 API。
+进程执行 handler，并把结果交回 Codex 继续推理。`ToolContext` 中的 Tenant、Session、
+Efferva Thread/Run、Codex Thread/Turn/Call 和 Sandbox 信息由 Efferva 提供，不能由模型
+参数覆盖。`dynamicTools` 当前属于 Codex App Server 实验 API。
+
+Workflow 也走同一条 Dynamic Tools 链路，不要求修改或重新编译 Codex：
+
+```python
+from efferva import Workflow, workflow_tool
+
+
+async def research_workflow(context, inputs):
+    return await my_dag.run(
+        tenant_id=context.tenant_id,
+        session_id=context.session_id,
+        topic=inputs["topic"],
+    )
+
+
+run_workflow = workflow_tool([
+    Workflow(
+        name="research",
+        description="Run the product research DAG.",
+        input_schema={
+            "type": "object",
+            "properties": {"topic": {"type": "string"}},
+            "required": ["topic"],
+        },
+        handler=research_workflow,
+    )
+])
+```
+
+`workflow_tool()` 对 Codex 暴露统一的 `run_workflow`；workflow 名称、DAG 状态、worker
+选择和产物策略仍由应用控制。
+
+沙箱镜像里的默认 Skills 和用户写入 Session 工作区的 Skills，可以注册为远程
+Capability Roots：
+
+```python
+from efferva import SkillRoot
+
+Efferva(
+    identity=resolve_principal,
+    skill_roots=[
+        SkillRoot(id="product-defaults", path="/opt/product/skills"),
+        SkillRoot(id="session-custom", path="/workspace/.agents/skills"),
+    ],
+).install(app, prefix="/agent")
+```
+
+Efferva 将启用的 root 作为 `selectedCapabilityRoots` 交给 Codex；Codex 通过该 Session
+的 Executor Gateway 扫描 `SKILL.md`。创建 Thread 时可用 `skill_roots` 选择开关。模型、
+model provider 和推理强度可设在 Thread，模型及推理强度还可在每次 Run 覆盖。
+
+Codex 原生 Goal 已映射为 Thread API，取消请求是 PostgreSQL 中的持久控制信号，由持有
+Run lease 的 worker 执行 `turn/interrupt`。Codex 原生 Memory 默认关闭：单个共享
+Runtime 的 `CODEX_HOME` 不是多租户隔离边界。只有部署方真的为租户提供隔离 Runtime
+时，才应设置 `native_memory_enabled=True`。
+
+Efferva 还会自动注册 `publish_artifact` Dynamic Tool。Agent 只能发布当前 Session
+workspace 内的普通文件；读取前后都会校验 sandbox fencing token。文件内容、哈希和元数据
+持久化到 PostgreSQL（默认单文件上限 10 MiB），所以下载不依赖原 worker 或存活中的沙箱。
+生产环境后续可将同一 Repository 契约替换为对象存储。
 
 没有现有 FastAPI 宿主时：
 
@@ -277,6 +337,10 @@ agent-framework/
 - `POST /api/sessions/{session_id}/threads`
 - `GET /api/threads/{thread_id}`
 - `POST /api/threads/{thread_id}/runs`
+- `PUT|GET|DELETE /api/threads/{thread_id}/goal`
+- `POST /api/runs/{run_id}/cancel`
+- `GET /api/runs/{run_id}/artifacts`
+- `GET /api/artifacts/{artifact_id}/content`
 - `GET /api/runs/{run_id}/events/stream`
 - `POST /api/ag-ui`
 

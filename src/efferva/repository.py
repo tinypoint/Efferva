@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 
 from efferva.db import Database
-from efferva.events import TERMINAL_EVENTS, run_started
+from efferva.events import TERMINAL_EVENTS, run_cancelled, run_started
 from efferva.identity import Capability, ForbiddenError, Principal
 
 
@@ -27,6 +27,16 @@ class _AccessMode(StrEnum):
 
 def _public_run(row: dict[str, Any]) -> dict[str, Any]:
     row["input"] = row.pop("input_json")
+    return row
+
+
+def _public_thread(row: dict[str, Any]) -> dict[str, Any]:
+    row["runtime_config"] = row.pop("runtime_config_json", {})
+    return row
+
+
+def _public_artifact(row: dict[str, Any]) -> dict[str, Any]:
+    row.pop("content", None)
     return row
 
 
@@ -136,16 +146,21 @@ class AuthorizedRepository:
             raise NotFoundError(f"session {session_id} not found")
         return row
 
-    async def create_thread(self, session_id: UUID, title: str | None) -> dict[str, Any]:
+    async def create_thread(
+        self,
+        session_id: UUID,
+        title: str | None,
+        runtime_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         await self.get_session(session_id, mode=_AccessMode.WRITE)
         async with self._database.connection() as connection:
             cursor = await connection.execute(
                 """
-                INSERT INTO app_threads(id, session_id, title)
-                VALUES (%s, %s, %s)
+                INSERT INTO app_threads(id, session_id, title, runtime_config_json)
+                VALUES (%s, %s, %s, %s)
                 RETURNING *
                 """,
-                (uuid4(), session_id, title),
+                (uuid4(), session_id, title, Jsonb(runtime_config or {})),
             )
             row = await cursor.fetchone()
             await connection.execute(
@@ -153,7 +168,7 @@ class AuthorizedRepository:
                 (session_id,),
             )
             await connection.commit()
-        return row
+        return _public_thread(row)
 
     async def list_threads(self, session_id: UUID) -> list[dict[str, Any]]:
         await self.get_session(session_id)
@@ -166,7 +181,7 @@ class AuthorizedRepository:
                 """,
                 (session_id,),
             )
-            return list(await cursor.fetchall())
+            return [_public_thread(row) for row in await cursor.fetchall()]
 
     async def get_thread(
         self,
@@ -188,7 +203,26 @@ class AuthorizedRepository:
             row = await cursor.fetchone()
         if row is None:
             raise NotFoundError(f"thread {thread_id} not found")
-        return row
+        return _public_thread(row)
+
+    async def get_thread_for_write(self, thread_id: UUID) -> dict[str, Any]:
+        return await self.get_thread(thread_id, mode=_AccessMode.WRITE)
+
+    async def thread_has_active_run(self, thread_id: UUID) -> bool:
+        await self.get_thread(thread_id)
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM runs
+                    WHERE thread_id = %s AND status IN ('queued', 'running')
+                ) AS active
+                """,
+                (thread_id,),
+            )
+            row = await cursor.fetchone()
+        return bool(row["active"])
 
     async def get_thread_detail(self, thread_id: UUID) -> dict[str, Any]:
         thread = await self.get_thread(thread_id)
@@ -221,11 +255,17 @@ class AuthorizedRepository:
         *,
         agui_run_id: str | None = None,
         input_payload: dict[str, Any] | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         await self.get_thread(thread_id, mode=_AccessMode.WRITE)
         run_id = uuid4()
         public_run_id = agui_run_id or str(run_id)
-        payload = input_payload or {"prompt": prompt}
+        payload = dict(input_payload or {"prompt": prompt})
+        if model is not None:
+            payload["model"] = model
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         started_event = run_started(thread_id, public_run_id, payload)
         async with self._database.connection() as connection:
             cursor = await connection.execute(
@@ -336,6 +376,122 @@ class AuthorizedRepository:
         run = await self.get_run(run_id)
         return run["terminal_seq"] is not None
 
+    async def get_thread_goal(self, thread_id: UUID) -> dict[str, Any] | None:
+        thread = await self.get_thread(thread_id)
+        goal = thread.get("goal_json")
+        return dict(goal) if isinstance(goal, dict) else None
+
+    async def set_thread_goal(
+        self,
+        thread_id: UUID,
+        goal: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self.get_thread(thread_id, mode=_AccessMode.WRITE)
+        async with self._database.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE app_threads
+                SET goal_json = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (Jsonb(goal), thread_id),
+            )
+            await connection.commit()
+        return goal
+
+    async def clear_thread_goal(self, thread_id: UUID) -> bool:
+        await self.get_thread(thread_id, mode=_AccessMode.WRITE)
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE app_threads
+                SET goal_json = NULL, updated_at = now()
+                WHERE id = %s AND goal_json IS NOT NULL
+                RETURNING id
+                """,
+                (thread_id,),
+            )
+            cleared = await cursor.fetchone() is not None
+            await connection.commit()
+        return cleared
+
+    async def request_run_cancel(self, run_id: UUID) -> dict[str, Any]:
+        run = await self.get_run(run_id)
+        await self.get_thread(run["thread_id"], mode=_AccessMode.WRITE)
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM runs WHERE id = %s FOR UPDATE",
+                (run_id,),
+            )
+            locked = await cursor.fetchone()
+            if locked is None:
+                raise NotFoundError(f"run {run_id} not found")
+            if locked["terminal_seq"] is not None:
+                await connection.rollback()
+                return _public_run(locked)
+            if locked["status"] == "queued":
+                seq = locked["last_seq"] + 1
+                await connection.execute(
+                    "INSERT INTO run_events(run_id, seq, event_json) VALUES (%s, %s, %s)",
+                    (run_id, seq, Jsonb(run_cancelled())),
+                )
+                await connection.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'cancelled',
+                        cancel_requested_at = now(),
+                        last_seq = %s,
+                        terminal_seq = %s,
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (seq, seq, run_id),
+                )
+            else:
+                await connection.execute(
+                    """
+                    UPDATE runs
+                    SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (run_id,),
+                )
+            await connection.commit()
+        return await self.get_run(run_id)
+
+    async def list_run_artifacts(self, run_id: UUID) -> list[dict[str, Any]]:
+        await self.get_run(run_id)
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT id, run_id, thread_id, session_id, path, name,
+                       media_type, size_bytes, sha256, created_at
+                FROM artifacts
+                WHERE run_id = %s
+                ORDER BY created_at, id
+                """,
+                (run_id,),
+            )
+            return list(await cursor.fetchall())
+
+    async def get_artifact(self, artifact_id: UUID) -> dict[str, Any]:
+        where, scope_parameters = self._session_scope(_AccessMode.READ)
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT artifact.*
+                FROM artifacts artifact
+                JOIN app_sessions s ON s.id = artifact.session_id
+                WHERE artifact.id = %s AND {where}
+                """,
+                (artifact_id, *scope_parameters),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise NotFoundError(f"artifact {artifact_id} not found")
+        return row
+
 
 class SystemRepository:
     """Unscoped control-plane access used only by workers and sandbox management."""
@@ -405,6 +561,7 @@ class SystemRepository:
             status = {
                 "RUN_FINISHED": "completed",
                 "RUN_ERROR": "failed",
+                "RUN_CANCELLED": "cancelled",
             }.get(event_type, "running")
             error = event.get("message") if event_type == "RUN_ERROR" else None
             await connection.execute(
@@ -479,7 +636,12 @@ class SystemRepository:
                 SELECT r.*,
                        t.session_id,
                        t.codex_thread_id,
+                       t.runtime_config_json,
+                       t.goal_json,
                        s.workspace_ref,
+                       s.tenant_id,
+                       s.owner_issuer,
+                       s.owner_subject,
                        (
                            SELECT content
                            FROM messages
@@ -613,6 +775,104 @@ class SystemRepository:
                 (codex_turn_id, run_id),
             )
             await connection.commit()
+
+    async def set_thread_goal_snapshot(
+        self,
+        thread_id: UUID,
+        goal: dict[str, Any] | None,
+    ) -> None:
+        async with self._database.connection() as connection:
+            await connection.execute(
+                """
+                UPDATE app_threads
+                SET goal_json = %s, updated_at = now()
+                WHERE id = %s
+                """,
+                (Jsonb(goal) if goal is not None else None, thread_id),
+            )
+            await connection.commit()
+
+    async def run_cancel_requested(self, run_id: UUID) -> bool:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT cancel_requested_at IS NOT NULL AS requested
+                FROM runs
+                WHERE id = %s
+                """,
+                (run_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise NotFoundError(f"run {run_id} not found")
+        return bool(row["requested"])
+
+    async def publish_artifact(
+        self,
+        *,
+        run_id: UUID,
+        thread_id: UUID,
+        session_id: UUID,
+        path: str,
+        name: str,
+        media_type: str,
+        content: bytes,
+        sha256: str,
+        owner_id: str,
+        fencing_epoch: int,
+    ) -> dict[str, Any]:
+        artifact_id = uuid4()
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                INSERT INTO artifacts(
+                    id, run_id, thread_id, session_id, path, name,
+                    media_type, size_bytes, sha256, content
+                )
+                SELECT
+                    %s, r.id, t.id, s.id, %s, %s, %s, %s, %s, %s
+                FROM runs r
+                JOIN app_threads t ON t.id = r.thread_id
+                JOIN app_sessions s ON s.id = t.session_id
+                JOIN session_leases lease ON lease.session_id = s.id
+                WHERE r.id = %s
+                  AND t.id = %s
+                  AND s.id = %s
+                  AND r.status = 'running'
+                  AND r.owner_id = %s
+                  AND r.lease_epoch = %s
+                  AND lease.owner_id = r.owner_id
+                  AND lease.fencing_epoch = r.lease_epoch
+                  AND lease.expires_at > now()
+                ON CONFLICT (run_id, path) DO UPDATE
+                SET name = EXCLUDED.name,
+                    media_type = EXCLUDED.media_type,
+                    size_bytes = EXCLUDED.size_bytes,
+                    sha256 = EXCLUDED.sha256,
+                    content = EXCLUDED.content,
+                    created_at = now()
+                RETURNING *
+                """,
+                (
+                    artifact_id,
+                    path,
+                    name,
+                    media_type,
+                    len(content),
+                    sha256,
+                    content,
+                    run_id,
+                    thread_id,
+                    session_id,
+                    owner_id,
+                    fencing_epoch,
+                ),
+            )
+            row = await cursor.fetchone()
+            await connection.commit()
+        if row is None:
+            raise ConflictError(f"run {run_id} artifact lease is stale")
+        return _public_artifact(row)
 
     async def run_is_terminal(self, run_id: UUID) -> bool:
         async with self._database.connection() as connection:

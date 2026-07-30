@@ -9,6 +9,7 @@ from uuid import UUID
 from efferva.config import Settings
 from efferva.events import (
     raw,
+    run_cancelled,
     run_error,
     run_finished,
     text_message_content,
@@ -120,16 +121,45 @@ class RunWorker:
                 fencing_token=epoch,
             )
             await self._runtime.ensure_environment(sandbox)
+            runtime_config = dict(run.get("runtime_config_json") or {})
             if codex_thread_id is None:
-                codex_thread_id = await self._runtime.start_thread(sandbox)
+                codex_thread_id = await self._runtime.start_thread(sandbox, runtime_config)
                 await self._repository.set_codex_thread_id(thread_id, UUID(codex_thread_id))
             else:
-                await self._resume_with_retry(codex_thread_id, sandbox)
+                await self._resume_with_retry(codex_thread_id, sandbox, runtime_config)
 
+            await self._runtime.set_memory_mode(
+                codex_thread_id,
+                str(runtime_config.get("memory_mode", "disabled")),
+            )
+
+            self._runtime.bind_run_context(codex_thread_id, run)
             queue = self._runtime.subscribe(codex_thread_id)
-            turn_id = await self._runtime.start_turn(codex_thread_id, run["prompt"], sandbox)
+            run_input = run.get("input") or {}
+            turn_id = await self._runtime.start_turn(
+                codex_thread_id,
+                run["prompt"],
+                sandbox,
+                model=run_input.get("model"),
+                reasoning_effort=run_input.get("reasoning_effort"),
+            )
             await self._repository.set_codex_turn_id(run_id, turn_id)
+            stored_goal = run.get("goal_json")
+            if isinstance(stored_goal, dict):
+                native_goal = await self._runtime.set_goal(
+                    codex_thread_id,
+                    objective=stored_goal.get("objective"),
+                    status=stored_goal.get("status"),
+                    token_budget=stored_goal.get(
+                        "tokenBudget",
+                        stored_goal.get("token_budget"),
+                    ),
+                )
+                await self._repository.set_thread_goal_snapshot(thread_id, native_goal)
             await self._consume_notifications(run, codex_thread_id, turn_id, queue)
+            goal = await self._runtime.get_goal(codex_thread_id)
+            if goal is not None:
+                await self._repository.set_thread_goal_snapshot(thread_id, goal)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -153,11 +183,12 @@ class RunWorker:
         self,
         thread_id: str,
         sandbox: SandboxEnvironment,
+        runtime_config: dict[str, Any],
     ) -> None:
         deadline = asyncio.get_running_loop().time() + self._settings.lease_ttl_seconds + 5
         while True:
             try:
-                await self._runtime.resume_thread(thread_id, sandbox)
+                await self._runtime.resume_thread(thread_id, sandbox, runtime_config)
                 return
             except Exception:
                 if asyncio.get_running_loop().time() >= deadline:
@@ -177,12 +208,30 @@ class RunWorker:
         public_run_id = run["agui_run_id"]
         message_id: str | None = None
         message_has_content = False
+        interrupt_sent = False
+        active_turn_id = turn_id
         while True:
-            notification = await queue.get()
+            try:
+                notification = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except TimeoutError:
+                if (
+                    not interrupt_sent
+                    and await self._repository.run_cancel_requested(run_id)
+                ):
+                    await self._runtime.interrupt_turn(codex_thread_id, active_turn_id)
+                    interrupt_sent = True
+                continue
             method = notification["method"]
             params = notification.get("params") or {}
             notification_turn_id = params.get("turnId") or (params.get("turn") or {}).get("id")
-            if notification_turn_id is not None and str(notification_turn_id) != turn_id:
+            if method == "turn/started" and notification_turn_id is not None:
+                active_turn_id = str(notification_turn_id)
+                await self._repository.set_codex_turn_id(run_id, active_turn_id)
+                interrupt_sent = False
+            elif (
+                notification_turn_id is not None
+                and str(notification_turn_id) != active_turn_id
+            ):
                 continue
 
             if method == "efferva/runtimeError":
@@ -241,6 +290,16 @@ class RunWorker:
                     await self._append(run_id, raw(notification), owner_id, epoch)
                 continue
 
+            if method == "thread/goal/updated":
+                goal = params.get("goal")
+                if isinstance(goal, dict):
+                    await self._repository.set_thread_goal_snapshot(
+                        run["thread_id"],
+                        goal,
+                    )
+                await self._append(run_id, raw(notification), owner_id, epoch)
+                continue
+
             if method == "turn/completed":
                 turn = params.get("turn") or {}
                 if message_id is not None:
@@ -250,7 +309,19 @@ class RunWorker:
                         owner_id,
                         epoch,
                     )
-                if turn.get("status") == "completed":
+                if interrupt_sent or await self._repository.run_cancel_requested(run_id):
+                    event = run_cancelled()
+                elif turn.get("status") == "completed":
+                    goal = await self._runtime.get_goal(codex_thread_id)
+                    if goal is not None:
+                        await self._repository.set_thread_goal_snapshot(
+                            run["thread_id"],
+                            goal,
+                        )
+                    if goal is not None and goal.get("status") == "active":
+                        message_id = None
+                        message_has_content = False
+                        continue
                     event = run_finished(run["thread_id"], public_run_id)
                 else:
                     error = turn.get("error") or {}
@@ -264,6 +335,8 @@ class RunWorker:
                 "turn/plan/updated",
                 "item/commandExecution/outputDelta",
                 "item/fileChange/patchUpdated",
+                "thread/goal/cleared",
+                "thread/compacted",
             }:
                 await self._append(run_id, raw(notification), owner_id, epoch)
 

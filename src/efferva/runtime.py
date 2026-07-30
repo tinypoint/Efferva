@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from efferva.capabilities import SkillRoot
 from efferva.sandbox import SandboxEnvironment
 from efferva.tools import Tool, ToolContext, tool_result_text
 
@@ -52,6 +53,8 @@ class CodexRuntime:
         model: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
         tools: tuple[Tool, ...] | list[Tool] | None = None,
+        skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
+        native_memory_enabled: bool = False,
     ) -> None:
         self._binary = binary
         self._database_url = database_url
@@ -60,12 +63,17 @@ class CodexRuntime:
         self._model = model
         self._codex_config = deepcopy(dict(codex_config or {}))
         self._tools = {tool.name: tool for tool in tools or ()}
+        self._skill_roots = {root.id: root for root in skill_roots or ()}
+        if len(self._skill_roots) != len(skill_roots or ()):
+            raise ValueError("Efferva SkillRoot ids must be unique")
+        self._native_memory_enabled = native_memory_enabled
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._pending: dict[int, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._thread_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._thread_sandboxes: dict[str, SandboxEnvironment] = {}
+        self._thread_run_contexts: dict[str, dict[str, Any]] = {}
         self._server_request_tasks: set[asyncio.Task[None]] = set()
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
@@ -90,6 +98,7 @@ class CodexRuntime:
             self._environments.clear()
             self._environment_locks.clear()
             self._thread_sandboxes.clear()
+            self._thread_run_contexts.clear()
             await self._cancel_server_request_tasks()
             environment = os.environ.copy()
             environment["EFFERVA_DATABASE_URL"] = self._database_url
@@ -122,8 +131,13 @@ class CodexRuntime:
     def _runtime_command(self) -> list[str]:
         return [str(self._binary)]
 
-    def _thread_config(self, sandbox: SandboxEnvironment) -> dict[str, Any]:
+    def _thread_config(
+        self,
+        sandbox: SandboxEnvironment,
+        runtime_config: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         config = _resolve_sandbox_config(self._codex_config, sandbox)
+        thread_config = runtime_config or {}
         if self._openai_base_url:
             providers = config.setdefault("model_providers", {})
             if not isinstance(providers, dict):
@@ -134,7 +148,20 @@ class CodexRuntime:
                 "env_key": "OPENAI_API_KEY",
                 "wire_api": "responses",
             }
-            config["model_provider"] = "efferva_proxy"
+            config.setdefault("model_provider", "efferva_proxy")
+        model_provider = thread_config.get("model_provider")
+        if model_provider is not None:
+            if not isinstance(model_provider, str) or not model_provider.strip():
+                raise ValueError("model_provider must be a non-empty string")
+            providers = config.get("model_providers", {})
+            if model_provider not in providers:
+                raise ValueError(f"Unknown Codex model provider: {model_provider}")
+            config["model_provider"] = model_provider
+        if not self._native_memory_enabled:
+            features = config.setdefault("features", {})
+            if not isinstance(features, dict):
+                raise ValueError("Codex config features must be a table")
+            features["memories"] = False
         return config
 
     async def request(
@@ -200,7 +227,12 @@ class CodexRuntime:
                     await asyncio.sleep(0.25)
             self._environments[sandbox.environment_id] = sandbox.endpoint
 
-    async def start_thread(self, sandbox: SandboxEnvironment) -> str:
+    async def start_thread(
+        self,
+        sandbox: SandboxEnvironment,
+        runtime_config: Mapping[str, Any] | None = None,
+    ) -> str:
+        thread_config = runtime_config or {}
         params = {
             "cwd": sandbox.workspace_path,
             "approvalPolicy": "never",
@@ -208,23 +240,37 @@ class CodexRuntime:
             "environments": [self._environment_selection(sandbox)],
             "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
-        config = self._thread_config(sandbox)
+        config = self._thread_config(sandbox, thread_config)
         if config:
             params["config"] = config
-        if self._openai_base_url:
-            params["modelProvider"] = "efferva_proxy"
-        if self._model:
-            params["model"] = self._model
+        model_provider = thread_config.get("model_provider")
+        if model_provider or self._openai_base_url:
+            params["modelProvider"] = model_provider or "efferva_proxy"
+        model = thread_config.get("model") or self._model
+        if model:
+            params["model"] = model
+        effort = thread_config.get("reasoning_effort")
+        if effort:
+            params["reasoningEffort"] = effort
         if self._developer_instructions is not None:
             params["developerInstructions"] = self._developer_instructions
         if self._tools:
             params["dynamicTools"] = [tool.codex_spec() for tool in self._tools.values()]
+        selected_roots = self._selected_skill_roots(sandbox, thread_config)
+        if selected_roots:
+            params["selectedCapabilityRoots"] = selected_roots
         response = await self.request("thread/start", params)
         thread_id = str(response["thread"]["id"])
         self._thread_sandboxes[thread_id] = sandbox
         return thread_id
 
-    async def resume_thread(self, thread_id: str, sandbox: SandboxEnvironment) -> None:
+    async def resume_thread(
+        self,
+        thread_id: str,
+        sandbox: SandboxEnvironment,
+        runtime_config: Mapping[str, Any] | None = None,
+    ) -> None:
+        thread_config = runtime_config or {}
         params = {
             "threadId": thread_id,
             "cwd": sandbox.workspace_path,
@@ -232,13 +278,17 @@ class CodexRuntime:
             "sandbox": "danger-full-access",
             "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
-        config = self._thread_config(sandbox)
+        config = self._thread_config(sandbox, thread_config)
         if config:
             params["config"] = config
-        if self._openai_base_url:
-            params["modelProvider"] = "efferva_proxy"
-        if self._model:
-            params["model"] = self._model
+        model_provider = thread_config.get("model_provider")
+        if model_provider or self._openai_base_url:
+            params["modelProvider"] = model_provider or "efferva_proxy"
+        model = thread_config.get("model") or self._model
+        if model:
+            params["model"] = model
+        if self._developer_instructions is not None:
+            params["developerInstructions"] = self._developer_instructions
         await self.request("thread/resume", params)
         self._thread_sandboxes[thread_id] = sandbox
 
@@ -247,24 +297,90 @@ class CodexRuntime:
         thread_id: str,
         prompt: str,
         sandbox: SandboxEnvironment,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [
+                {
+                    "type": "text",
+                    "text": prompt,
+                    "textElements": [],
+                }
+            ],
+            "environments": [self._environment_selection(sandbox)],
+            "cwd": sandbox.workspace_path,
+            "runtimeWorkspaceRoots": [sandbox.workspace_path],
+        }
+        if model:
+            params["model"] = model
+        if reasoning_effort:
+            params["effort"] = reasoning_effort
         response = await self.request(
             "turn/start",
-            {
-                "threadId": thread_id,
-                "input": [
-                    {
-                        "type": "text",
-                        "text": prompt,
-                        "textElements": [],
-                    }
-                ],
-                "environments": [self._environment_selection(sandbox)],
-                "cwd": sandbox.workspace_path,
-                "runtimeWorkspaceRoots": [sandbox.workspace_path],
-            },
+            params,
         )
         return str(response["turn"]["id"])
+
+    def bind_run_context(self, thread_id: str, run: Mapping[str, Any]) -> None:
+        self._thread_run_contexts[thread_id] = {
+            "run_id": run.get("id"),
+            "app_thread_id": run.get("thread_id"),
+            "session_id": run.get("session_id"),
+            "tenant_id": run.get("tenant_id"),
+            "owner_issuer": run.get("owner_issuer"),
+            "owner_subject": run.get("owner_subject"),
+            "worker_owner_id": run.get("owner_id"),
+            "fencing_epoch": run.get("fencing_epoch"),
+        }
+
+    async def set_goal(
+        self,
+        thread_id: str,
+        *,
+        objective: str | None = None,
+        status: str | None = None,
+        token_budget: int | None | object = ...,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id}
+        if objective is not None:
+            params["objective"] = objective
+        if status is not None:
+            params["status"] = status
+        if token_budget is not ...:
+            params["tokenBudget"] = token_budget
+        response = await self.request("thread/goal/set", params)
+        return dict(response["goal"])
+
+    async def get_goal(self, thread_id: str) -> dict[str, Any] | None:
+        response = await self.request("thread/goal/get", {"threadId": thread_id})
+        goal = response.get("goal")
+        return dict(goal) if isinstance(goal, Mapping) else None
+
+    async def clear_goal(self, thread_id: str) -> bool:
+        response = await self.request("thread/goal/clear", {"threadId": thread_id})
+        return bool(response.get("cleared"))
+
+    async def set_memory_mode(self, thread_id: str, mode: str) -> None:
+        if mode == "enabled" and not self._native_memory_enabled:
+            raise ValueError(
+                "Native Codex memory is disabled because this Efferva runtime is shared"
+            )
+        await self.request(
+            "thread/memoryMode/set",
+            {"threadId": thread_id, "mode": mode},
+        )
+
+    async def compact_thread(self, thread_id: str) -> None:
+        await self.request("thread/compact/start", {"threadId": thread_id})
+
+    async def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
+        await self.request(
+            "turn/interrupt",
+            {"threadId": thread_id, "turnId": turn_id},
+        )
 
     def subscribe(self, thread_id: str) -> asyncio.Queue[dict[str, Any]]:
         if thread_id in self._thread_queues:
@@ -290,6 +406,7 @@ class CodexRuntime:
             await self.request("thread/unsubscribe", {"threadId": thread_id})
         finally:
             self._thread_sandboxes.pop(thread_id, None)
+            self._thread_run_contexts.pop(thread_id, None)
 
     async def close(self) -> None:
         process = self._process
@@ -409,6 +526,7 @@ class CodexRuntime:
             turn_id=turn_id,
             call_id=call_id,
             sandbox=sandbox,
+            **self._thread_run_contexts.get(thread_id, {}),
         )
         try:
             result = await tool.invoke(context, arguments)
@@ -498,3 +616,23 @@ class CodexRuntime:
             "cwd": sandbox.workspace_path,
             "runtimeWorkspaceRoots": [sandbox.workspace_path],
         }
+
+    def _selected_skill_roots(
+        self,
+        sandbox: SandboxEnvironment,
+        runtime_config: Mapping[str, Any],
+    ) -> list[dict[str, object]]:
+        requested = runtime_config.get("skill_roots")
+        if requested is None:
+            roots = [root for root in self._skill_roots.values() if root.enabled_by_default]
+        else:
+            if not isinstance(requested, list) or not all(
+                isinstance(item, str) for item in requested
+            ):
+                raise ValueError("skill_roots must be a list of registered root ids")
+            unknown = set(requested) - self._skill_roots.keys()
+            if unknown:
+                names = ", ".join(sorted(unknown))
+                raise ValueError(f"Unknown SkillRoot ids: {names}")
+            roots = [self._skill_roots[root_id] for root_id in requested]
+        return [root.codex_spec(sandbox.environment_id) for root in roots]

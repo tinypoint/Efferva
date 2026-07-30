@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from efferva.capabilities import SkillRoot
 from efferva.runtime import CodexRpcError, CodexRuntime
 from efferva.sandbox import SandboxEnvironment, SandboxHandle
 from efferva.tools import Tool, ToolContext
@@ -78,7 +79,7 @@ async def test_runtime_injects_codex_config_when_starting_and_resuming_threads(
 
     expected_config = {
         "model_reasoning_effort": "high",
-        "features": {"unified_exec": True},
+        "features": {"unified_exec": True, "memories": False},
         "mcp_servers": {
             "vibe_trading": {
                 "command": "vibe-trading-mcp",
@@ -254,6 +255,20 @@ async def test_runtime_registers_and_executes_an_application_tool(
     monkeypatch.setattr(runtime, "_write", write)
 
     assert await runtime.start_thread(sandbox) == "codex-thread"
+    run_id = uuid4()
+    app_thread_id = uuid4()
+    session_id = uuid4()
+    runtime.bind_run_context(
+        "codex-thread",
+        {
+            "id": run_id,
+            "thread_id": app_thread_id,
+            "session_id": session_id,
+            "tenant_id": "tenant",
+            "owner_issuer": "issuer",
+            "owner_subject": "alice",
+        },
+    )
     assert requests[0][1] is not None
     assert requests[0][1]["dynamicTools"] == [
         {
@@ -294,6 +309,11 @@ async def test_runtime_registers_and_executes_an_application_tool(
     assert context.turn_id == "turn-1"
     assert context.call_id == "call-1"
     assert context.sandbox is sandbox
+    assert context.run_id == run_id
+    assert context.app_thread_id == app_thread_id
+    assert context.session_id == session_id
+    assert context.tenant_id == "tenant"
+    assert context.owner_subject == "alice"
     assert arguments == {"left": 20, "right": 22}
     assert writes == [
         {
@@ -301,6 +321,53 @@ async def test_runtime_registers_and_executes_an_application_tool(
             "result": {
                 "contentItems": [{"type": "inputText", "text": '{"total":42}'}],
                 "success": True,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_selects_sandbox_skill_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = CodexRuntime(
+        Path("/not-started"),
+        "postgresql://unused",
+        developer_instructions="Product policy.",
+        skill_roots=[
+            SkillRoot(id="defaults", path="/opt/product/skills"),
+            SkillRoot(id="custom", path="/workspace/.agents/skills", enabled_by_default=False),
+        ],
+    )
+    requests: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def request(
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        request_timeout: float = 120,
+    ) -> dict[str, Any]:
+        requests.append((method, params))
+        return {"thread": {"id": "codex-thread"}}
+
+    monkeypatch.setattr(runtime, "request", request)
+
+    await runtime.start_thread(
+        sandbox_environment(),
+        {"skill_roots": ["custom"], "reasoning_effort": "high"},
+    )
+
+    params = requests[0][1]
+    assert params is not None
+    assert params["developerInstructions"] == "Product policy."
+    assert params["reasoningEffort"] == "high"
+    assert params["selectedCapabilityRoots"] == [
+        {
+            "id": "custom",
+            "location": {
+                "type": "environment",
+                "environmentId": "session",
+                "path": "/workspace/.agents/skills",
             },
         }
     ]

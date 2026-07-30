@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, TypeAlias
+from uuid import UUID
 
 from efferva.sandbox import SandboxEnvironment
 
@@ -18,6 +19,14 @@ class ToolContext:
     turn_id: str
     call_id: str
     sandbox: SandboxEnvironment
+    run_id: UUID | None = None
+    app_thread_id: UUID | None = None
+    session_id: UUID | None = None
+    tenant_id: str | None = None
+    owner_issuer: str | None = None
+    owner_subject: str | None = None
+    worker_owner_id: str | None = None
+    fencing_epoch: int | None = None
 
 
 ToolHandler: TypeAlias = Callable[

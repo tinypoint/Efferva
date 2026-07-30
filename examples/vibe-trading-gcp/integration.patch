@@ -40,3 +40,16 @@ index 366c333..c8d4a57 100644
 +    "efferva[opensandbox]>=0.1.0,<0.2",
 +    "google-auth>=2.40,<3",
 +]
+diff --git a/agent/src/tools/swarm_tool.py b/agent/src/tools/swarm_tool.py
+index 0901742..9856bf0 100644
+--- a/agent/src/tools/swarm_tool.py
++++ b/agent/src/tools/swarm_tool.py
+@@ -704,0 +705 @@ class SwarmTool(BaseTool):
++        base_dir: Path | None = None,
+@@ -711,0 +713 @@ class SwarmTool(BaseTool):
++            base_dir: Optional trusted storage directory for this tool's runs.
+@@ -714,0 +717 @@ class SwarmTool(BaseTool):
++        self._base_dir = base_dir
+@@ -762 +765 @@ class SwarmTool(BaseTool):
+-        swarm_base_dir = Path(__file__).resolve().parents[2] / ".swarm" / "runs"
++        swarm_base_dir = self._base_dir or Path(__file__).resolve().parents[2] / ".swarm" / "runs"

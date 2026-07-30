@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from uuid import UUID
 
 from efferva.config import Settings
@@ -10,6 +11,7 @@ from efferva.sandbox.registry import create_registered_provider
 from efferva.sandbox.types import (
     SandboxContext,
     SandboxEnvironment,
+    SandboxFiles,
     SandboxProvider,
 )
 
@@ -81,12 +83,16 @@ class SandboxControlPlane:
                     fencing_token,
                 )
 
-            return self.gateway.register(
+            environment = self.gateway.register(
                 environment_id=str(session_id),
                 runtime=runtime,
                 workspace_path=context.workspace_path,
                 sandbox=sandbox,
                 validate_fence=validate_fence,
+            )
+            return replace(
+                environment,
+                files=SandboxFiles(runtime=runtime, validate_fence=validate_fence),
             )
 
     async def close(self) -> None:

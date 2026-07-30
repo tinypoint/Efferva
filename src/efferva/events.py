@@ -37,6 +37,35 @@ def run_error(message: str, code: str = "RUNTIME_ERROR") -> dict[str, Any]:
     }
 
 
+def run_cancelled(message: str = "Run cancelled by user") -> dict[str, Any]:
+    return {
+        "type": "RUN_CANCELLED",
+        "message": message,
+        "timestamp": timestamp_ms(),
+    }
+
+
+def artifact_published(
+    artifact_id: UUID,
+    *,
+    path: str,
+    name: str,
+    media_type: str,
+    size_bytes: int,
+    sha256: str,
+) -> dict[str, Any]:
+    return {
+        "type": "ARTIFACT_PUBLISHED",
+        "artifactId": str(artifact_id),
+        "path": path,
+        "name": name,
+        "mediaType": media_type,
+        "sizeBytes": size_bytes,
+        "sha256": sha256,
+        "timestamp": timestamp_ms(),
+    }
+
+
 def text_message_start(message_id: str) -> dict[str, Any]:
     return {
         "type": "TEXT_MESSAGE_START",
@@ -72,4 +101,4 @@ def raw(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-TERMINAL_EVENTS = {"RUN_FINISHED", "RUN_ERROR"}
+TERMINAL_EVENTS = {"RUN_FINISHED", "RUN_ERROR", "RUN_CANCELLED"}

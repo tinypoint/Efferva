@@ -25,6 +25,11 @@ class Session(BaseModel):
 
 class ThreadCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    model_provider: str | None = Field(default=None, min_length=1, max_length=100)
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "ultra"] | None = None
+    skill_roots: list[str] | None = None
+    memory_mode: Literal["disabled", "enabled"] = "disabled"
 
 
 class Thread(BaseModel):
@@ -32,12 +37,31 @@ class Thread(BaseModel):
     session_id: UUID
     codex_thread_id: UUID | None
     title: str | None
+    runtime_config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
 
 class RunCreate(BaseModel):
     prompt: str = Field(min_length=1)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "ultra"] | None = None
+
+
+class ThreadGoalSet(BaseModel):
+    objective: str = Field(min_length=1, max_length=10_000)
+    token_budget: int | None = Field(default=None, gt=0)
+
+
+class ThreadGoal(BaseModel):
+    thread_id: str
+    objective: str
+    status: str
+    token_budget: int | None = None
+    tokens_used: int = 0
+    time_used_seconds: int = 0
+    created_at: int
+    updated_at: int
 
 
 class Run(BaseModel):
@@ -51,6 +75,19 @@ class Run(BaseModel):
     last_seq: int
     created_at: datetime
     updated_at: datetime
+
+
+class Artifact(BaseModel):
+    id: UUID
+    run_id: UUID
+    thread_id: UUID
+    session_id: UUID
+    path: str
+    name: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    created_at: datetime
 
 
 class Message(BaseModel):

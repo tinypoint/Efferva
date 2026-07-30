@@ -79,7 +79,6 @@ services:
     ports:
       - "${VIBE_TRADING_HTTP_PORT:-8899}:8899"
     volumes:
-      - codex-home:/home/vibe/.codex
       - vibe-data:/home/vibe/.vibe-trading
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -111,7 +110,6 @@ services:
 volumes:
   postgres-data:
   opensandbox-data:
-  codex-home:
   vibe-data:
 
 networks:

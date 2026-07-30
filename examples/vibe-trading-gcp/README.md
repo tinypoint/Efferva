@@ -24,16 +24,29 @@ vibe-trading-gcp/
 - Vibe-Trading 原有前端、研究页、回测页、报告页和设置页保持不变。
 - 原 `/sessions`、消息和 SSE 契约由
   `overlay/agent/src/efferva_product/compat_routes.py` 适配到 Efferva。
-- `calculate_position_size` 作为 App 端 Python Tool 注册；Efferva 通过 Codex
-  `dynamicTools` 暴露 schema，并处理 `item/tool/call` 请求。它不会启动 MCP Server，
-  也不会下单。
+- `calculate_position_size` 作为普通 App 端 Python Tool 注册；`run_workflow`
+  作为 Workflow 统一入口注册。二者都通过 Codex `dynamicTools` 和
+  `item/tool/call` 运行，不启动 MCP Server。
+- `run_workflow(workflow="vibe_research", ...)` 调用 Vibe-Trading 原有
+  `SwarmTool`，保留其 preset 选择、DAG 和 worker 实现。Swarm 运行目录由可信的
+  tenant/Session 上下文划分，模型不能伪造。
+- Vibe-Trading 自带 Skills 从沙箱镜像的 `/app/agent/src/skills` 扫描；
+  用户自己的 Skills 可写到该 Session 的 `/workspace/.agents/skills`。两者通过
+  `selectedCapabilityRoots` 交给 Codex，均可在创建 Thread 时开关。
 - 本地用开发 Cookie 区分用户；GCP 用经过签名验证的 IAP JWT 映射
   `Efferva.Principal`。
-- Efferva 为每个 Session 创建 OpenSandbox，并在启动 Codex 时注入模型配置。
+- Efferva 为每个 Session 创建 OpenSandbox，并在启动 Codex 时注入模型配置、
+  简短 developer instructions、Skills 和 Dynamic Tools。模型及推理强度还可按
+  Thread 或 Run 覆盖。
+- 研究 Goal 使用 Codex 原生 Goal；取消请求先持久化到 PostgreSQL，再由实际持有
+  Run lease 的 worker 中断 Codex turn。
+- Codex 可调用内置 `publish_artifact` 发布 Session workspace 中的报告、图表或数据；
+  产物内容和 SHA-256 持久化到 PostgreSQL，可从任意 App 副本下载。
 
-当前还是一个纵向切片：Session 创建/列表/消息/事件已经接入；取消、重命名、删除以及
-Vibe-Trading 的全局 Goal、账户和产物状态还需要继续改造成按 Principal 隔离。未完成的
-接口会明确返回 501，不会假装已支持多租户。
+当前仍未把 Vibe-Trading 的证据账本、账户、产物卡片 UI、重命名和删除迁入 Efferva。
+这些产品状态不能继续使用原项目的全局文件目录，后续必须按 Principal/Session 隔离；
+未完成的接口会明确返回 501。Codex 原生 Memory 默认关闭，因为共享 App Runtime 的
+`CODEX_HOME` 不是租户隔离边界；只有部署成隔离 Runtime 后才能显式开启。
 
 ## 本地启动
 
@@ -74,6 +87,13 @@ docker compose up
 ```text
 账户资金 100000，单笔风险 1%，计划 100 买入、95 止损。
 请必须调用 calculate_position_size 工具计算最大仓位。
+```
+
+验证 Workflow：
+
+```text
+请调用 run_workflow，workflow 使用 vibe_research，
+研究英伟达未来 12 个月的基本面、估值和主要风险。
 ```
 
 停止服务但保留数据：

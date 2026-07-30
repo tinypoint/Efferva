@@ -1,14 +1,17 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
+    Artifact,
     PrincipalView,
     Run,
     RunAgentInput,
@@ -18,8 +21,11 @@ from efferva.models import (
     Thread,
     ThreadCreate,
     ThreadDetail,
+    ThreadGoal,
+    ThreadGoalSet,
 )
 from efferva.repository import AuthorizedRepository, NotFoundError, SystemRepository
+from efferva.runtime import CodexRuntime
 
 
 def principal_dependency(
@@ -75,7 +81,11 @@ async def _stream_run(
             for stored in events:
                 cursor = stored["seq"]
                 yield _sse(cursor, stored["event"])
-                if stored["event"]["type"] in {"RUN_FINISHED", "RUN_ERROR"}:
+                if stored["event"]["type"] in {
+                    "RUN_FINISHED",
+                    "RUN_ERROR",
+                    "RUN_CANCELLED",
+                }:
                     return
             continue
         if await request.is_disconnected():
@@ -90,7 +100,10 @@ def create_api_router(
     *,
     identity: IdentityResolver,
     system_repository: Callable[[], SystemRepository],
+    runtime: Callable[[], CodexRuntime],
     worker_healthy: Callable[[], bool],
+    skill_root_ids: tuple[str, ...] = (),
+    native_memory_enabled: bool = False,
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
@@ -151,7 +164,39 @@ def create_api_router(
         payload: ThreadCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        return await authorized(principal).create_thread(session_id, payload.title)
+        if payload.skill_roots is not None:
+            if len(payload.skill_roots) != len(set(payload.skill_roots)):
+                raise HTTPException(status_code=422, detail="skill_roots must be unique")
+            unknown = set(payload.skill_roots) - set(skill_root_ids)
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unknown skill roots: {', '.join(sorted(unknown))}",
+                )
+        if payload.memory_mode == "enabled" and not native_memory_enabled:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Native Codex memory is disabled for this shared runtime. "
+                    "Use an isolated runtime before enabling it."
+                ),
+            )
+        runtime_config = {
+            key: value
+            for key, value in {
+                "model": payload.model,
+                "model_provider": payload.model_provider,
+                "reasoning_effort": payload.reasoning_effort,
+                "skill_roots": payload.skill_roots,
+                "memory_mode": payload.memory_mode,
+            }.items()
+            if value is not None
+        }
+        return await authorized(principal).create_thread(
+            session_id,
+            payload.title,
+            runtime_config,
+        )
 
     @router.get("/api/sessions/{session_id}/threads", response_model=list[Thread])
     async def list_threads(
@@ -173,11 +218,115 @@ def create_api_router(
         payload: RunCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        return await authorized(principal).create_run(thread_id, payload.prompt)
+        return await authorized(principal).create_run(
+            thread_id,
+            payload.prompt,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+        )
 
     @router.get("/api/runs/{run_id}", response_model=Run)
     async def get_run(run_id: UUID, principal: PrincipalParameter) -> dict[str, Any]:
         return await authorized(principal).get_run(run_id)
+
+    @router.post("/api/runs/{run_id}/cancel", response_model=Run, status_code=202)
+    async def cancel_run(
+        run_id: UUID,
+        principal: PrincipalParameter,
+    ) -> dict[str, Any]:
+        return await authorized(principal).request_run_cancel(run_id)
+
+    @router.get("/api/runs/{run_id}/artifacts", response_model=list[Artifact])
+    async def list_run_artifacts(
+        run_id: UUID,
+        principal: PrincipalParameter,
+    ) -> list[dict[str, Any]]:
+        return await authorized(principal).list_run_artifacts(run_id)
+
+    @router.get("/api/artifacts/{artifact_id}", response_model=Artifact)
+    async def get_artifact(
+        artifact_id: UUID,
+        principal: PrincipalParameter,
+    ) -> dict[str, Any]:
+        artifact = await authorized(principal).get_artifact(artifact_id)
+        artifact.pop("content", None)
+        return artifact
+
+    @router.get("/api/artifacts/{artifact_id}/content")
+    async def download_artifact(
+        artifact_id: UUID,
+        principal: PrincipalParameter,
+    ) -> Response:
+        artifact = await authorized(principal).get_artifact(artifact_id)
+        filename = quote(artifact["name"], safe="")
+        return Response(
+            content=bytes(artifact["content"]),
+            media_type=artifact["media_type"],
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @router.put("/api/threads/{thread_id}/goal", response_model=ThreadGoal)
+    async def set_thread_goal(
+        thread_id: UUID,
+        payload: ThreadGoalSet,
+        principal: PrincipalParameter,
+    ) -> dict[str, Any]:
+        repository = authorized(principal)
+        await repository.get_thread_for_write(thread_id)
+        if await repository.thread_has_active_run(thread_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot replace a goal while the thread has an active run",
+            )
+        now = int(datetime.now(UTC).timestamp())
+        goal: dict[str, Any] = {
+            "threadId": str(thread_id),
+            "objective": payload.objective,
+            "status": "active",
+            "tokenBudget": payload.token_budget,
+            "tokensUsed": 0,
+            "timeUsedSeconds": 0,
+            "createdAt": now,
+            "updatedAt": now,
+            "pending": True,
+        }
+        await repository.set_thread_goal(thread_id, goal)
+        return _goal_to_api(goal, thread_id)
+
+    @router.get("/api/threads/{thread_id}/goal", response_model=ThreadGoal)
+    async def get_thread_goal(
+        thread_id: UUID,
+        principal: PrincipalParameter,
+    ) -> dict[str, Any]:
+        repository = authorized(principal)
+        thread = await repository.get_thread(thread_id)
+        goal = await repository.get_thread_goal(thread_id)
+        if thread["codex_thread_id"] is not None and not (goal or {}).get("pending"):
+            try:
+                native_goal = await runtime().get_goal(str(thread["codex_thread_id"]))
+            except Exception:
+                native_goal = None
+            if native_goal is not None:
+                goal = await repository.set_thread_goal(thread_id, native_goal)
+        if goal is None:
+            raise HTTPException(status_code=404, detail=f"No goal for thread {thread_id}")
+        return _goal_to_api(goal, thread_id)
+
+    @router.delete("/api/threads/{thread_id}/goal")
+    async def clear_thread_goal(
+        thread_id: UUID,
+        principal: PrincipalParameter,
+    ) -> dict[str, bool]:
+        repository = authorized(principal)
+        thread = await repository.get_thread_for_write(thread_id)
+        native_cleared = False
+        if thread["codex_thread_id"] is not None:
+            native_cleared = await runtime().clear_goal(str(thread["codex_thread_id"]))
+        stored_cleared = await repository.clear_thread_goal(thread_id)
+        return {"cleared": native_cleared or stored_cleared}
 
     @router.get("/api/runs/{run_id}/events")
     async def list_run_events(
@@ -242,3 +391,19 @@ def create_api_router(
         )
 
     return router
+
+
+def _goal_to_api(goal: dict[str, Any], thread_id: UUID) -> dict[str, Any]:
+    return {
+        "thread_id": str(thread_id),
+        "objective": goal["objective"],
+        "status": goal.get("status", "active"),
+        "token_budget": goal.get("tokenBudget", goal.get("token_budget")),
+        "tokens_used": goal.get("tokensUsed", goal.get("tokens_used", 0)),
+        "time_used_seconds": goal.get(
+            "timeUsedSeconds",
+            goal.get("time_used_seconds", 0),
+        ),
+        "created_at": goal.get("createdAt", goal.get("created_at", 0)),
+        "updated_at": goal.get("updatedAt", goal.get("updated_at", 0)),
+    }
