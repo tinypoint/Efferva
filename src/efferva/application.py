@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from efferva.api import create_api_router, principal_dependency
-from efferva.artifacts import create_publish_artifact_tool
 from efferva.capabilities import SkillRoot
 from efferva.codex_release import prepare_official_codex
 from efferva.config import (
@@ -31,7 +30,6 @@ from efferva.repository import (
 )
 from efferva.runtime import CodexRuntime
 from efferva.sandbox import create_sandbox_control_plane, register_sandbox_provider
-from efferva.tools import Tool
 from efferva.worker import RunWorker
 
 
@@ -67,7 +65,6 @@ class Efferva:
         identity: IdentityResolver,
         settings: Settings | None = None,
         codex_config: Mapping[str, Any] | None = None,
-        tools: list[Tool] | tuple[Tool, ...] | None = None,
         developer_instructions: str | None = None,
         skill_roots: list[SkillRoot] | tuple[SkillRoot, ...] | None = None,
         native_memory_enabled: bool = True,
@@ -75,15 +72,9 @@ class Efferva:
         self.identity = identity
         self.settings = settings or get_settings()
         self.codex_config = dict(codex_config or {})
-        self.tools = tuple(tools or ())
         self.developer_instructions = developer_instructions
         self.skill_roots = tuple(skill_roots or ())
         self.native_memory_enabled = native_memory_enabled
-        tool_names = [tool.name for tool in self.tools]
-        if len(tool_names) != len(set(tool_names)):
-            raise ValueError("Efferva tool names must be unique")
-        if "publish_artifact" in tool_names:
-            raise ValueError("publish_artifact is reserved by Efferva")
         skill_root_ids = [root.id for root in self.skill_roots]
         if len(skill_root_ids) != len(set(skill_root_ids)):
             raise ValueError("Efferva SkillRoot ids must be unique")
@@ -123,13 +114,6 @@ class Efferva:
                     codex_version=codex_release.version,
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
-                tools = (
-                    *self.tools,
-                    create_publish_artifact_tool(
-                        repository,
-                        max_bytes=settings.artifact_max_bytes,
-                    ),
-                )
                 runtime = CodexRuntime(
                     codex_release.binary,
                     codex_home_path=settings.codex_home_path,
@@ -137,7 +121,6 @@ class Efferva:
                     openai_base_url=settings.codex_openai_base_url,
                     model=settings.codex_model,
                     codex_config=codex_config,
-                    tools=tools,
                     skill_roots=self.skill_roots,
                     native_memory_enabled=self.native_memory_enabled,
                 )

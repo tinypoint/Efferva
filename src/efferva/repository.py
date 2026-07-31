@@ -35,11 +35,6 @@ def _public_thread(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def _public_artifact(row: dict[str, Any]) -> dict[str, Any]:
-    row.pop("content", None)
-    return row
-
-
 class AuthorizedRepository:
     """Request-scoped repository whose every lookup is constrained by one Principal."""
 
@@ -473,39 +468,6 @@ class AuthorizedRepository:
             await connection.commit()
         return await self.get_run(run_id)
 
-    async def list_run_artifacts(self, run_id: UUID) -> list[dict[str, Any]]:
-        await self.get_run(run_id)
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                SELECT id, run_id, thread_id, session_id, path, name,
-                       media_type, size_bytes, sha256, created_at
-                FROM artifacts
-                WHERE run_id = %s
-                ORDER BY created_at, id
-                """,
-                (run_id,),
-            )
-            return list(await cursor.fetchall())
-
-    async def get_artifact(self, artifact_id: UUID) -> dict[str, Any]:
-        where, scope_parameters = self._session_scope(_AccessMode.READ)
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                f"""
-                SELECT artifact.*
-                FROM artifacts artifact
-                JOIN app_sessions s ON s.id = artifact.session_id
-                WHERE artifact.id = %s AND {where}
-                """,
-                (artifact_id, *scope_parameters),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            raise NotFoundError(f"artifact {artifact_id} not found")
-        return row
-
-
 class SystemRepository:
     """Unscoped control-plane access used only by workers and sandbox management."""
 
@@ -876,73 +838,6 @@ class SystemRepository:
         if row is None:
             raise NotFoundError(f"run {run_id} not found")
         return bool(row["requested"])
-
-    async def publish_artifact(
-        self,
-        *,
-        run_id: UUID,
-        thread_id: UUID,
-        session_id: UUID,
-        path: str,
-        name: str,
-        media_type: str,
-        content: bytes,
-        sha256: str,
-        owner_id: str,
-        fencing_epoch: int,
-    ) -> dict[str, Any]:
-        artifact_id = uuid4()
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO artifacts(
-                    id, run_id, thread_id, session_id, path, name,
-                    media_type, size_bytes, sha256, content
-                )
-                SELECT
-                    %s, r.id, t.id, s.id, %s, %s, %s, %s, %s, %s
-                FROM runs r
-                JOIN app_threads t ON t.id = r.thread_id
-                JOIN app_sessions s ON s.id = t.session_id
-                JOIN session_leases lease ON lease.session_id = s.id
-                WHERE r.id = %s
-                  AND t.id = %s
-                  AND s.id = %s
-                  AND r.status = 'running'
-                  AND r.owner_id = %s
-                  AND r.lease_epoch = %s
-                  AND lease.owner_id = r.owner_id
-                  AND lease.fencing_epoch = r.lease_epoch
-                  AND lease.expires_at > now()
-                ON CONFLICT (run_id, path) DO UPDATE
-                SET name = EXCLUDED.name,
-                    media_type = EXCLUDED.media_type,
-                    size_bytes = EXCLUDED.size_bytes,
-                    sha256 = EXCLUDED.sha256,
-                    content = EXCLUDED.content,
-                    created_at = now()
-                RETURNING *
-                """,
-                (
-                    artifact_id,
-                    path,
-                    name,
-                    media_type,
-                    len(content),
-                    sha256,
-                    content,
-                    run_id,
-                    thread_id,
-                    session_id,
-                    owner_id,
-                    fencing_epoch,
-                ),
-            )
-            row = await cursor.fetchone()
-            await connection.commit()
-        if row is None:
-            raise ConflictError(f"run {run_id} artifact lease is stale")
-        return _public_artifact(row)
 
     async def run_is_terminal(self, run_id: UUID) -> bool:
         async with self._database.connection() as connection:

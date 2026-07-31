@@ -45,27 +45,6 @@ def run_cancelled(message: str = "Run cancelled by user") -> dict[str, Any]:
     }
 
 
-def artifact_published(
-    artifact_id: UUID,
-    *,
-    path: str,
-    name: str,
-    media_type: str,
-    size_bytes: int,
-    sha256: str,
-) -> dict[str, Any]:
-    return {
-        "type": "ARTIFACT_PUBLISHED",
-        "artifactId": str(artifact_id),
-        "path": path,
-        "name": name,
-        "mediaType": media_type,
-        "sizeBytes": size_bytes,
-        "sha256": sha256,
-        "timestamp": timestamp_ms(),
-    }
-
-
 def text_message_start(message_id: str) -> dict[str, Any]:
     return {
         "type": "TEXT_MESSAGE_START",

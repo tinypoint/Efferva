@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     lease_renew_seconds: int = 10
     max_parallel_threads_per_session: int = 4
     max_parallel_runs_per_instance: int = 16
-    artifact_max_bytes: int = 10 * 1024 * 1024
 
 
 @lru_cache

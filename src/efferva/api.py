@@ -3,15 +3,13 @@ import json
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
-from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
-    Artifact,
     PrincipalView,
     Run,
     RunAgentInput,
@@ -236,38 +234,6 @@ def create_api_router(
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
         return await authorized(principal).request_run_cancel(run_id)
-
-    @router.get("/api/runs/{run_id}/artifacts", response_model=list[Artifact])
-    async def list_run_artifacts(
-        run_id: UUID,
-        principal: PrincipalParameter,
-    ) -> list[dict[str, Any]]:
-        return await authorized(principal).list_run_artifacts(run_id)
-
-    @router.get("/api/artifacts/{artifact_id}", response_model=Artifact)
-    async def get_artifact(
-        artifact_id: UUID,
-        principal: PrincipalParameter,
-    ) -> dict[str, Any]:
-        artifact = await authorized(principal).get_artifact(artifact_id)
-        artifact.pop("content", None)
-        return artifact
-
-    @router.get("/api/artifacts/{artifact_id}/content")
-    async def download_artifact(
-        artifact_id: UUID,
-        principal: PrincipalParameter,
-    ) -> Response:
-        artifact = await authorized(principal).get_artifact(artifact_id)
-        filename = quote(artifact["name"], safe="")
-        return Response(
-            content=bytes(artifact["content"]),
-            media_type=artifact["media_type"],
-            headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
 
     @router.put("/api/threads/{thread_id}/goal", response_model=ThreadGoal)
     async def set_thread_goal(

@@ -79,19 +79,6 @@ class Run(BaseModel):
     updated_at: datetime
 
 
-class Artifact(BaseModel):
-    id: UUID
-    run_id: UUID
-    thread_id: UUID
-    session_id: UUID
-    path: str
-    name: str
-    media_type: str
-    size_bytes: int
-    sha256: str
-    created_at: datetime
-
-
 class Message(BaseModel):
     id: UUID
     thread_id: UUID

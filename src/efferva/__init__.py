@@ -8,7 +8,6 @@ from efferva.identity import (
     Principal,
     UnauthenticatedError,
 )
-from efferva.models import Artifact
 from efferva.sandbox import (
     DirectoryEntry,
     FileMetadata,
@@ -25,11 +24,9 @@ from efferva.sandbox import (
     WorkspaceHandle,
     run_provider_conformance,
 )
-from efferva.tools import Tool, ToolContext
 
 __all__ = [
     "Efferva",
-    "Artifact",
     "Capability",
     "IdentityResolver",
     "DirectoryEntry",
@@ -46,8 +43,6 @@ __all__ = [
     "SandboxProvider",
     "SandboxRuntime",
     "SkillRoot",
-    "Tool",
-    "ToolContext",
     "UnauthenticatedError",
     "WorkspaceHandle",
     "run_provider_conformance",

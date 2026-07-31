@@ -226,7 +226,6 @@ class RunWorker:
                 str(runtime_config.get("memory_mode", "disabled")),
             )
 
-            session_runtime.bind_run_context(codex_thread_id, run)
             queue = session_runtime.subscribe(codex_thread_id)
             run_input = run.get("input") or {}
             turn_id = await session_runtime.start_turn(

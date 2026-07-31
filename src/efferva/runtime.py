@@ -15,7 +15,6 @@ from typing import Any
 
 from efferva.capabilities import SkillRoot
 from efferva.sandbox import ProcessHandle, ProcessSpec, SandboxEnvironment
-from efferva.tools import Tool, ToolContext, tool_result_text
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,6 @@ class _SessionCodexRuntime:
         openai_base_url: str | None = None,
         model: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
-        tools: tuple[Tool, ...] | list[Tool] | None = None,
         skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
         native_memory_enabled: bool = False,
     ) -> None:
@@ -81,7 +79,6 @@ class _SessionCodexRuntime:
         self._openai_base_url = openai_base_url
         self._model = model
         self._codex_config = deepcopy(dict(codex_config or {}))
-        self._tools = {tool.name: tool for tool in tools or ()}
         self._skill_roots = {root.id: root for root in skill_roots or ()}
         if len(self._skill_roots) != len(skill_roots or ()):
             raise ValueError("Efferva SkillRoot ids must be unique")
@@ -90,8 +87,6 @@ class _SessionCodexRuntime:
         self._reader_task: asyncio.Task[None] | None = None
         self._pending: dict[int, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._thread_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._thread_sandboxes: dict[str, SandboxEnvironment] = {}
-        self._thread_run_contexts: dict[str, dict[str, Any]] = {}
         self._server_request_tasks: set[asyncio.Task[None]] = set()
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
@@ -111,8 +106,6 @@ class _SessionCodexRuntime:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
-            self._thread_sandboxes.clear()
-            self._thread_run_contexts.clear()
             await self._cancel_server_request_tasks()
             self._closed = False
             try:
@@ -284,11 +277,8 @@ class _SessionCodexRuntime:
             params["reasoningEffort"] = effort
         if self._developer_instructions is not None:
             params["developerInstructions"] = self._developer_instructions
-        if self._tools:
-            params["dynamicTools"] = [tool.codex_spec() for tool in self._tools.values()]
         response = await self.request("thread/start", params)
         thread_id = str(response["thread"]["id"])
-        self._thread_sandboxes[thread_id] = sandbox
         return thread_id
 
     async def resume_thread(
@@ -316,7 +306,6 @@ class _SessionCodexRuntime:
         if self._developer_instructions is not None:
             params["developerInstructions"] = self._developer_instructions
         await self.request("thread/resume", params)
-        self._thread_sandboxes[thread_id] = sandbox
 
     async def start_turn(
         self,
@@ -347,18 +336,6 @@ class _SessionCodexRuntime:
             params,
         )
         return str(response["turn"]["id"])
-
-    def bind_run_context(self, thread_id: str, run: Mapping[str, Any]) -> None:
-        self._thread_run_contexts[thread_id] = {
-            "run_id": run.get("id"),
-            "app_thread_id": run.get("thread_id"),
-            "session_id": run.get("session_id"),
-            "tenant_id": run.get("tenant_id"),
-            "owner_issuer": run.get("owner_issuer"),
-            "owner_subject": run.get("owner_subject"),
-            "worker_owner_id": run.get("owner_id"),
-            "fencing_epoch": run.get("fencing_epoch"),
-        }
 
     async def set_goal(
         self,
@@ -426,11 +403,7 @@ class _SessionCodexRuntime:
         )
 
     async def unload_thread(self, thread_id: str) -> None:
-        try:
-            await self.request("thread/unsubscribe", {"threadId": thread_id})
-        finally:
-            self._thread_sandboxes.pop(thread_id, None)
-            self._thread_run_contexts.pop(thread_id, None)
+        await self.request("thread/unsubscribe", {"threadId": thread_id})
 
     async def close(self) -> None:
         process = self._process
@@ -556,79 +529,11 @@ class _SessionCodexRuntime:
             future.set_result(message.get("result") or {})
 
     async def _handle_server_request(self, message: dict[str, Any]) -> None:
-        if message["method"] != "item/tool/call":
-            await self._send_server_error(
-                message["id"],
-                -32601,
-                f"Efferva cannot handle server request {message['method']}",
-            )
-            return
-
-        params = message.get("params") or {}
-        thread_id = str(params.get("threadId") or "")
-        turn_id = str(params.get("turnId") or "")
-        call_id = str(params.get("callId") or "")
-        namespace = params.get("namespace")
-        tool_name = str(params.get("tool") or "")
-        arguments = params.get("arguments")
-        tool = self._tools.get(tool_name) if namespace is None else None
-        sandbox = self._thread_sandboxes.get(thread_id)
-
-        if tool is None:
-            await self._send_tool_result(
-                message["id"],
-                f"Unknown Efferva tool: {tool_name}",
-                success=False,
-            )
-            return
-        if sandbox is None:
-            await self._send_tool_result(
-                message["id"],
-                f"No active sandbox is bound to Codex thread {thread_id}",
-                success=False,
-            )
-            return
-        if not isinstance(arguments, Mapping):
-            await self._send_tool_result(
-                message["id"],
-                f"Tool {tool_name} arguments must be a JSON object",
-                success=False,
-            )
-            return
-
-        context = ToolContext(
-            thread_id=thread_id,
-            turn_id=turn_id,
-            call_id=call_id,
-            sandbox=sandbox,
-            **self._thread_run_contexts.get(thread_id, {}),
+        await self._send_server_error(
+            message["id"],
+            -32601,
+            f"Efferva cannot handle server request {message['method']}",
         )
-        try:
-            result = await tool.invoke(context, arguments)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            logger.exception("Efferva tool %s failed", tool_name)
-            await self._send_tool_result(
-                message["id"],
-                f"{type(error).__name__}: {error}",
-                success=False,
-            )
-            return
-        await self._send_tool_result(message["id"], tool_result_text(result), success=True)
-
-    async def _send_tool_result(self, request_id: Any, text: str, *, success: bool) -> None:
-        await self._send_server_result(
-            request_id,
-            {
-                "contentItems": [{"type": "inputText", "text": text}],
-                "success": success,
-            },
-        )
-
-    async def _send_server_result(self, request_id: Any, result: dict[str, Any]) -> None:
-        async with self._write_lock:
-            await self._write({"id": request_id, "result": result})
 
     async def _send_server_error(
         self,
@@ -725,7 +630,6 @@ class CodexRuntime:
         openai_base_url: str | None = None,
         model: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
-        tools: tuple[Tool, ...] | list[Tool] | None = None,
         skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
         native_memory_enabled: bool = False,
     ) -> None:
@@ -738,7 +642,6 @@ class CodexRuntime:
             "openai_base_url": openai_base_url,
             "model": model,
             "codex_config": deepcopy(dict(codex_config or {})),
-            "tools": tuple(tools or ()),
             "skill_roots": tuple(skill_roots or ()),
             "native_memory_enabled": native_memory_enabled,
         }
