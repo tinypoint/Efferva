@@ -48,6 +48,8 @@ class CodexProxy:
         self._codex_config = deepcopy(dict(codex_config or {}))
         self._native_memory_enabled = native_memory_enabled
         self._locks: dict[UUID, asyncio.Lock] = {}
+        self._sessions: dict[UUID, SandboxEnvironment] = {}
+        self._connection_targets: dict[str, tuple[str, dict[str, str]]] = {}
         self._next_id = 1
         self._id_lock = asyncio.Lock()
 
@@ -107,15 +109,14 @@ class CodexProxy:
         params["cwd"] = workspace
         async with self._connection(sandbox) as websocket:
             result = await self._rpc(websocket, "thread/start", params)
-        thread = dict(result["thread"])
-        if title:
-            async with self._connection(sandbox) as websocket:
+            thread = dict(result["thread"])
+            if title:
                 await self._rpc(
                     websocket,
                     "thread/name/set",
                     {"threadId": thread["id"], "name": title},
                 )
-            thread["name"] = title
+                thread["name"] = title
         return thread
 
     async def read_thread(
@@ -212,12 +213,19 @@ class CodexProxy:
         session: Mapping[str, Any],
     ) -> SandboxEnvironment:
         session_id = UUID(str(session["id"]))
+        cached = self._sessions.get(session_id)
+        if cached is not None:
+            return cached
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
+            cached = self._sessions.get(session_id)
+            if cached is not None:
+                return cached
             sandbox = await self._sandboxes.ensure(
                 session_id,
             )
             await self._install_and_start(sandbox)
+            self._sessions[session_id] = sandbox
             return sandbox
 
     async def _install_and_start(self, sandbox: SandboxEnvironment) -> None:
@@ -338,27 +346,34 @@ class CodexProxy:
         self,
         sandbox: SandboxEnvironment,
     ) -> AsyncIterator[ClientConnection]:
-        endpoint, headers = await sandbox.runtime.get_endpoint(
-            self._settings.codex_appserver_port
-        )
-        websocket_token = (
-            await sandbox.runtime.read_file(
-                posixpath.join(
-                    self._settings.codex_home_path,
-                    "app-server.token",
-                )
+        target = self._connection_targets.get(sandbox.environment_id)
+        if target is None:
+            endpoint, headers = await sandbox.runtime.get_endpoint(
+                self._settings.codex_appserver_port
             )
-        ).decode("utf-8").strip()
-        url = _websocket_url(endpoint)
+            websocket_token = (
+                await sandbox.runtime.read_file(
+                    posixpath.join(
+                        self._settings.codex_home_path,
+                        "app-server.token",
+                    )
+                )
+            ).decode("utf-8").strip()
+            target = (
+                _websocket_url(endpoint),
+                {
+                    **headers,
+                    "Authorization": f"Bearer {websocket_token}",
+                },
+            )
+            self._connection_targets[sandbox.environment_id] = target
+        url, connection_headers = target
         last_error: Exception | None = None
         for attempt in range(8):
             try:
                 websocket = await connect(
                     url,
-                    additional_headers={
-                        **headers,
-                        "Authorization": f"Bearer {websocket_token}",
-                    },
+                    additional_headers=connection_headers,
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,
