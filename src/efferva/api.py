@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -191,7 +191,6 @@ def create_api_router(
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
-    PrincipalParameter = Annotated[Principal, Depends(resolve_principal)]
 
     @router.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -201,11 +200,16 @@ def create_api_router(
         return {"status": "ok"}
 
     @router.get("/api/meta", include_in_schema=False)
-    async def metadata(request: Request, _: PrincipalParameter) -> dict[str, str]:
+    async def metadata(
+        request: Request,
+        _: Principal = Depends(resolve_principal),
+    ) -> dict[str, str]:
         return {"title": request.app.title}
 
     @router.get("/api/me", response_model=PrincipalView)
-    async def me(principal: PrincipalParameter) -> dict[str, Any]:
+    async def me(
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, Any]:
         return {
             "tenant_id": principal.tenant_id,
             "issuer": principal.issuer,
@@ -216,13 +220,13 @@ def create_api_router(
     @router.post("/api/sessions", response_model=Session, status_code=201)
     async def create_session(
         payload: SessionCreate,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> dict[str, Any]:
         return await repository().create_session(principal, payload.name)
 
     @router.get("/api/sessions", response_model=list[Session])
     async def list_sessions(
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
         scope: Literal["mine", "tenant"] = Query(default="mine"),
     ) -> list[dict[str, Any]]:
         return await repository().list_sessions(principal, scope)
@@ -230,14 +234,14 @@ def create_api_router(
     @router.get("/api/sessions/{session_id}", response_model=Session)
     async def get_session(
         session_id: UUID,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> dict[str, Any]:
         return await repository().get_session(principal, session_id)
 
     @router.get("/api/sessions/{session_id}/threads")
     async def list_threads(
         session_id: UUID,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> list[dict[str, Any]]:
         session = await repository().get_session(principal, session_id, touch=True)
         threads = await codex_proxy().list_threads(session)
@@ -247,7 +251,7 @@ def create_api_router(
     async def create_thread(
         session_id: UUID,
         payload: ThreadCreate,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> dict[str, Any]:
         session = await repository().get_session(
             principal,
@@ -268,7 +272,7 @@ def create_api_router(
     async def read_thread(
         session_id: UUID,
         thread_id: str,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> dict[str, Any]:
         session = await repository().get_session(principal, session_id, touch=True)
         thread = await codex_proxy().read_thread(session, thread_id)
@@ -279,7 +283,7 @@ def create_api_router(
         session_id: UUID,
         thread_id: str,
         payload: RunCreate,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> StreamingResponse:
         session = await repository().get_session(
             principal,
@@ -308,7 +312,7 @@ def create_api_router(
         session_id: UUID,
         thread_id: str,
         turn_id: str,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> dict[str, bool]:
         session = await repository().get_session(
             principal,
@@ -322,7 +326,7 @@ def create_api_router(
     @router.post("/api/ag-ui")
     async def run_agui(
         payload: RunAgentInput,
-        principal: PrincipalParameter,
+        principal: Principal = Depends(resolve_principal),
     ) -> StreamingResponse:
         forwarded = (
             payload.forwarded_props

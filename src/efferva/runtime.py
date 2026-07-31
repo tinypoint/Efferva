@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import posixpath
+import secrets
 import shlex
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -72,6 +73,7 @@ class CodexProxy:
                 "limit": 100,
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
+                "sourceKinds": ["appServer"],
             },
         )
         return list(result.get("data") or [])
@@ -238,6 +240,11 @@ class CodexProxy:
             await sandbox.runtime.write_file(sandbox_binary, self._binary_bytes)
 
         codex_home = self._settings.codex_home_path
+        websocket_token_file = posixpath.join(codex_home, "app-server.token")
+        websocket_token = secrets.token_urlsafe(32)
+        temporary_token_file = (
+            f"{websocket_token_file}.{websocket_token[:16]}.tmp"
+        )
         pid_file = "/tmp/efferva-app-server.pid"
         log_file = posixpath.join(codex_home, "app-server.log")
         start_lock = "/tmp/efferva-app-server-start.lock"
@@ -258,6 +265,13 @@ class CodexProxy:
             "sandbox 2>/dev/null || true; fi; fi; "
             f"mkdir -p {shlex.quote(codex_home)} "
             f"{shlex.quote(self._settings.workspace_path)} && "
+            f"if [ ! -s {shlex.quote(websocket_token_file)} ]; then "
+            f"printf '%s\\n' {shlex.quote(websocket_token)} "
+            f">{shlex.quote(temporary_token_file)} && "
+            f"chmod 600 {shlex.quote(temporary_token_file)} && "
+            f"ln {shlex.quote(temporary_token_file)} "
+            f"{shlex.quote(websocket_token_file)} 2>/dev/null || true; "
+            f"rm -f {shlex.quote(temporary_token_file)}; fi && "
             f"chmod 755 {shlex.quote(sandbox_binary)} && "
             f"chown {self._settings.sandbox_uid}:{self._settings.sandbox_gid} "
             f"{shlex.quote(self._settings.session_volume_path)} "
@@ -277,6 +291,8 @@ class CodexProxy:
             f"cd {shlex.quote(self._settings.workspace_path)} && "
             f"{shlex.quote(sandbox_binary)} app-server "
             f"--listen {shlex.quote(listen)} "
+            f"--ws-auth capability-token "
+            f"--ws-token-file {shlex.quote(websocket_token_file)} "
             f"</dev/null >>{shlex.quote(log_file)} 2>&1 & "
             f"echo \"$! {self._binary_sha256}\" >{shlex.quote(pid_file)}"
         )
@@ -325,13 +341,24 @@ class CodexProxy:
         endpoint, headers = await sandbox.runtime.get_endpoint(
             self._settings.codex_appserver_port
         )
+        websocket_token = (
+            await sandbox.runtime.read_file(
+                posixpath.join(
+                    self._settings.codex_home_path,
+                    "app-server.token",
+                )
+            )
+        ).decode("utf-8").strip()
         url = _websocket_url(endpoint)
         last_error: Exception | None = None
         for attempt in range(8):
             try:
                 websocket = await connect(
                     url,
-                    additional_headers=dict(headers),
+                    additional_headers={
+                        **headers,
+                        "Authorization": f"Bearer {websocket_token}",
+                    },
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,

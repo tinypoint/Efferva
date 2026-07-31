@@ -60,6 +60,7 @@ services:
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "true"
+      EFFERVA_CODEX_RELEASE_CACHE_DIR: /var/cache/efferva/codex
       EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
       EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -67,6 +68,8 @@ services:
       - "${EFFERVA_HTTP_PORT:-8080}:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - codex-cache:/var/cache/efferva/codex
     healthcheck:
       test:
         [
@@ -84,6 +87,7 @@ services:
 volumes:
   postgres-data:
   opensandbox-data:
+  codex-cache:
 
 networks:
   efferva-local:

@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Annotated, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
@@ -129,10 +129,11 @@ class Efferva:
 
         static_dir = files("efferva").joinpath("static")
         require_principal = principal_dependency(self.identity)
-        IndexPrincipal = Annotated[Principal, Depends(require_principal)]
 
         @router.get("/", include_in_schema=False)
-        async def index(_: IndexPrincipal) -> FileResponse:
+        async def index(
+            _: Principal = Depends(require_principal),
+        ) -> FileResponse:
             return FileResponse(str(static_dir.joinpath("index.html")))
 
         @router.get("/static/{asset_name}", include_in_schema=False)
