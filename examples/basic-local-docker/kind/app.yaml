@@ -101,8 +101,6 @@ spec:
           env:
             - name: EFFERVA_DATABASE_URL
               value: postgresql://efferva:efferva@postgres:5432/efferva
-            - name: EFFERVA_SANDBOX_PROVIDER
-              value: opensandbox
             - name: EFFERVA_SANDBOX_IMAGE
               value: python:3.13-slim-bookworm
             - name: EFFERVA_OPENSANDBOX_SERVER_URL

@@ -15,9 +15,8 @@ from uuid import UUID
 
 from websockets.asyncio.client import ClientConnection, connect
 
-from efferva.capabilities import SkillRoot
 from efferva.config import Settings
-from efferva.sandbox import ProcessSpec, SandboxControlPlane, SandboxEnvironment
+from efferva.sandbox import SandboxControlPlane, SandboxEnvironment
 
 
 class CodexRpcError(RuntimeError):
@@ -38,7 +37,6 @@ class CodexProxy:
         *,
         developer_instructions: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
-        skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
         native_memory_enabled: bool = False,
     ) -> None:
         self._binary_bytes = binary.read_bytes()
@@ -47,7 +45,6 @@ class CodexProxy:
         self._sandboxes = sandboxes
         self._developer_instructions = developer_instructions
         self._codex_config = deepcopy(dict(codex_config or {}))
-        self._skill_roots = tuple(skill_roots or ())
         self._native_memory_enabled = native_memory_enabled
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._next_id = 1
@@ -309,28 +306,16 @@ class CodexProxy:
         uid: int | None = None,
         gid: int | None = None,
     ) -> None:
-        process = await sandbox.runtime.start_process(
-            ProcessSpec(
-                argv=argv,
-                cwd="/",
-                env=env or {},
-                uid=uid,
-                gid=gid,
-            )
+        result = await sandbox.runtime.run_command(
+            argv,
+            cwd="/",
+            env=env,
+            uid=uid,
+            gid=gid,
         )
-        cursor = 0
-        for _ in range(400):
-            output = await sandbox.runtime.read_process(process, cursor)
-            cursor = output.next_cursor
-            if output.exited:
-                if output.exit_code != 0:
-                    detail = b"".join(
-                        chunk.data for chunk in output.chunks
-                    ).decode(errors="replace")
-                    raise RuntimeError(detail or f"sandbox command exited {output.exit_code}")
-                return
-            await asyncio.sleep(0.025)
-        raise TimeoutError(f"sandbox command did not exit: {argv[0]}")
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout).decode(errors="replace")
+            raise RuntimeError(detail or f"sandbox command exited {result.exit_code}")
 
     @asynccontextmanager
     async def _connection(

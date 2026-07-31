@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from psycopg import AsyncConnection
@@ -30,29 +30,15 @@ class Database:
         async with self._pool.connection() as connection:
             yield connection
 
-    async def migrate(self, migrations: Sequence[tuple[str, str]]) -> None:
+    async def initialize(self, schema: str) -> None:
         async with self.connection() as connection:
             await connection.execute(
-                "SELECT pg_advisory_xact_lock(hashtext('agentframe:schema-migrations'))"
+                "SELECT pg_advisory_xact_lock(hashtext('efferva:schema-initialization'))"
             )
-            await connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agentframe_schema_migrations (
-                    version text PRIMARY KEY,
-                    applied_at timestamptz NOT NULL DEFAULT now()
-                )
-                """
+            existing = await connection.execute(
+                "SELECT to_regclass('public.app_sessions') AS table_name"
             )
-            for version, sql in migrations:
-                existing = await connection.execute(
-                    "SELECT 1 FROM agentframe_schema_migrations WHERE version = %s",
-                    (version,),
-                )
-                if await existing.fetchone():
-                    continue
-                await connection.execute(sql)
-                await connection.execute(
-                    "INSERT INTO agentframe_schema_migrations(version) VALUES (%s)",
-                    (version,),
-                )
+            row = await existing.fetchone()
+            if row["table_name"] is None:
+                await connection.execute(schema)
             await connection.commit()

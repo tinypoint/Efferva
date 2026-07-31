@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from efferva.api import create_api_router, principal_dependency
-from efferva.capabilities import SkillRoot
 from efferva.codex_release import prepare_official_codex
 from efferva.config import (
     Settings,
@@ -24,20 +23,19 @@ from efferva.identity import (
     UnauthenticatedError,
 )
 from efferva.repository import (
-    ConflictError,
     NotFoundError,
-    SystemRepository,
+    SessionRepository,
 )
 from efferva.runtime import CodexProxy, CodexRpcError
-from efferva.sandbox import create_sandbox_control_plane, register_sandbox_provider
+from efferva.sandbox import SandboxProvider, create_sandbox_control_plane
 
 
 @dataclass(slots=True)
 class _RuntimeResources:
-    repository: SystemRepository | None = None
+    repository: SessionRepository | None = None
     proxy: CodexProxy | None = None
 
-    def require_repository(self) -> SystemRepository:
+    def require_repository(self) -> SessionRepository:
         if self.repository is None:
             raise RuntimeError("Efferva application has not started")
         return self.repository
@@ -57,18 +55,15 @@ class Efferva:
         settings: Settings | None = None,
         codex_config: Mapping[str, Any] | None = None,
         developer_instructions: str | None = None,
-        skill_roots: list[SkillRoot] | tuple[SkillRoot, ...] | None = None,
+        sandbox_provider: SandboxProvider | None = None,
         native_memory_enabled: bool = True,
     ) -> None:
         self.identity = identity
         self.settings = settings or get_settings()
         self.codex_config = dict(codex_config or {})
         self.developer_instructions = developer_instructions
-        self.skill_roots = tuple(skill_roots or ())
+        self.sandbox_provider = sandbox_provider
         self.native_memory_enabled = native_memory_enabled
-        skill_root_ids = [root.id for root in self.skill_roots]
-        if len(skill_root_ids) != len(set(skill_root_ids)):
-            raise ValueError("Efferva SkillRoot ids must be unique")
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
         normalized_prefix = self._normalize_prefix(prefix)
@@ -79,12 +74,7 @@ class Efferva:
 
         resources = _RuntimeResources()
         settings = self.settings
-        migrations_dir = files("efferva.migrations")
-        migrations = [
-            (path.name, path.read_text())
-            for path in sorted(migrations_dir.iterdir(), key=lambda item: item.name)
-            if path.name.endswith(".sql")
-        ]
+        schema = files("efferva").joinpath("schema.sql").read_text()
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -97,13 +87,16 @@ class Efferva:
             sandboxes = None
             await database.open()
             try:
-                await database.migrate(migrations)
-                repository = SystemRepository(
+                await database.initialize(schema)
+                repository = SessionRepository(
                     database,
                     codex_version=codex_release.version,
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
-                sandboxes = create_sandbox_control_plane(settings)
+                sandboxes = create_sandbox_control_plane(
+                    settings,
+                    self.sandbox_provider,
+                )
                 await sandboxes.start()
                 proxy = CodexProxy(
                     codex_release.binary,
@@ -111,7 +104,6 @@ class Efferva:
                     sandboxes,
                     developer_instructions=self.developer_instructions,
                     codex_config=codex_config,
-                    skill_roots=self.skill_roots,
                     native_memory_enabled=self.native_memory_enabled,
                 )
                 resources.repository = repository
@@ -130,7 +122,7 @@ class Efferva:
         router.include_router(
             create_api_router(
                 identity=self.identity,
-                system_repository=resources.require_repository,
+                repository=resources.require_repository,
                 codex_proxy=resources.require_proxy,
             )
         )
@@ -162,10 +154,6 @@ class Efferva:
 
         return self.asgi_app()
 
-    @classmethod
-    def register_sandbox_provider(cls, name: str, provider) -> None:
-        register_sandbox_provider(name, provider)
-
     @staticmethod
     def _normalize_prefix(prefix: str) -> str:
         if prefix in {"", "/"}:
@@ -178,9 +166,6 @@ class Efferva:
     def _install_exception_handlers(app: FastAPI) -> None:
         async def not_found_handler(_, error: NotFoundError) -> JSONResponse:
             return JSONResponse(status_code=404, content={"detail": str(error)})
-
-        async def conflict_handler(_, error: ConflictError) -> JSONResponse:
-            return JSONResponse(status_code=409, content={"detail": str(error)})
 
         async def unauthenticated_handler(_, error: UnauthenticatedError) -> JSONResponse:
             detail = str(error) or "authentication required"
@@ -196,7 +181,6 @@ class Efferva:
             )
 
         app.add_exception_handler(NotFoundError, not_found_handler)
-        app.add_exception_handler(ConflictError, conflict_handler)
         app.add_exception_handler(UnauthenticatedError, unauthenticated_handler)
         app.add_exception_handler(ForbiddenError, forbidden_handler)
         app.add_exception_handler(CodexRpcError, codex_rpc_handler)

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import os.path
 import shlex
-from collections.abc import AsyncIterator
-from datetime import timedelta
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,18 +21,10 @@ from opensandbox.models.sandboxes import (
 )
 
 from efferva.config import Settings
-from efferva.sandbox.runtime import (
-    BufferedSandboxRuntime,
-    ProcessTransport,
-    TransportEvent,
-    TransportExited,
-    TransportOutput,
-)
-from efferva.sandbox.types import (
+from efferva.sandbox.protocol import (
+    CommandResult,
     DirectoryEntry,
     FileMetadata,
-    ProcessHandle,
-    ProcessSpec,
     SandboxCapabilities,
     SandboxContext,
     SandboxHandle,
@@ -45,196 +35,51 @@ _SESSION_METADATA_KEY = "efferva.session"
 _CREDENTIAL_PROXY_METADATA_KEY = "efferva.credential-proxy"
 
 
-class _OpenSandboxExecTransport(ProcessTransport):
-    def __init__(self, sandbox: Sandbox, spec: ProcessSpec, handle: ProcessHandle) -> None:
-        self._sandbox = sandbox
-        self._spec = spec
-        self._handle = handle
-        self._queue: asyncio.Queue[TransportEvent | None] = asyncio.Queue()
-        self._started = asyncio.Event()
-        self._execution_id: str | None = None
-        self._stdin_path = (
-            f"/tmp/efferva-{handle.id}.stdin"
-            if spec.pipe_stdin or spec.initial_stdin is not None
-            else None
-        )
-        self._stderr_path = f"/tmp/efferva-{handle.id}.stderr"
-        self._task = asyncio.create_task(self._run())
+class OpenSandboxRuntime:
+    def __init__(self, sandbox: Sandbox) -> None:
+        self.sandbox = sandbox
 
-    async def wait_started(self) -> None:
-        started = asyncio.create_task(self._started.wait())
-        try:
-            done, _ = await asyncio.wait(
-                {started, self._task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if self._task in done and not self._started.is_set():
-                await self._task
-                raise RuntimeError("OpenSandbox command exited before it started")
-            await started
-        finally:
-            if not started.done():
-                started.cancel()
-
-    async def _run(self) -> None:
-        command = shlex.join(self._spec.argv)
-        try:
-            if self._stdin_path is None:
-                await self._run_foreground(command)
-            else:
-                await self._run_background(command)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self._started.set()
-            await self._queue.put(
-                TransportOutput("stderr", f"OpenSandbox command failed: {error}".encode())
-            )
-            await self._queue.put(TransportExited(1))
-        finally:
-            await self._queue.put(None)
-
-    async def _run_foreground(self, command: str) -> None:
-        async def on_init(event: Any) -> None:
-            self._execution_id = str(event.id)
-            self._started.set()
+    async def run_command(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: str,
+        env: Mapping[str, str] | None = None,
+        uid: int | None = None,
+        gid: int | None = None,
+    ) -> CommandResult:
+        stdout = bytearray()
+        stderr = bytearray()
 
         async def on_stdout(message: Any) -> None:
-            await self._queue.put(TransportOutput("stdout", message.text.encode()))
+            stdout.extend(message.text.encode())
 
         async def on_stderr(message: Any) -> None:
-            await self._queue.put(TransportOutput("stderr", message.text.encode()))
+            stderr.extend(message.text.encode())
 
         async def on_error(error: Any) -> None:
             message = getattr(error, "value", None) or str(error)
-            await self._queue.put(TransportOutput("stderr", message.encode()))
+            stderr.extend(message.encode())
 
-        execution = await self._sandbox.commands.run(
-            command,
+        execution = await self.sandbox.commands.run(
+            shlex.join(argv),
             opts=RunCommandOpts(
-                working_directory=self._spec.cwd,
-                envs=dict(self._spec.env) or None,
-                uid=self._spec.uid,
-                gid=self._spec.gid,
+                working_directory=cwd,
+                envs=dict(env or {}) or None,
+                uid=uid,
+                gid=gid,
             ),
             handlers=ExecutionHandlers(
-                on_init=on_init,
                 on_stdout=on_stdout,
                 on_stderr=on_stderr,
                 on_error=on_error,
                 skip_accumulation=True,
             ),
         )
-        if self._execution_id is None and execution.id is not None:
-            self._execution_id = str(execution.id)
-        self._started.set()
         exit_code = execution.exit_code
         if exit_code is None:
             exit_code = 1 if execution.error is not None else 0
-        await self._queue.put(TransportExited(exit_code))
-
-    async def _run_background(self, command: str) -> None:
-        assert self._stdin_path is not None
-        command = (
-            f"stdin_path={shlex.quote(self._stdin_path)}; "
-            f"stderr_path={shlex.quote(self._stderr_path)}; "
-            'rm -f "$stdin_path" "$stderr_path"; '
-            'mkfifo -m 600 "$stdin_path"; '
-            'exec 3<> "$stdin_path"; '
-            f'exec {command} <&3 2> "$stderr_path"'
-        )
-        execution = await self._sandbox.commands.run(
-            command,
-            opts=RunCommandOpts(
-                background=True,
-                working_directory=self._spec.cwd,
-                envs=dict(self._spec.env) or None,
-                uid=self._spec.uid,
-                gid=self._spec.gid,
-            ),
-        )
-        if execution.id is None:
-            raise RuntimeError("OpenSandbox background command has no execution id")
-        self._execution_id = str(execution.id)
-        self._started.set()
-        cursor: int | None = None
-
-        async def emit_stdout() -> None:
-            nonlocal cursor
-            logs = await self._sandbox.commands.get_background_command_logs(
-                self._execution_id,
-                cursor,
-            )
-            if logs.content:
-                await self._queue.put(TransportOutput("stdout", logs.content.encode()))
-            if logs.cursor is not None:
-                cursor = logs.cursor
-
-        while True:
-            await emit_stdout()
-            status = await self._sandbox.commands.get_command_status(self._execution_id)
-            if status.running is False:
-                await emit_stdout()
-                with contextlib.suppress(Exception):
-                    stderr = await self._sandbox.files.read_bytes(self._stderr_path)
-                    if stderr:
-                        await self._queue.put(TransportOutput("stderr", stderr))
-                exit_code = status.exit_code
-                if exit_code is None:
-                    exit_code = 1 if status.error else 0
-                await self._queue.put(TransportExited(exit_code))
-                return
-            await asyncio.sleep(0.2)
-
-    async def events(self) -> AsyncIterator[TransportEvent]:
-        while (event := await self._queue.get()) is not None:
-            yield event
-
-    async def write(self, data: bytes) -> None:
-        if self._stdin_path is None:
-            raise BrokenPipeError("stdin is not enabled for this process")
-        script = (
-            "import base64,sys; "
-            "data=base64.b64decode(sys.argv[2]); "
-            "open(sys.argv[1], 'wb', buffering=0).write(data)"
-        )
-        execution = await self._sandbox.commands.run(
-            shlex.join(("python3", "-c", script, self._stdin_path, _b64(data))),
-            opts=RunCommandOpts(timeout=timedelta(seconds=10)),
-        )
-        if execution.exit_code not in {None, 0}:
-            raise BrokenPipeError("OpenSandbox stdin writer failed")
-
-    async def resize(self, cols: int, rows: int) -> None:
-        raise RuntimeError("OpenSandbox execd does not expose PTY resize")
-
-    async def terminate(self) -> None:
-        if self._execution_id is not None:
-            await self._sandbox.commands.interrupt(self._execution_id)
-
-    async def close(self) -> None:
-        if not self._task.done():
-            with contextlib.suppress(Exception):
-                await self.terminate()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await self._task
-
-
-class OpenSandboxRuntime(BufferedSandboxRuntime):
-    def __init__(self, sandbox: Sandbox, workspace_path: str) -> None:
-        super().__init__(workspace_path)
-        self.sandbox = sandbox
-
-    async def _launch(
-        self,
-        spec: ProcessSpec,
-        handle: ProcessHandle,
-    ) -> ProcessTransport:
-        if spec.tty:
-            raise RuntimeError("OpenSandbox provider does not support interactive PTY")
-        transport = _OpenSandboxExecTransport(self.sandbox, spec, handle)
-        await transport.wait_started()
-        return transport
+        return CommandResult(bytes(stdout), bytes(stderr), exit_code)
 
     async def read_file(self, path: str) -> bytes:
         return await self.sandbox.files.read_bytes(path)
@@ -243,7 +88,9 @@ class OpenSandboxRuntime(BufferedSandboxRuntime):
         await self.sandbox.files.write_file(path, data, mode=644)
 
     async def list_directory(self, path: str) -> list[DirectoryEntry]:
-        entries = await self.sandbox.files.list_directory(DirectoryListEntry(path=path, depth=1))
+        entries = await self.sandbox.files.list_directory(
+            DirectoryListEntry(path=path, depth=1)
+        )
         return [
             DirectoryEntry(
                 name=os.path.basename(entry.path.rstrip("/")),
@@ -279,24 +126,24 @@ class OpenSandboxRuntime(BufferedSandboxRuntime):
         return endpoint.endpoint, dict(endpoint.headers)
 
     async def close(self) -> None:
-        await super().close()
         await self.sandbox.close()
 
 
 class OpenSandboxProvider:
     name = "opensandbox"
     capabilities = SandboxCapabilities(
-        streaming_exec=True,
-        interactive_pty=False,
-        persistent_workspace=True,
-        snapshots=True,
-        suspend_resume=True,
+        persistent_session_volume=True,
         port_forwarding=True,
+        file_operations=True,
+        suspend_resume=True,
         network_policy=True,
-        stdin=True,
     )
 
     def __init__(self, settings: Settings) -> None:
+        if not settings.opensandbox_server_url:
+            raise ValueError(
+                "EFFERVA_OPENSANDBOX_SERVER_URL is required for the OpenSandbox provider"
+            )
         self._settings = settings
         self._lock = asyncio.Lock()
         self._manager: SandboxManager | None = None
@@ -307,14 +154,11 @@ class OpenSandboxProvider:
         self,
         context: SandboxContext,
     ) -> SessionVolumeHandle:
-        volume = f"efferva-session-{context.session_id.hex}"
         return SessionVolumeHandle(
             provider=self.name,
-            external_ref=volume,
+            external_ref=f"efferva-session-{context.session_id.hex}",
             state={
                 "mountPath": self._settings.session_volume_path,
-                "workspacePath": context.workspace_path,
-                "codexHomePath": self._settings.codex_home_path,
                 "size": self._settings.session_volume_size,
                 "deletedRetentionDays": (
                     self._settings.deleted_session_volume_retention_days
@@ -386,10 +230,7 @@ class OpenSandboxProvider:
             provider=self.name,
             external_ref=sandbox.id,
             session_id=context.session_id,
-            state={
-                "workspacePath": context.workspace_path,
-                "credentialProxy": credential_proxy_active,
-            },
+            state={"credentialProxy": credential_proxy_active},
         )
 
     async def connect(self, sandbox: SandboxHandle) -> OpenSandboxRuntime:
@@ -403,10 +244,7 @@ class OpenSandboxProvider:
                 connection_config=self._connection_config(),
             )
             self._sandboxes[sandbox.external_ref] = client
-        runtime = OpenSandboxRuntime(
-            client,
-            str(sandbox.state.get("workspacePath", self._settings.workspace_path)),
-        )
+        runtime = OpenSandboxRuntime(client)
         self._runtimes[sandbox.external_ref] = runtime
         return runtime
 
@@ -448,6 +286,7 @@ class OpenSandboxProvider:
         return self._manager
 
     def _connection_config(self) -> ConnectionConfig:
+        assert self._settings.opensandbox_server_url is not None
         return ConnectionConfig(
             domain=self._settings.opensandbox_server_url,
             api_key=self._settings.opensandbox_api_key,
@@ -504,9 +343,3 @@ class OpenSandboxProvider:
                 }
             ],
         )
-
-
-def _b64(data: bytes) -> str:
-    import base64
-
-    return base64.b64encode(data).decode()

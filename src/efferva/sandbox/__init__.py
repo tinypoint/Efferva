@@ -1,24 +1,14 @@
-from efferva.sandbox.conformance import (
-    ProviderConformanceReport,
-    run_provider_conformance,
-)
 from efferva.sandbox.manager import (
     SandboxControlPlane,
     create_sandbox_control_plane,
-    create_sandbox_provider,
 )
-from efferva.sandbox.registry import register_sandbox_provider
-from efferva.sandbox.types import (
+from efferva.sandbox.protocol import (
+    CommandResult,
     DirectoryEntry,
     FileMetadata,
-    ProcessHandle,
-    ProcessOutput,
-    ProcessOutputChunk,
-    ProcessSpec,
     SandboxCapabilities,
     SandboxContext,
     SandboxEnvironment,
-    SandboxFiles,
     SandboxHandle,
     SandboxProvider,
     SandboxRuntime,
@@ -26,24 +16,16 @@ from efferva.sandbox.types import (
 )
 
 __all__ = [
+    "CommandResult",
     "DirectoryEntry",
     "FileMetadata",
-    "ProcessHandle",
-    "ProcessOutput",
-    "ProcessOutputChunk",
-    "ProcessSpec",
-    "ProviderConformanceReport",
     "SandboxCapabilities",
     "SandboxContext",
     "SandboxControlPlane",
     "SandboxEnvironment",
-    "SandboxFiles",
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
     "SessionVolumeHandle",
     "create_sandbox_control_plane",
-    "create_sandbox_provider",
-    "register_sandbox_provider",
-    "run_provider_conformance",
 ]

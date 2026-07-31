@@ -1,1 +1,0 @@
-"""Packaged Efferva database migrations."""

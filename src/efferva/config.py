@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = "postgresql://efferva:efferva@localhost:5432/efferva"
+    database_url: str
     codex_version: str = "0.146.0"
     codex_release_target: str | None = None
     codex_archive_sha256: str | None = None
@@ -23,13 +23,12 @@ class Settings(BaseSettings):
     codex_config_file: Path | None = None
     codex_openai_base_url: str | None = None
     codex_model: str | None = None
-    sandbox_provider: str = "opensandbox"
     sandbox_image: str = "python:3.13-slim-bookworm"
     sandbox_cpu_limit: str = "2"
     sandbox_memory_limit: str = "2g"
     sandbox_uid: int = 1000
     sandbox_gid: int = 1000
-    opensandbox_server_url: str = "http://localhost:8080"
+    opensandbox_server_url: str | None = None
     opensandbox_api_key: str | None = None
     opensandbox_use_server_proxy: bool = True
     opensandbox_credential_proxy_enabled: bool = True
@@ -41,7 +40,6 @@ class Settings(BaseSettings):
     session_volume_size: str = "10Gi"
     sandbox_idle_timeout_seconds: int = 12 * 60 * 60
     deleted_session_volume_retention_days: int = 30
-    public_base_url: str = "http://localhost:8080"
 
 
 @lru_cache

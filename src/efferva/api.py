@@ -17,7 +17,7 @@ from efferva.models import (
     SessionCreate,
     ThreadCreate,
 )
-from efferva.repository import AccessMode, AuthorizedRepository, SystemRepository
+from efferva.repository import AccessMode, SessionRepository
 from efferva.runtime import CodexProxy
 
 
@@ -186,19 +186,16 @@ async def _agui_stream(
 def create_api_router(
     *,
     identity: IdentityResolver,
-    system_repository: Callable[[], SystemRepository],
+    repository: Callable[[], SessionRepository],
     codex_proxy: Callable[[], CodexProxy],
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
     PrincipalParameter = Annotated[Principal, Depends(resolve_principal)]
 
-    def authorized(principal: Principal) -> AuthorizedRepository:
-        return system_repository().for_principal(principal)
-
     @router.get("/healthz")
     async def healthz() -> dict[str, str]:
-        await system_repository().ping()
+        await repository().ping()
         if not codex_proxy().healthy:
             raise HTTPException(status_code=503, detail="Codex proxy is not healthy")
         return {"status": "ok"}
@@ -221,28 +218,28 @@ def create_api_router(
         payload: SessionCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        return await authorized(principal).create_session(payload.name)
+        return await repository().create_session(principal, payload.name)
 
     @router.get("/api/sessions", response_model=list[Session])
     async def list_sessions(
         principal: PrincipalParameter,
         scope: Literal["mine", "tenant"] = Query(default="mine"),
     ) -> list[dict[str, Any]]:
-        return await authorized(principal).list_sessions(scope)
+        return await repository().list_sessions(principal, scope)
 
     @router.get("/api/sessions/{session_id}", response_model=Session)
     async def get_session(
         session_id: UUID,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        return await authorized(principal).get_session(session_id)
+        return await repository().get_session(principal, session_id)
 
     @router.get("/api/sessions/{session_id}/threads")
     async def list_threads(
         session_id: UUID,
         principal: PrincipalParameter,
     ) -> list[dict[str, Any]]:
-        session = await authorized(principal).get_session(session_id, touch=True)
+        session = await repository().get_session(principal, session_id, touch=True)
         threads = await codex_proxy().list_threads(session)
         return [_thread_summary(thread, session_id) for thread in threads]
 
@@ -252,7 +249,8 @@ def create_api_router(
         payload: ThreadCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        session = await authorized(principal).get_session(
+        session = await repository().get_session(
+            principal,
             session_id,
             mode=AccessMode.WRITE,
             touch=True,
@@ -272,7 +270,7 @@ def create_api_router(
         thread_id: str,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        session = await authorized(principal).get_session(session_id, touch=True)
+        session = await repository().get_session(principal, session_id, touch=True)
         thread = await codex_proxy().read_thread(session, thread_id)
         return _thread_detail(thread, session_id)
 
@@ -283,7 +281,8 @@ def create_api_router(
         payload: RunCreate,
         principal: PrincipalParameter,
     ) -> StreamingResponse:
-        session = await authorized(principal).get_session(
+        session = await repository().get_session(
+            principal,
             session_id,
             mode=AccessMode.WRITE,
             touch=True,
@@ -311,7 +310,8 @@ def create_api_router(
         turn_id: str,
         principal: PrincipalParameter,
     ) -> dict[str, bool]:
-        session = await authorized(principal).get_session(
+        session = await repository().get_session(
+            principal,
             session_id,
             mode=AccessMode.WRITE,
             touch=True,
@@ -339,7 +339,8 @@ def create_api_router(
             session_id = UUID(str(raw_session_id))
         except ValueError as error:
             raise HTTPException(status_code=422, detail="sessionId must be a UUID") from error
-        session = await authorized(principal).get_session(
+        session = await repository().get_session(
+            principal,
             session_id,
             mode=AccessMode.WRITE,
             touch=True,

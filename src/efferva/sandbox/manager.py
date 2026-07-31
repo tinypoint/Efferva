@@ -4,8 +4,7 @@ import asyncio
 from uuid import UUID
 
 from efferva.config import Settings
-from efferva.sandbox.registry import create_registered_provider
-from efferva.sandbox.types import (
+from efferva.sandbox.protocol import (
     SandboxContext,
     SandboxEnvironment,
     SandboxProvider,
@@ -53,18 +52,16 @@ class SandboxControlPlane:
             await close()
 
 
-def create_sandbox_provider(settings: Settings) -> SandboxProvider:
-    name = settings.sandbox_provider.lower()
-    if name == "opensandbox":
+def create_sandbox_control_plane(
+    settings: Settings,
+    provider: SandboxProvider | None = None,
+) -> SandboxControlPlane:
+    if provider is None:
         try:
-            from efferva.sandbox.opensandbox import OpenSandboxProvider
+            from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
         except ImportError as error:
             raise RuntimeError(
                 "The OpenSandbox provider requires the 'efferva[opensandbox]' extra"
             ) from error
-        return OpenSandboxProvider(settings)
-    return create_registered_provider(name)
-
-
-def create_sandbox_control_plane(settings: Settings) -> SandboxControlPlane:
-    return SandboxControlPlane(settings, create_sandbox_provider(settings))
+        provider = OpenSandboxProvider(settings)
+    return SandboxControlPlane(settings, provider)
