@@ -27,7 +27,6 @@ class Session(BaseModel):
 
 
 class ThreadCreate(BaseModel):
-    title: str | None = Field(default=None, max_length=200)
     workspace: str | None = Field(default=None, min_length=1, max_length=4096)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     reasoning_effort: Literal[

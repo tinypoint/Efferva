@@ -115,11 +115,15 @@ function openCreator(kind) {
   dialog.dataset.kind = kind;
   $("#create-kind").textContent = thread ? currentSession()?.name : "Workspace";
   $("#create-title").textContent = thread ? "Create thread" : "Create session";
-  $("#create-name").value = thread ? "New thread" : "New session";
+  $("#name-field").classList.toggle("hidden", thread);
+  $("#create-name").required = !thread;
+  $("#create-name").value = thread ? "" : "New session";
   $("#create-workspace").value = "";
   $("#workspace-field").classList.toggle("hidden", !thread);
   dialog.showModal();
-  $("#create-name").select();
+  const input = thread ? $("#create-workspace") : $("#create-name");
+  input.focus();
+  input.select();
 }
 
 function parseSseFrame(frame) {
@@ -197,6 +201,7 @@ $("#create-form").addEventListener("submit", async (event) => {
   const name = $("#create-name").value.trim();
 
   if (dialog.dataset.kind === "session") {
+    if (!name) return;
     const session = await request("/sessions", {
       method: "POST",
       body: JSON.stringify({ name }),
@@ -211,7 +216,6 @@ $("#create-form").addEventListener("submit", async (event) => {
   const thread = await request(`/sessions/${state.sessionId}/threads`, {
     method: "POST",
     body: JSON.stringify({
-      title: name,
       ...(workspace ? { workspace } : {}),
     }),
   });

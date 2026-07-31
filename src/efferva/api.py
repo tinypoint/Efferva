@@ -261,7 +261,6 @@ def create_api_router(
         )
         thread = await codex_proxy().start_thread(
             session,
-            title=payload.title,
             workspace=payload.workspace,
             model=payload.model,
             reasoning_effort=payload.reasoning_effort,

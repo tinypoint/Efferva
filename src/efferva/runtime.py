@@ -84,7 +84,6 @@ class CodexProxy:
         self,
         session: Mapping[str, Any],
         *,
-        title: str | None = None,
         workspace: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
@@ -103,13 +102,6 @@ class CodexProxy:
             )
             result = await self._rpc(websocket, "thread/start", params)
             thread = dict(result["thread"])
-            if title:
-                await self._rpc(
-                    websocket,
-                    "thread/name/set",
-                    {"threadId": thread["id"], "name": title},
-                )
-                thread["name"] = title
         return thread
 
     async def read_thread(

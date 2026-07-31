@@ -222,9 +222,12 @@ function openCreator(kind) {
   $("#create-eyebrow").textContent = isSession ? "共享工作区" : "当前 Session";
   $("#create-title").textContent = isSession ? "新建 Session" : "新建 Thread";
   $("#create-label").textContent = isSession ? "Session 名称" : "Thread 名称";
-  $("#create-name").value = isSession ? "New workspace" : "New thread";
+  $("#create-label").classList.toggle("hidden", !isSession);
+  $("#create-name").classList.toggle("hidden", !isSession);
+  $("#create-name").required = isSession;
+  $("#create-name").value = isSession ? "New workspace" : "";
   dialog.showModal();
-  $("#create-name").select();
+  if (isSession) $("#create-name").select();
 }
 
 async function streamTurn(prompt) {
@@ -318,8 +321,8 @@ $("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const dialog = $("#create-dialog");
   const name = $("#create-name").value.trim();
-  if (!name) return;
   if (dialog.dataset.kind === "session") {
+    if (!name) return;
     const session = await request("/api/sessions", {
       method: "POST",
       body: JSON.stringify({ name }),
@@ -331,7 +334,7 @@ $("#create-form").addEventListener("submit", async (event) => {
   }
   const thread = await request(`/api/sessions/${state.sessionId}/threads`, {
     method: "POST",
-    body: JSON.stringify({ title: name }),
+    body: JSON.stringify({}),
   });
   dialog.close();
   state.threads.unshift(thread);
