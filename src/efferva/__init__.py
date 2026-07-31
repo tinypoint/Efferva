@@ -21,7 +21,7 @@ from efferva.sandbox import (
     SandboxHandle,
     SandboxProvider,
     SandboxRuntime,
-    WorkspaceHandle,
+    SessionVolumeHandle,
     run_provider_conformance,
 )
 
@@ -44,6 +44,6 @@ __all__ = [
     "SandboxRuntime",
     "SkillRoot",
     "UnauthenticatedError",
-    "WorkspaceHandle",
+    "SessionVolumeHandle",
     "run_provider_conformance",
 ]

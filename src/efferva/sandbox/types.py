@@ -41,14 +41,12 @@ class SandboxCapabilities:
 @dataclass(frozen=True, slots=True)
 class SandboxContext:
     session_id: UUID
-    workspace_id: UUID
-    workspace_ref: str
     workspace_path: str = "/home/sandbox/workspace"
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
-class WorkspaceHandle:
+class SessionVolumeHandle:
     provider: str
     external_ref: str
     state: JsonObject = field(default_factory=dict)
@@ -58,7 +56,7 @@ class WorkspaceHandle:
 class SandboxHandle:
     provider: str
     external_ref: str
-    workspace_id: UUID
+    session_id: UUID
     state: JsonObject = field(default_factory=dict)
 
 
@@ -188,12 +186,15 @@ class SandboxProvider(Protocol):
     name: str
     capabilities: SandboxCapabilities
 
-    async def ensure_workspace(self, context: SandboxContext) -> WorkspaceHandle: ...
+    async def ensure_session_volume(
+        self,
+        context: SandboxContext,
+    ) -> SessionVolumeHandle: ...
 
     async def start(
         self,
         context: SandboxContext,
-        workspace: WorkspaceHandle,
+        volume: SessionVolumeHandle,
     ) -> SandboxHandle: ...
 
     async def connect(self, sandbox: SandboxHandle) -> SandboxRuntime: ...

@@ -103,7 +103,7 @@ class Efferva:
                     codex_version=codex_release.version,
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
-                sandboxes = create_sandbox_control_plane(settings, repository)
+                sandboxes = create_sandbox_control_plane(settings)
                 await sandboxes.start()
                 proxy = CodexProxy(
                     codex_release.binary,

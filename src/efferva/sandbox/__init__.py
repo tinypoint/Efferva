@@ -22,7 +22,7 @@ from efferva.sandbox.types import (
     SandboxHandle,
     SandboxProvider,
     SandboxRuntime,
-    WorkspaceHandle,
+    SessionVolumeHandle,
 )
 
 __all__ = [
@@ -41,7 +41,7 @@ __all__ = [
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
-    "WorkspaceHandle",
+    "SessionVolumeHandle",
     "create_sandbox_control_plane",
     "create_sandbox_provider",
     "register_sandbox_provider",

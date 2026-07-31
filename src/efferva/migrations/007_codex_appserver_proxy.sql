@@ -10,3 +10,8 @@ DROP TABLE IF EXISTS run_events;
 DROP TABLE IF EXISTS runs;
 DROP TABLE IF EXISTS app_threads;
 DROP TABLE IF EXISTS session_leases;
+DROP TABLE IF EXISTS sandbox_leases;
+DROP TABLE IF EXISTS workspace_bindings;
+
+ALTER TABLE app_sessions
+    DROP COLUMN workspace_ref;

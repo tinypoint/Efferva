@@ -4,8 +4,6 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from psycopg.types.json import Jsonb
-
 from efferva.db import Database
 from efferva.identity import Capability, ForbiddenError, Principal
 
@@ -24,7 +22,7 @@ class AccessMode(StrEnum):
 
 
 class AuthorizedRepository:
-    """Principal-scoped access to Efferva-owned Session routing metadata."""
+    """Principal-scoped access to Efferva-owned Session metadata."""
 
     def __init__(
         self,
@@ -69,10 +67,9 @@ class AuthorizedRepository:
                 """
                 INSERT INTO app_sessions(
                     id, tenant_id, owner_issuer, owner_subject, name,
-                    workspace_ref, codex_version, codex_runtime_sha256,
-                    last_active_at
+                    codex_version, codex_runtime_sha256, last_active_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
                 RETURNING *
                 """,
                 (
@@ -81,7 +78,6 @@ class AuthorizedRepository:
                     self.principal.issuer,
                     self.principal.subject,
                     name,
-                    f"session-{session_id}",
                     self._codex_version,
                     self._codex_runtime_sha256,
                 ),
@@ -140,14 +136,6 @@ class AuthorizedRepository:
                     """,
                     (session_id,),
                 )
-                await connection.execute(
-                    """
-                    UPDATE sandbox_leases
-                    SET status = 'ready', updated_at = now()
-                    WHERE workspace_id = %s
-                    """,
-                    (session_id,),
-                )
                 await connection.commit()
         if row is None:
             raise NotFoundError(f"session {session_id} not found")
@@ -155,7 +143,7 @@ class AuthorizedRepository:
 
 
 class SystemRepository:
-    """System access for Session routing and Sandbox lifecycle only."""
+    """System entry point for health checks and Principal-scoped Session access."""
 
     def __init__(
         self,
@@ -179,135 +167,3 @@ class SystemRepository:
     async def ping(self) -> None:
         async with self._database.connection() as connection:
             await connection.execute("SELECT 1")
-
-    async def upsert_workspace_binding(
-        self,
-        session_id: UUID,
-        *,
-        workspace_id: UUID,
-        provider: str,
-        external_ref: str,
-        state: dict[str, Any],
-        status: str,
-    ) -> dict[str, Any]:
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO workspace_bindings(
-                    workspace_id, session_id, provider, external_ref,
-                    state_json, status
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (session_id) DO UPDATE
-                SET provider = EXCLUDED.provider,
-                    external_ref = EXCLUDED.external_ref,
-                    state_json = EXCLUDED.state_json,
-                    status = EXCLUDED.status,
-                    updated_at = now()
-                RETURNING *
-                """,
-                (
-                    workspace_id,
-                    session_id,
-                    provider,
-                    external_ref,
-                    Jsonb(state),
-                    status,
-                ),
-            )
-            row = await cursor.fetchone()
-            await connection.commit()
-        return row
-
-    async def upsert_sandbox_binding(
-        self,
-        *,
-        workspace_id: UUID,
-        provider: str,
-        external_ref: str,
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO sandbox_leases(
-                    sandbox_id, workspace_id, provider, external_ref,
-                    state_json, owner_id, status, fencing_token, expires_at
-                )
-                VALUES (%s, %s, %s, %s, %s, NULL, 'ready', 0, now())
-                ON CONFLICT (workspace_id) DO UPDATE
-                SET provider = EXCLUDED.provider,
-                    external_ref = EXCLUDED.external_ref,
-                    state_json = EXCLUDED.state_json,
-                    owner_id = NULL,
-                    status = 'ready',
-                    fencing_token = 0,
-                    expires_at = now(),
-                    updated_at = now()
-                RETURNING *
-                """,
-                (
-                    workspace_id,
-                    workspace_id,
-                    provider,
-                    external_ref,
-                    Jsonb(state),
-                ),
-            )
-            row = await cursor.fetchone()
-            await connection.commit()
-        return row
-
-    async def claim_idle_sandboxes(self, idle_timeout_seconds: int) -> list[dict[str, Any]]:
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                WITH idle AS (
-                    SELECT sandbox.workspace_id
-                    FROM sandbox_leases sandbox
-                    JOIN workspace_bindings workspace
-                      ON workspace.workspace_id = sandbox.workspace_id
-                    JOIN app_sessions session ON session.id = workspace.session_id
-                    WHERE sandbox.status = 'ready'
-                      AND session.last_active_at
-                          < now() - make_interval(secs => %s)
-                    FOR UPDATE OF sandbox SKIP LOCKED
-                )
-                UPDATE sandbox_leases sandbox
-                SET status = 'reaping', updated_at = now()
-                FROM idle
-                WHERE sandbox.workspace_id = idle.workspace_id
-                RETURNING sandbox.*
-                """,
-                (idle_timeout_seconds,),
-            )
-            rows = list(await cursor.fetchall())
-            await connection.commit()
-        return rows
-
-    async def finish_sandbox_reap(
-        self,
-        workspace_id: UUID,
-        external_ref: str,
-        *,
-        succeeded: bool,
-    ) -> None:
-        async with self._database.connection() as connection:
-            if succeeded:
-                await connection.execute(
-                    """
-                    DELETE FROM sandbox_leases
-                    WHERE workspace_id = %s AND external_ref = %s
-                    """,
-                    (workspace_id, external_ref),
-                )
-            else:
-                await connection.execute(
-                    """
-                    UPDATE sandbox_leases
-                    SET status = 'ready', updated_at = now()
-                    WHERE workspace_id = %s AND external_ref = %s
-                    """,
-                    (workspace_id, external_ref),
-                )
-            await connection.commit()

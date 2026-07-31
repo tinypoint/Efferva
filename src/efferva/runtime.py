@@ -217,7 +217,6 @@ class CodexProxy:
         async with lock:
             sandbox = await self._sandboxes.ensure(
                 session_id,
-                str(session["workspace_ref"]),
             )
             await self._install_and_start(sandbox)
             return sandbox
@@ -299,8 +298,6 @@ class CodexProxy:
             sandbox,
             ("sh", "-lc", command),
             env=environment,
-            uid=self._settings.sandbox_uid,
-            gid=self._settings.sandbox_gid,
         )
 
     async def _run_command(

@@ -19,7 +19,6 @@ class Session(BaseModel):
     owner_subject: str
     name: str
     status: str
-    workspace_ref: str
     codex_version: str
     codex_runtime_sha256: str
     last_active_at: datetime

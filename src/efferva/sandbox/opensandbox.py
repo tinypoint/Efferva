@@ -38,11 +38,10 @@ from efferva.sandbox.types import (
     SandboxCapabilities,
     SandboxContext,
     SandboxHandle,
-    WorkspaceHandle,
+    SessionVolumeHandle,
 )
 
 _SESSION_METADATA_KEY = "efferva.session"
-_WORKSPACE_METADATA_KEY = "efferva.workspace"
 _CREDENTIAL_PROXY_METADATA_KEY = "efferva.credential-proxy"
 
 
@@ -304,9 +303,12 @@ class OpenSandboxProvider:
         self._sandboxes: dict[str, Sandbox] = {}
         self._runtimes: dict[str, OpenSandboxRuntime] = {}
 
-    async def ensure_workspace(self, context: SandboxContext) -> WorkspaceHandle:
-        volume = f"efferva-workspace-{context.workspace_id.hex}"
-        return WorkspaceHandle(
+    async def ensure_session_volume(
+        self,
+        context: SandboxContext,
+    ) -> SessionVolumeHandle:
+        volume = f"efferva-session-{context.session_id.hex}"
+        return SessionVolumeHandle(
             provider=self.name,
             external_ref=volume,
             state={
@@ -323,7 +325,7 @@ class OpenSandboxProvider:
     async def start(
         self,
         context: SandboxContext,
-        workspace: WorkspaceHandle,
+        volume: SessionVolumeHandle,
     ) -> SandboxHandle:
         async with self._lock:
             info = await self._find_sandbox(context)
@@ -345,7 +347,6 @@ class OpenSandboxProvider:
                     timeout=None,
                     metadata={
                         _SESSION_METADATA_KEY: str(context.session_id),
-                        _WORKSPACE_METADATA_KEY: str(context.workspace_id),
                         _CREDENTIAL_PROXY_METADATA_KEY: str(
                             credential_proxy is not None
                         ).lower(),
@@ -361,9 +362,9 @@ class OpenSandboxProvider:
                     ),
                     volumes=[
                         Volume(
-                            name="workspace",
+                            name="session-data",
                             pvc=PVC(
-                                claim_name=workspace.external_ref,
+                                claim_name=volume.external_ref,
                                 create_if_not_exists=True,
                                 delete_on_sandbox_termination=False,
                                 storage=self._settings.session_volume_size,
@@ -384,7 +385,7 @@ class OpenSandboxProvider:
         return SandboxHandle(
             provider=self.name,
             external_ref=sandbox.id,
-            workspace_id=context.workspace_id,
+            session_id=context.session_id,
             state={
                 "workspacePath": context.workspace_path,
                 "credentialProxy": credential_proxy_active,
@@ -432,7 +433,7 @@ class OpenSandboxProvider:
         result = await (await self._get_manager()).list_sandbox_infos(
             SandboxFilter(
                 states=["RUNNING", "PAUSED"],
-                metadata={_WORKSPACE_METADATA_KEY: str(context.workspace_id)},
+                metadata={_SESSION_METADATA_KEY: str(context.session_id)},
                 page_size=10,
                 page=1,
             )

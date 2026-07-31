@@ -27,23 +27,21 @@ async def run_provider_conformance(
 
     context = context or SandboxContext(
         session_id=uuid4(),
-        workspace_id=uuid4(),
-        workspace_ref=f"conformance-{uuid4().hex}",
     )
     checks: list[str] = []
-    workspace = await provider.ensure_workspace(context)
+    volume = await provider.ensure_session_volume(context)
     sandbox = None
     try:
-        repeated_workspace = await provider.ensure_workspace(context)
-        assert repeated_workspace.external_ref == workspace.external_ref
-        assert workspace.provider == provider.name
-        checks.append("workspace-idempotency")
+        repeated_volume = await provider.ensure_session_volume(context)
+        assert repeated_volume.external_ref == volume.external_ref
+        assert volume.provider == provider.name
+        checks.append("session-volume-idempotency")
 
         assert provider.capabilities.coding_agent_compatible
         checks.append("capability-negotiation")
 
-        sandbox = await provider.start(context, workspace)
-        repeated_sandbox = await provider.start(context, workspace)
+        sandbox = await provider.start(context, volume)
+        repeated_sandbox = await provider.start(context, volume)
         assert repeated_sandbox.external_ref == sandbox.external_ref
         runtime = await provider.connect(sandbox)
         checks.append("sandbox-idempotency")
@@ -138,7 +136,7 @@ async def run_provider_conformance(
         checks.append("process-termination")
 
         await provider.stop(sandbox)
-        sandbox = await provider.start(context, workspace)
+        sandbox = await provider.start(context, volume)
         runtime = await provider.connect(sandbox)
         assert await runtime.read_file(proof_path) == b"persistent-workspace"
         checks.append("stop-start-persistence")
@@ -147,9 +145,9 @@ async def run_provider_conformance(
     finally:
         if sandbox is not None:
             await provider.destroy(sandbox)
-        destroy_workspace = getattr(provider, "destroy_workspace", None)
-        if destroy_workspace is not None:
-            await destroy_workspace(workspace)
+        destroy_volume = getattr(provider, "destroy_session_volume", None)
+        if destroy_volume is not None:
+            await destroy_volume(volume)
 
 
 async def _collect(
