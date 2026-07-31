@@ -1,7 +1,8 @@
 from importlib.resources import files
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from efferva import Efferva, Principal
 from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
@@ -24,14 +25,20 @@ async def index() -> FileResponse:
     return FileResponse(str(static_dir.joinpath("index.html")))
 
 
-@app.get("/assets/{asset_name}", include_in_schema=False)
-async def asset(asset_name: str) -> FileResponse:
-    if asset_name not in {"app.js", "style.css"}:
-        raise HTTPException(status_code=404, detail="asset not found")
-    return FileResponse(str(static_dir.joinpath(asset_name)))
+app.mount(
+    "/assets",
+    StaticFiles(directory=str(static_dir.joinpath("assets"))),
+    name="assets",
+)
 
 
 Efferva(
     identity=resolve_local_principal,
     sandbox=OpenSandboxProvider(),
 ).install(app, prefix="/agent")
+
+
+@app.get("/{spa_path:path}", include_in_schema=False)
+async def spa_fallback(spa_path: str) -> FileResponse:
+    del spa_path
+    return FileResponse(str(static_dir.joinpath("index.html")))

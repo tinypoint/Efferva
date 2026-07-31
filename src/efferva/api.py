@@ -63,29 +63,61 @@ async def _agui_stream(
     run_id: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    collaboration_mode: str | None = None,
+    workspace: str | None = None,
 ) -> AsyncIterator[str]:
     seq = 0
     message_id: str | None = None
     saw_delta = False
+    active_thread_id = thread_id
     yield _sse(
         seq := seq + 1,
         {
             "type": "RUN_STARTED",
             "runId": run_id,
             "threadId": thread_id,
-            "input": {"prompt": prompt},
         },
     )
     try:
-        async for notification in proxy.stream_turn(
-            session,
-            thread_id,
-            prompt,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        ):
+        notifications = (
+            proxy.stream_new_turn(
+                session,
+                prompt,
+                workspace=workspace,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                collaboration_mode=collaboration_mode,
+            )
+            if thread_id == "new"
+            else proxy.stream_turn(
+                session,
+                thread_id,
+                prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                collaboration_mode=collaboration_mode,
+            )
+        )
+        async for notification in notifications:
             method = notification["method"]
             params = notification.get("params") or {}
+            if method == "efferva/thread-created":
+                thread = _thread_summary(
+                    dict(params["thread"]),
+                    UUID(str(session["id"])),
+                )
+                active_thread_id = str(thread["id"])
+                yield _sse(
+                    seq := seq + 1,
+                    {
+                        "type": "RAW",
+                        "event": {
+                            "method": method,
+                            "params": {"thread": thread},
+                        },
+                    },
+                )
+                continue
             if method == "efferva/turn-started":
                 yield _sse(
                     seq := seq + 1,
@@ -118,6 +150,43 @@ async def _agui_stream(
                 continue
             if method == "item/completed":
                 item = params.get("item") or {}
+                if (
+                    item.get("type") == "userMessage"
+                    and str(item.get("clientId") or "").startswith(
+                        "efferva-steer-"
+                    )
+                ):
+                    steered_text = "".join(
+                        str(part.get("text") or "")
+                        for part in item.get("content") or []
+                        if part.get("type") == "text"
+                    )
+                    if steered_text:
+                        steered_message_id = str(item.get("id") or uuid4())
+                        yield _sse(
+                            seq := seq + 1,
+                            {
+                                "type": "TEXT_MESSAGE_START",
+                                "messageId": steered_message_id,
+                                "role": "user",
+                            },
+                        )
+                        yield _sse(
+                            seq := seq + 1,
+                            {
+                                "type": "TEXT_MESSAGE_CONTENT",
+                                "messageId": steered_message_id,
+                                "delta": steered_text,
+                            },
+                        )
+                        yield _sse(
+                            seq := seq + 1,
+                            {
+                                "type": "TEXT_MESSAGE_END",
+                                "messageId": steered_message_id,
+                            },
+                        )
+                    continue
                 if item.get("type") == "agentMessage":
                     item_id = str(item.get("id") or uuid4())
                     if message_id is None:
@@ -155,7 +224,7 @@ async def _agui_stream(
                     event = {
                         "type": "RUN_FINISHED",
                         "runId": run_id,
-                        "threadId": thread_id,
+                        "threadId": active_thread_id,
                     }
                 elif status in {"interrupted", "cancelled"}:
                     event = {"type": "RUN_CANCELLED", "runId": run_id}
@@ -181,6 +250,236 @@ async def _agui_stream(
                 "message": str(error),
             },
         )
+
+
+async def _agui_resume_stream(
+    proxy: CodexProxy,
+    session: dict[str, Any],
+    thread_id: str,
+    turn_id: str,
+    *,
+    run_id: str,
+) -> AsyncIterator[str]:
+    seq = 0
+    message_id: str | None = None
+    saw_content = False
+    yield _sse(
+        seq := seq + 1,
+        {"type": "RUN_STARTED", "runId": run_id, "threadId": thread_id},
+    )
+    try:
+        async for notification in proxy.resume_turn(session, thread_id, turn_id):
+            method = notification["method"]
+            params = notification.get("params") or {}
+            if method == "efferva/thread-resumed":
+                resumed_turn = params.get("turn")
+                if not resumed_turn:
+                    yield _sse(
+                        seq := seq + 1,
+                        {
+                            "type": "RUN_FINISHED",
+                            "runId": run_id,
+                            "threadId": thread_id,
+                        },
+                    )
+                    return
+                resumed_turn_id = str(resumed_turn["id"])
+                yield _sse(
+                    seq := seq + 1,
+                    {
+                        "type": "RAW",
+                        "event": {
+                            "method": "efferva/turn-started",
+                            "params": {
+                                "threadId": thread_id,
+                                "turnId": resumed_turn_id,
+                            },
+                        },
+                    },
+                )
+                agent_items = [
+                    item
+                    for item in resumed_turn.get("items") or []
+                    if item.get("type") == "agentMessage"
+                ]
+                for index, item in enumerate(agent_items):
+                    message_id = f"{run_id}:{item.get('id') or uuid4()}"
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_START", "messageId": message_id},
+                    )
+                    text = str(item.get("text") or "")
+                    if text:
+                        saw_content = True
+                        yield _sse(
+                            seq := seq + 1,
+                            {
+                                "type": "TEXT_MESSAGE_CONTENT",
+                                "messageId": message_id,
+                                "delta": text,
+                            },
+                        )
+                    if index < len(agent_items) - 1:
+                        yield _sse(
+                            seq := seq + 1,
+                            {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+                        )
+                        message_id = None
+                        saw_content = False
+                if not params.get("active"):
+                    if message_id is not None:
+                        yield _sse(
+                            seq := seq + 1,
+                            {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+                        )
+                    yield _sse(
+                        seq := seq + 1,
+                        {
+                            "type": "RUN_FINISHED",
+                            "runId": run_id,
+                            "threadId": thread_id,
+                        },
+                    )
+                    return
+                continue
+            if method == "item/agentMessage/delta":
+                item_id = str(params.get("itemId") or uuid4())
+                expected_message_id = f"{run_id}:{item_id}"
+                if message_id != expected_message_id:
+                    message_id = expected_message_id
+                    saw_content = False
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_START", "messageId": message_id},
+                    )
+                delta = str(params.get("delta") or "")
+                if delta:
+                    saw_content = True
+                    yield _sse(
+                        seq := seq + 1,
+                        {
+                            "type": "TEXT_MESSAGE_CONTENT",
+                            "messageId": message_id,
+                            "delta": delta,
+                        },
+                    )
+                continue
+            if method == "item/completed":
+                item = params.get("item") or {}
+                if item.get("type") == "agentMessage":
+                    item_id = str(item.get("id") or uuid4())
+                    expected_message_id = f"{run_id}:{item_id}"
+                    if message_id != expected_message_id:
+                        message_id = expected_message_id
+                        saw_content = False
+                        yield _sse(
+                            seq := seq + 1,
+                            {"type": "TEXT_MESSAGE_START", "messageId": message_id},
+                        )
+                    text = str(item.get("text") or "")
+                    if text and not saw_content:
+                        yield _sse(
+                            seq := seq + 1,
+                            {
+                                "type": "TEXT_MESSAGE_CONTENT",
+                                "messageId": message_id,
+                                "delta": text,
+                            },
+                        )
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+                    )
+                    message_id = None
+                    saw_content = False
+                continue
+            if method == "turn/completed":
+                turn = params.get("turn") or {}
+                status = turn.get("status")
+                if message_id is not None:
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+                    )
+                if status == "completed":
+                    event = {
+                        "type": "RUN_FINISHED",
+                        "runId": run_id,
+                        "threadId": thread_id,
+                    }
+                elif status in {"interrupted", "cancelled"}:
+                    event = {"type": "RUN_CANCELLED", "runId": run_id}
+                else:
+                    error = turn.get("error") or {}
+                    event = {
+                        "type": "RUN_ERROR",
+                        "code": "RUNTIME_ERROR",
+                        "message": error.get("message") or f"turn {status}",
+                    }
+                yield _sse(seq := seq + 1, event)
+                return
+            yield _sse(seq := seq + 1, {"type": "RAW", "event": notification})
+    except Exception as error:
+        yield _sse(
+            seq := seq + 1,
+            {
+                "type": "RUN_ERROR",
+                "code": "RUNTIME_ERROR",
+                "message": str(error),
+            },
+        )
+
+
+async def _agui_command_stream(
+    *,
+    run_id: str,
+    thread_id: str,
+    message: str,
+) -> AsyncIterator[str]:
+    message_id = f"{run_id}:command"
+    yield _sse(
+        1,
+        {
+            "type": "RUN_STARTED",
+            "runId": run_id,
+            "threadId": thread_id,
+        },
+    )
+    yield _sse(2, {"type": "TEXT_MESSAGE_START", "messageId": message_id})
+    yield _sse(
+        3,
+        {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "messageId": message_id,
+            "delta": message,
+        },
+    )
+    yield _sse(4, {"type": "TEXT_MESSAGE_END", "messageId": message_id})
+    yield _sse(
+        5,
+        {
+            "type": "RUN_FINISHED",
+            "runId": run_id,
+            "threadId": thread_id,
+        },
+    )
+
+
+def _command_response(
+    *,
+    run_id: str,
+    thread_id: str,
+    message: str,
+) -> StreamingResponse:
+    return StreamingResponse(
+        _agui_command_stream(
+            run_id=run_id,
+            thread_id=thread_id,
+            message=message,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def create_api_router(
@@ -247,6 +546,47 @@ def create_api_router(
         threads = await codex_proxy().list_threads(session)
         return [_thread_summary(thread, session_id) for thread in threads]
 
+    @router.get("/api/sessions/{session_id}/models")
+    async def list_models(
+        session_id: UUID,
+        principal: Principal = Depends(resolve_principal),
+    ) -> list[dict[str, Any]]:
+        session = await repository().get_session(principal, session_id, touch=True)
+        return await codex_proxy().list_models(session)
+
+    @router.get("/api/sessions/{session_id}/skills")
+    async def list_skills(
+        session_id: UUID,
+        workspace: str | None = Query(default=None),
+        principal: Principal = Depends(resolve_principal),
+    ) -> list[dict[str, Any]]:
+        if workspace is not None and not workspace.startswith("/"):
+            raise HTTPException(
+                status_code=422,
+                detail="workspace must be an absolute Sandbox path",
+            )
+        session = await repository().get_session(principal, session_id, touch=True)
+        return await codex_proxy().list_skills(session, workspace=workspace)
+
+    @router.get("/api/sessions/{session_id}/files")
+    async def search_files(
+        session_id: UUID,
+        query: str = Query(default="", max_length=256),
+        workspace: str | None = Query(default=None),
+        principal: Principal = Depends(resolve_principal),
+    ) -> list[dict[str, Any]]:
+        if workspace is not None and not workspace.startswith("/"):
+            raise HTTPException(
+                status_code=422,
+                detail="workspace must be an absolute Sandbox path",
+            )
+        session = await repository().get_session(principal, session_id, touch=True)
+        return await codex_proxy().search_files(
+            session,
+            query,
+            workspace=workspace,
+        )
+
     @router.post("/api/sessions/{session_id}/threads", status_code=201)
     async def create_thread(
         session_id: UUID,
@@ -276,6 +616,26 @@ def create_api_router(
         session = await repository().get_session(principal, session_id, touch=True)
         thread = await codex_proxy().read_thread(session, thread_id)
         return _thread_detail(thread, session_id)
+
+    @router.get("/api/sessions/{session_id}/threads/{thread_id}/resume")
+    async def resume_thread(
+        session_id: UUID,
+        thread_id: str,
+        turn_id: str = Query(min_length=1),
+        principal: Principal = Depends(resolve_principal),
+    ) -> StreamingResponse:
+        session = await repository().get_session(principal, session_id, touch=True)
+        return StreamingResponse(
+            _agui_resume_stream(
+                codex_proxy(),
+                session,
+                thread_id,
+                turn_id,
+                run_id=str(uuid4()),
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @router.post("/api/sessions/{session_id}/threads/{thread_id}/turns")
     async def start_turn(
@@ -322,6 +682,30 @@ def create_api_router(
         await codex_proxy().interrupt_turn(session, thread_id, turn_id)
         return {"interrupted": True}
 
+    @router.post(
+        "/api/sessions/{session_id}/threads/{thread_id}/turns/{turn_id}/steer"
+    )
+    async def steer_turn(
+        session_id: UUID,
+        thread_id: str,
+        turn_id: str,
+        payload: RunCreate,
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, str]:
+        session = await repository().get_session(
+            principal,
+            session_id,
+            mode=AccessMode.WRITE,
+            touch=True,
+        )
+        accepted_turn_id = await codex_proxy().steer_turn(
+            session,
+            thread_id,
+            turn_id,
+            payload.prompt,
+        )
+        return {"turnId": accepted_turn_id}
+
     @router.post("/api/ag-ui")
     async def run_agui(
         payload: RunAgentInput,
@@ -349,13 +733,86 @@ def create_api_router(
             touch=True,
         )
         run_id = payload.run_id or str(uuid4())
+        prompt = _prompt_from_agui(payload)
+        model = str(forwarded.get("model") or "").strip() or None
+        reasoning_effort = (
+            str(forwarded.get("reasoningEffort") or "").strip() or None
+        )
+        workspace = str(forwarded.get("workspace") or "").strip() or None
+        command, separator, argument = prompt.partition(" ")
+        argument = argument.strip() if separator else ""
+        if command == "/plan":
+            if not argument:
+                await codex_proxy().set_plan_mode(
+                    session,
+                    payload.thread_id,
+                )
+                return _command_response(
+                    run_id=run_id,
+                    thread_id=payload.thread_id,
+                    message="Plan mode enabled.",
+                )
+            return StreamingResponse(
+                _agui_stream(
+                    codex_proxy(),
+                    session,
+                    payload.thread_id,
+                    argument,
+                    run_id=run_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    collaboration_mode="plan",
+                    workspace=workspace,
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        if command == "/goal":
+            if not argument:
+                goal = await codex_proxy().get_goal(session, payload.thread_id)
+                message = (
+                    f"Goal: {goal['objective']} ({goal['status']})"
+                    if goal
+                    else "No goal is set."
+                )
+            elif argument == "clear":
+                cleared = await codex_proxy().clear_goal(session, payload.thread_id)
+                message = "Goal cleared." if cleared else "No goal was set."
+            elif argument in {"pause", "resume"}:
+                goal = await codex_proxy().set_goal(
+                    session,
+                    payload.thread_id,
+                    status="paused" if argument == "pause" else "active",
+                )
+                message = f"Goal {goal['status']}: {goal['objective']}"
+            else:
+                objective = (
+                    argument.removeprefix("edit ").strip()
+                    if argument.startswith("edit ")
+                    else argument
+                )
+                goal = await codex_proxy().set_goal(
+                    session,
+                    payload.thread_id,
+                    objective=objective,
+                    status="active",
+                )
+                message = f"Goal set: {goal['objective']}"
+            return _command_response(
+                run_id=run_id,
+                thread_id=payload.thread_id,
+                message=message,
+            )
         return StreamingResponse(
             _agui_stream(
                 codex_proxy(),
                 session,
                 payload.thread_id,
-                _prompt_from_agui(payload),
+                prompt,
                 run_id=run_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                workspace=workspace,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -379,6 +836,15 @@ def _thread_summary(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
 def _thread_detail(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
     summary = _thread_summary(thread, session_id)
     messages: list[dict[str, Any]] = []
+    active_turn = next(
+        (
+            turn
+            for turn in reversed(thread.get("turns") or [])
+            if turn.get("status") == "inProgress"
+        ),
+        None,
+    )
+    active_turn_id = str(active_turn["id"]) if active_turn is not None else None
     for turn in thread.get("turns") or []:
         for item in turn.get("items") or []:
             item_type = item.get("type")
@@ -392,7 +858,7 @@ def _thread_detail(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
                 messages.append(
                     {"id": item.get("id"), "role": "user", "content": text}
                 )
-            elif item_type == "agentMessage":
+            elif item_type == "agentMessage" and turn.get("id") != active_turn_id:
                 messages.append(
                     {
                         "id": item.get("id"),
@@ -400,4 +866,4 @@ def _thread_detail(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
                         "content": item.get("text") or "",
                     }
                 )
-    return {**summary, "messages": messages}
+    return {**summary, "messages": messages, "active_turn_id": active_turn_id}

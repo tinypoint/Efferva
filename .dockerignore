@@ -1,0 +1,8 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+dist/*
+!dist/efferva-*.whl
+examples/basic-local-docker/web/node_modules
+examples/basic-local-docker/web/dist

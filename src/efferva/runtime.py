@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import posixpath
+import re
 import secrets
 import shlex
 from collections.abc import AsyncIterator, Mapping
@@ -12,7 +13,7 @@ from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
 
@@ -80,6 +81,125 @@ class CodexProxy:
         )
         return list(result.get("data") or [])
 
+    async def list_models(self, session: Mapping[str, Any]) -> list[dict[str, Any]]:
+        result = await self.request(
+            session,
+            "model/list",
+            {"limit": 100, "includeHidden": False},
+        )
+        return list(result.get("data") or [])
+
+    async def list_skills(
+        self,
+        session: Mapping[str, Any],
+        *,
+        workspace: str | None = None,
+    ) -> list[dict[str, Any]]:
+        result = await self.request(
+            session,
+            "skills/list",
+            {
+                "cwds": [workspace] if workspace else [],
+                "forceReload": False,
+            },
+        )
+        return list(result.get("data") or [])
+
+    async def search_files(
+        self,
+        session: Mapping[str, Any],
+        query: str,
+        *,
+        workspace: str | None = None,
+    ) -> list[dict[str, Any]]:
+        workspace = posixpath.normpath(workspace or self._settings.workspace_path)
+        if not workspace.startswith("/"):
+            raise ValueError("File search workspace must be an absolute Sandbox path")
+        result = await self.request(
+            session,
+            "fuzzyFileSearch",
+            {
+                "query": query,
+                "roots": [workspace],
+                "cancellationToken": f"efferva:{session['id']}",
+            },
+        )
+        return list(result.get("files") or [])
+
+    async def set_plan_mode(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        await self.request(
+            session,
+            "thread/resume",
+            {
+                "threadId": thread_id,
+                **self._thread_params(
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                ),
+            },
+        )
+        await self.request(
+            session,
+            "thread/settings/update",
+            {
+                "threadId": thread_id,
+                "collaborationMode": await self._collaboration_mode(
+                    session,
+                    "plan",
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                ),
+            },
+        )
+
+    async def get_goal(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        result = await self.request(
+            session,
+            "thread/goal/get",
+            {"threadId": thread_id},
+        )
+        goal = result.get("goal")
+        return dict(goal) if isinstance(goal, dict) else None
+
+    async def set_goal(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        *,
+        objective: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id}
+        if objective is not None:
+            params["objective"] = objective
+        if status is not None:
+            params["status"] = status
+        result = await self.request(session, "thread/goal/set", params)
+        return dict(result["goal"])
+
+    async def clear_goal(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+    ) -> bool:
+        result = await self.request(
+            session,
+            "thread/goal/clear",
+            {"threadId": thread_id},
+        )
+        return bool(result.get("cleared"))
+
     async def start_thread(
         self,
         session: Mapping[str, Any],
@@ -109,11 +229,20 @@ class CodexProxy:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> dict[str, Any]:
-        result = await self.request(
-            session,
-            "thread/read",
-            {"threadId": thread_id, "includeTurns": True},
-        )
+        try:
+            result = await self.request(
+                session,
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": True},
+            )
+        except CodexRpcError as error:
+            if "is not materialized yet" not in str(error.error.get("message", "")):
+                raise
+            result = await self.request(
+                session,
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": False},
+            )
         return dict(result["thread"])
 
     async def interrupt_turn(
@@ -128,6 +257,25 @@ class CodexProxy:
             {"threadId": thread_id, "turnId": turn_id},
         )
 
+    async def steer_turn(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        turn_id: str,
+        prompt: str,
+    ) -> str:
+        result = await self.request(
+            session,
+            "turn/steer",
+            {
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "clientUserMessageId": f"efferva-steer-{uuid4()}",
+                "input": await self._input_items(session, prompt),
+            },
+        )
+        return str(result["turnId"])
+
     async def stream_turn(
         self,
         session: Mapping[str, Any],
@@ -136,8 +284,10 @@ class CodexProxy:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        collaboration_mode: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         sandbox = await self._ensure_session(session)
+        input_items = await self._input_items(session, prompt)
         async with self._connection(sandbox) as websocket:
             await self._rpc(
                 websocket,
@@ -150,37 +300,179 @@ class CodexProxy:
                     ),
                 },
             )
-            request_id = await self._request_id()
-            params: dict[str, Any] = {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt, "textElements": []}],
+            async for notification in self._start_turn_on_connection(
+                websocket,
+                session,
+                thread_id,
+                input_items,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                collaboration_mode=collaboration_mode,
+            ):
+                yield notification
+
+    async def stream_new_turn(
+        self,
+        session: Mapping[str, Any],
+        prompt: str,
+        *,
+        workspace: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        collaboration_mode: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        workspace = posixpath.normpath(workspace or self._settings.workspace_path)
+        if not workspace.startswith("/"):
+            raise ValueError("Thread workspace must be an absolute Sandbox path")
+        sandbox = await self._ensure_session(session)
+        input_items = await self._input_items(session, prompt)
+        async with self._connection(sandbox) as websocket:
+            await self._rpc(
+                websocket,
+                "fs/createDirectory",
+                {"path": workspace, "recursive": True},
+            )
+            thread_params = self._thread_params(
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+            thread_params["cwd"] = workspace
+            result = await self._rpc(websocket, "thread/start", thread_params)
+            thread = dict(result["thread"])
+            thread_id = str(thread["id"])
+            yield {
+                "method": "efferva/thread-created",
+                "params": {"thread": thread},
             }
-            if model:
-                params["model"] = model
-            if reasoning_effort:
-                params["effort"] = reasoning_effort
+            async for notification in self._start_turn_on_connection(
+                websocket,
+                session,
+                thread_id,
+                input_items,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                collaboration_mode=collaboration_mode,
+            ):
+                yield notification
+
+    async def _start_turn_on_connection(
+        self,
+        websocket: ClientConnection,
+        session: Mapping[str, Any],
+        thread_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        collaboration_mode: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        request_id = await self._request_id()
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": input_items,
+        }
+        if model:
+            params["model"] = model
+        if reasoning_effort:
+            params["effort"] = reasoning_effort
+        if collaboration_mode:
+            params["collaborationMode"] = await self._collaboration_mode(
+                session,
+                collaboration_mode,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+        await websocket.send(
+            json.dumps(
+                {"method": "turn/start", "id": request_id, "params": params},
+                separators=(",", ":"),
+            )
+        )
+        turn_id: str | None = None
+        while True:
+            message = json.loads(await websocket.recv())
+            if message.get("id") == request_id:
+                if "error" in message:
+                    raise CodexRpcError("turn/start", message["error"])
+                turn = message.get("result", {}).get("turn", {})
+                turn_id = str(turn.get("id")) if turn.get("id") else None
+                yield {
+                    "method": "efferva/turn-started",
+                    "params": {"threadId": thread_id, "turnId": turn_id},
+                }
+                continue
+            if "method" in message and "id" in message:
+                await self._reject_server_request(websocket, message)
+                continue
+            if "method" not in message:
+                continue
+            yield message
+            if message["method"] == "turn/completed":
+                completed = message.get("params", {}).get("turn", {})
+                completed_id = completed.get("id")
+                if turn_id is None or completed_id in {None, turn_id}:
+                    return
+
+    async def resume_turn(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        turn_id: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        sandbox = await self._ensure_session(session)
+        async with self._connection(sandbox) as websocket:
+            request_id = await self._request_id()
             await websocket.send(
                 json.dumps(
-                    {"method": "turn/start", "id": request_id, "params": params},
+                    {
+                        "method": "thread/resume",
+                        "id": request_id,
+                        "params": {"threadId": thread_id},
+                    },
                     separators=(",", ":"),
                 )
             )
-            turn_id: str | None = None
+            pending_notifications: list[dict[str, Any]] = []
+            turn_is_active = False
             while True:
                 message = json.loads(await websocket.recv())
                 if message.get("id") == request_id:
                     if "error" in message:
-                        raise CodexRpcError("turn/start", message["error"])
-                    turn = message.get("result", {}).get("turn", {})
-                    turn_id = str(turn.get("id")) if turn.get("id") else None
+                        raise CodexRpcError("thread/resume", message["error"])
+                    thread = dict(message.get("result", {}).get("thread") or {})
+                    resumed_turn = next(
+                        (
+                            turn
+                            for turn in reversed(thread.get("turns") or [])
+                            if str(turn.get("id")) == turn_id
+                        ),
+                        None,
+                    )
+                    turn_is_active = bool(
+                        resumed_turn
+                        and resumed_turn.get("status") == "inProgress"
+                    )
                     yield {
-                        "method": "efferva/turn-started",
+                        "method": "efferva/thread-resumed",
                         "params": {
                             "threadId": thread_id,
-                            "turnId": turn_id,
+                            "turn": resumed_turn,
+                            "active": turn_is_active,
                         },
                     }
+                    for notification in pending_notifications:
+                        yield notification
+                    if not turn_is_active:
+                        return
+                    break
+                if "method" in message and "id" in message:
+                    await self._reject_server_request(websocket, message)
                     continue
+                if "method" in message:
+                    pending_notifications.append(message)
+
+            while True:
+                message = json.loads(await websocket.recv())
                 if "method" in message and "id" in message:
                     await self._reject_server_request(websocket, message)
                     continue
@@ -189,9 +481,76 @@ class CodexProxy:
                 yield message
                 if message["method"] == "turn/completed":
                     completed = message.get("params", {}).get("turn", {})
-                    completed_id = completed.get("id")
-                    if turn_id is None or completed_id in {None, turn_id}:
+                    if completed.get("id") in {None, turn_id}:
                         return
+
+    async def _input_items(
+        self,
+        session: Mapping[str, Any],
+        prompt: str,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt, "textElements": []}
+        ]
+        mentioned_skill_names = set(
+            re.findall(r"(?<![\w$])\$([A-Za-z0-9:_-]+)", prompt)
+        )
+        if not mentioned_skill_names:
+            return items
+        skill_entries = await self.list_skills(session)
+        skills_by_name = {
+            str(skill.get("name")): skill
+            for entry in skill_entries
+            for skill in entry.get("skills", [])
+            if skill.get("enabled") and skill.get("name") and skill.get("path")
+        }
+        for name in mentioned_skill_names:
+            skill = skills_by_name.get(name)
+            if skill is not None:
+                items.append(
+                    {
+                        "type": "skill",
+                        "name": name,
+                        "path": skill["path"],
+                    }
+                )
+        return items
+
+    async def _collaboration_mode(
+        self,
+        session: Mapping[str, Any],
+        name: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self.request(session, "collaborationMode/list")
+        modes = list(result.get("data") or [])
+        selected = next(
+            (
+                item
+                for item in modes
+                if str(item.get("name", "")).casefold() == name.casefold()
+                or str(item.get("mode", "")).casefold() == name.casefold()
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"Codex collaboration mode is unavailable: {name}")
+        selected_model = selected.get("model") or model or self._settings.codex_model
+        if not selected_model:
+            raise ValueError(f"Codex collaboration mode {name} has no model")
+        selected_effort = selected.get("reasoning_effort")
+        if selected_effort is None:
+            selected_effort = reasoning_effort
+        return {
+            "mode": selected.get("mode") or name.casefold(),
+            "settings": {
+                "model": selected_model,
+                "reasoning_effort": selected_effort,
+                "developer_instructions": None,
+            },
+        }
 
     async def _ensure_session(
         self,
@@ -242,6 +601,32 @@ class CodexProxy:
         log_file = posixpath.join(codex_home, "app-server.log")
         start_lock = "/tmp/efferva-app-server-start.lock"
         listen = f"ws://0.0.0.0:{self._settings.codex_appserver_port}"
+        app_server_session_source = "app-server"
+        app_server_overrides: dict[str, str] = {}
+        if self._settings.codex_openai_base_url:
+            app_server_overrides = {
+                "model_providers.efferva_proxy.name": "Efferva LLM proxy",
+                "model_providers.efferva_proxy.base_url": (
+                    self._settings.codex_openai_base_url
+                ),
+                "model_providers.efferva_proxy.env_key": "OPENAI_API_KEY",
+                "model_providers.efferva_proxy.wire_api": "responses",
+                "model_provider": "efferva_proxy",
+            }
+        app_server_config_args = tuple(
+            f"{key}={json.dumps(value)}"
+            for key, value in app_server_overrides.items()
+        )
+        app_server_launch_sha256 = sha256(
+            json.dumps(
+                {
+                    "binary": self._binary_sha256,
+                    "config": app_server_config_args,
+                    "session_source": app_server_session_source,
+                },
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         bootstrap = (
             f"if [ -d {shlex.quote(posixpath.join(self._settings.session_volume_path, 'codex-home'))} ] "
             f"&& [ ! -e {shlex.quote(codex_home)} ]; then "
@@ -272,22 +657,28 @@ class CodexProxy:
             f"{shlex.quote(self._settings.workspace_path)}"
         )
         await self._run_command(sandbox, ("sh", "-lc", bootstrap))
+        app_server_cli_config = "".join(
+            f"-c {shlex.quote(argument)} "
+            for argument in app_server_config_args
+        )
         command = (
             f"if ! mkdir {shlex.quote(start_lock)} 2>/dev/null; then exit 0; fi; "
             f"trap 'rmdir {shlex.quote(start_lock)} 2>/dev/null || true' EXIT; "
             f"if [ -s {shlex.quote(pid_file)} ]; then "
             f"read -r efferva_pid efferva_sha <{shlex.quote(pid_file)}; "
             f"if kill -0 \"$efferva_pid\" 2>/dev/null && "
-            f"[ \"$efferva_sha\" = {shlex.quote(self._binary_sha256)} ]; then "
+            f"[ \"$efferva_sha\" = {shlex.quote(app_server_launch_sha256)} ]; then "
             "exit 0; fi; "
             f"kill \"$efferva_pid\" 2>/dev/null || true; fi; "
             f"cd {shlex.quote(self._settings.workspace_path)} && "
             f"{shlex.quote(sandbox_binary)} app-server "
+            f"{app_server_cli_config}"
+            f"--session-source {shlex.quote(app_server_session_source)} "
             f"--listen {shlex.quote(listen)} "
             f"--ws-auth capability-token "
             f"--ws-token-file {shlex.quote(websocket_token_file)} "
             f"</dev/null >>{shlex.quote(log_file)} 2>&1 & "
-            f"echo \"$! {self._binary_sha256}\" >{shlex.quote(pid_file)}"
+            f"echo \"$! {app_server_launch_sha256}\" >{shlex.quote(pid_file)}"
         )
         environment = {
             "CODEX_HOME": codex_home,

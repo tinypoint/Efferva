@@ -1,6 +1,6 @@
 import posixpath
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -29,14 +29,7 @@ class Session(BaseModel):
 class ThreadCreate(BaseModel):
     workspace: str | None = Field(default=None, min_length=1, max_length=4096)
     model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: Literal[
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "ultra",
-    ] | None = None
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
 
     @field_validator("workspace")
     @classmethod
@@ -51,14 +44,7 @@ class ThreadCreate(BaseModel):
 class RunCreate(BaseModel):
     prompt: str = Field(min_length=1)
     model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: Literal[
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "ultra",
-    ] | None = None
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
 
 
 class PrincipalView(BaseModel):
