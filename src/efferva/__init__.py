@@ -26,7 +26,6 @@ from efferva.sandbox import (
     run_provider_conformance,
 )
 from efferva.tools import Tool, ToolContext
-from efferva.workflows import Workflow, workflow_tool
 
 __all__ = [
     "Efferva",
@@ -51,7 +50,5 @@ __all__ = [
     "ToolContext",
     "UnauthenticatedError",
     "WorkspaceHandle",
-    "Workflow",
     "run_provider_conformance",
-    "workflow_tool",
 ]
