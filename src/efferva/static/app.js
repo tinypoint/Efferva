@@ -140,10 +140,59 @@ function renderMessages(messages) {
   $("#messages").innerHTML = messages
     .map(
       (message) =>
-        `<article class="message ${message.role}">${escapeHtml(message.content)}</article>`,
+        `<article class="message ${message.role}"${message.run_id ? ` data-run-id="${message.run_id}"` : ""}>${escapeHtml(message.content)}</article>`,
     )
     .join("");
+  scrollMessages();
+}
+
+function scrollMessages() {
   $("#messages").scrollTop = $("#messages").scrollHeight;
+}
+
+function findStreamingMessage(messageId) {
+  return [...$("#messages").querySelectorAll("[data-message-id]")].find(
+    (node) => node.dataset.messageId === messageId,
+  );
+}
+
+function startStreamingMessage(run, messageId) {
+  let node = findStreamingMessage(messageId);
+  if (node) {
+    node.textContent = "";
+    return node;
+  }
+  node = [...$("#messages").querySelectorAll(".message.assistant[data-run-id]")].find(
+    (candidate) => candidate.dataset.runId === run.id,
+  );
+  if (node) {
+    node.dataset.messageId = messageId;
+    node.textContent = "";
+    return node;
+  }
+  node = document.createElement("article");
+  node.className = "message assistant";
+  node.dataset.runId = run.id;
+  node.dataset.messageId = messageId;
+  $("#messages").append(node);
+  scrollMessages();
+  return node;
+}
+
+function appendStreamingMessage(run, event) {
+  const node =
+    findStreamingMessage(event.messageId) ||
+    startStreamingMessage(run, event.messageId);
+  node.textContent += event.delta || "";
+  scrollMessages();
+}
+
+function appendUserMessage(content) {
+  const node = document.createElement("article");
+  node.className = "message user";
+  node.textContent = content;
+  $("#messages").append(node);
+  scrollMessages();
 }
 
 async function selectThread(id) {
@@ -193,11 +242,12 @@ function streamRun(run) {
   source.onmessage = async (message) => {
     const event = JSON.parse(message.data);
     if (threadId !== state.threadId) return;
-    if (["TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END"].includes(event.type)) {
-      const thread = await request(`/api/threads/${threadId}`);
-      renderMessages(thread.messages);
+    if (event.type === "TEXT_MESSAGE_START") {
+      startStreamingMessage(run, event.messageId);
+    } else if (event.type === "TEXT_MESSAGE_CONTENT") {
+      appendStreamingMessage(run, event);
     }
-    if (["RUN_FINISHED", "RUN_ERROR"].includes(event.type)) {
+    if (["RUN_FINISHED", "RUN_ERROR", "RUN_CANCELLED"].includes(event.type)) {
       stopStreaming();
       const thread = await request(`/api/threads/${threadId}`);
       renderMessages(thread.messages);
@@ -264,8 +314,7 @@ $("#composer").addEventListener("submit", async (event) => {
     method: "POST",
     body: JSON.stringify({ prompt }),
   });
-  const thread = await request(`/api/threads/${state.threadId}`);
-  renderMessages(thread.messages);
+  appendUserMessage(prompt);
   streamRun(run);
 });
 

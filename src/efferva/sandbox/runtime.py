@@ -84,7 +84,7 @@ class _ProcessState:
             chunks = tuple(chunk for chunk in self.chunks if chunk.seq > after)
             return ProcessOutput(
                 chunks=chunks,
-                next_cursor=self.next_seq,
+                next_cursor=self.next_seq - 1,
                 exited=self.exit_seq is not None,
                 exit_code=self.exit_code,
                 closed=self.closed_seq is not None,

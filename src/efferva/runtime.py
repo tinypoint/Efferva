@@ -744,6 +744,7 @@ class CodexRuntime:
         }
         self._sessions: dict[str, _SessionCodexRuntime] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._last_used: dict[str, float] = {}
         self._started = False
 
     async def start(self) -> None:
@@ -779,6 +780,7 @@ class CodexRuntime:
                 == sandbox.sandbox.external_ref
                 and current._runtime_sha256 == requested_sha256
             ):
+                self._last_used[key] = asyncio.get_running_loop().time()
                 return current
             if current is not None:
                 await current.close()
@@ -793,19 +795,35 @@ class CodexRuntime:
             )
             await runtime.start()
             self._sessions[key] = runtime
+            self._last_used[key] = asyncio.get_running_loop().time()
             return runtime
 
+    def mark_environment_idle(self, session_id: str) -> None:
+        if session_id in self._sessions:
+            self._last_used[session_id] = asyncio.get_running_loop().time()
+
+    def idle_environment_ids(self, idle_seconds: int) -> tuple[str, ...]:
+        cutoff = asyncio.get_running_loop().time() - idle_seconds
+        return tuple(
+            session_id
+            for session_id, last_used in self._last_used.items()
+            if session_id in self._sessions and last_used <= cutoff
+        )
+
     async def release_environment(self, session_id: str) -> None:
-        runtime = self._sessions.pop(session_id, None)
-        self._locks.pop(session_id, None)
-        if runtime is not None:
-            await runtime.close()
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            runtime = self._sessions.pop(session_id, None)
+            self._last_used.pop(session_id, None)
+            if runtime is not None:
+                await runtime.close()
 
     async def close(self) -> None:
         self._started = False
         runtimes = tuple(self._sessions.values())
         self._sessions.clear()
         self._locks.clear()
+        self._last_used.clear()
         if runtimes:
             await asyncio.gather(
                 *(runtime.close() for runtime in runtimes),

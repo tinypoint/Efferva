@@ -49,6 +49,15 @@ class _RuntimeResources:
     def worker_healthy(self) -> bool:
         return self.worker is not None and self.worker.healthy
 
+    def warm_session(self, session: dict[str, Any]) -> None:
+        if self.worker is None:
+            return
+        self.worker.warm_session(
+            session["id"],
+            session["workspace_ref"],
+            session.get("codex_runtime_sha256"),
+        )
+
 class Efferva:
     """Product-facing facade for installing Efferva into an authenticated application."""
 
@@ -162,6 +171,7 @@ class Efferva:
                 identity=self.identity,
                 system_repository=resources.require_repository,
                 worker_healthy=resources.worker_healthy,
+                session_warmer=resources.warm_session,
                 skill_root_ids=tuple(root.id for root in self.skill_roots),
                 native_memory_enabled=self.native_memory_enabled,
             )

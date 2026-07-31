@@ -20,4 +20,7 @@ async def index() -> RedirectResponse:
     return RedirectResponse("/agent/")
 
 
-Efferva(identity=resolve_local_principal).install(app, prefix="/agent")
+Efferva(
+    identity=resolve_local_principal,
+    codex_config={"model_reasoning_effort": "low"},
+).install(app, prefix="/agent")

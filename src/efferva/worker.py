@@ -40,6 +40,7 @@ class RunWorker:
         self._lease_task: asyncio.Task[None] | None = None
         self._reap_task: asyncio.Task[None] | None = None
         self._runs: set[asyncio.Task[None]] = set()
+        self._warmups: dict[UUID, asyncio.Task[None]] = {}
 
     @property
     def healthy(self) -> bool:
@@ -73,8 +74,68 @@ class RunWorker:
             task.cancel()
         if self._runs:
             await asyncio.gather(*self._runs, return_exceptions=True)
+        for task in self._warmups.values():
+            task.cancel()
+        if self._warmups:
+            await asyncio.gather(*self._warmups.values(), return_exceptions=True)
+        self._warmups.clear()
         await self._runtime.close()
         await self._sandboxes.close()
+
+    def warm_session(
+        self,
+        session_id: UUID,
+        workspace_ref: str,
+        runtime_sha256: str | None,
+    ) -> None:
+        if self._stopping.is_set():
+            return
+        existing = self._warmups.get(session_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._warm_session(session_id, workspace_ref, runtime_sha256)
+        )
+        self._warmups[session_id] = task
+
+        def remove(completed: asyncio.Task[None]) -> None:
+            if self._warmups.get(session_id) is completed:
+                self._warmups.pop(session_id, None)
+
+        task.add_done_callback(remove)
+
+    async def _warm_session(
+        self,
+        session_id: UUID,
+        workspace_ref: str,
+        runtime_sha256: str | None,
+    ) -> None:
+        owner_id = self._settings.instance_id
+        epoch = await self._repository.claim_session(
+            session_id,
+            owner_id,
+            self._settings.lease_ttl_seconds,
+        )
+        if epoch is None:
+            return
+        try:
+            sandbox = await self._sandboxes.ensure(
+                session_id,
+                workspace_ref,
+                owner_id=owner_id,
+                fencing_token=epoch,
+            )
+            await self._runtime.ensure_environment(
+                sandbox,
+                runtime_sha256=runtime_sha256,
+            )
+            self._runtime.mark_environment_idle(str(session_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("failed to warm Session %s", session_id)
+            with contextlib.suppress(Exception):
+                await self._repository.release_session_if_idle(session_id, owner_id)
 
     async def _poll_loop(self) -> None:
         while not self._stopping.is_set():
@@ -112,6 +173,15 @@ class RunWorker:
     async def _reap_loop(self) -> None:
         while not self._stopping.is_set():
             try:
+                for session_id in self._runtime.idle_environment_ids(
+                    self._settings.sandbox_idle_timeout_seconds
+                ):
+                    released = await self._repository.release_session_if_idle(
+                        UUID(session_id),
+                        self._settings.instance_id,
+                    )
+                    if released:
+                        await self._runtime.release_environment(session_id)
                 await self._sandboxes.reap_idle()
             except Exception:
                 logger.exception("failed to reap idle Session sandboxes")
@@ -205,13 +275,14 @@ class RunWorker:
                 session_runtime.unsubscribe(codex_thread_id)
                 with contextlib.suppress(Exception):
                     await session_runtime.unload_thread(codex_thread_id)
-            with contextlib.suppress(Exception):
-                released = await self._repository.release_session_if_idle(
-                    session_id,
-                    owner_id,
-                )
-                if released:
-                    await self._runtime.release_environment(str(session_id))
+            if session_runtime is not None:
+                self._runtime.mark_environment_idle(str(session_id))
+            else:
+                with contextlib.suppress(Exception):
+                    await self._repository.release_session_if_idle(
+                        session_id,
+                        owner_id,
+                    )
 
     async def _resume_with_retry(
         self,

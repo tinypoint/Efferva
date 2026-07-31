@@ -12,11 +12,12 @@ from urllib.parse import urlparse
 
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
+from opensandbox.exceptions.sandbox import SandboxApiException
 from opensandbox.models.execd import ExecutionHandlers, RunCommandOpts
 from opensandbox.models.filesystem import DirectoryListEntry
 from opensandbox.models.sandboxes import (
-    CredentialProxyConfig,
     PVC,
+    CredentialProxyConfig,
     SandboxFilter,
     Volume,
 )
@@ -58,6 +59,7 @@ class _OpenSandboxExecTransport(ProcessTransport):
             if spec.pipe_stdin or spec.initial_stdin is not None
             else None
         )
+        self._stderr_path = f"/tmp/efferva-{handle.id}.stderr"
         self._task = asyncio.create_task(self._run())
 
     async def wait_started(self) -> None:
@@ -76,6 +78,24 @@ class _OpenSandboxExecTransport(ProcessTransport):
                 started.cancel()
 
     async def _run(self) -> None:
+        command = shlex.join(self._spec.argv)
+        try:
+            if self._stdin_path is None:
+                await self._run_foreground(command)
+            else:
+                await self._run_background(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._started.set()
+            await self._queue.put(
+                TransportOutput("stderr", f"OpenSandbox command failed: {error}".encode())
+            )
+            await self._queue.put(TransportExited(1))
+        finally:
+            await self._queue.put(None)
+
+    async def _run_foreground(self, command: str) -> None:
         async def on_init(event: Any) -> None:
             self._execution_id = str(event.id)
             self._started.set()
@@ -90,47 +110,78 @@ class _OpenSandboxExecTransport(ProcessTransport):
             message = getattr(error, "value", None) or str(error)
             await self._queue.put(TransportOutput("stderr", message.encode()))
 
-        handlers = ExecutionHandlers(
-            on_init=on_init,
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
-            on_error=on_error,
-            skip_accumulation=True,
+        execution = await self._sandbox.commands.run(
+            command,
+            opts=RunCommandOpts(
+                working_directory=self._spec.cwd,
+                envs=dict(self._spec.env) or None,
+            ),
+            handlers=ExecutionHandlers(
+                on_init=on_init,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                on_error=on_error,
+                skip_accumulation=True,
+            ),
         )
-        command = shlex.join(self._spec.argv)
-        if self._stdin_path is not None:
-            command = (
-                f"stdin_path={shlex.quote(self._stdin_path)}; "
-                'rm -f "$stdin_path"; mkfifo -m 600 "$stdin_path"; '
-                "trap 'rm -f \"$stdin_path\"' EXIT; "
-                f'exec {command} < "$stdin_path"'
+        if self._execution_id is None and execution.id is not None:
+            self._execution_id = str(execution.id)
+        self._started.set()
+        exit_code = execution.exit_code
+        if exit_code is None:
+            exit_code = 1 if execution.error is not None else 0
+        await self._queue.put(TransportExited(exit_code))
+
+    async def _run_background(self, command: str) -> None:
+        assert self._stdin_path is not None
+        command = (
+            f"stdin_path={shlex.quote(self._stdin_path)}; "
+            f"stderr_path={shlex.quote(self._stderr_path)}; "
+            'rm -f "$stdin_path" "$stderr_path"; '
+            'mkfifo -m 600 "$stdin_path"; '
+            'exec 3<> "$stdin_path"; '
+            f'exec {command} <&3 2> "$stderr_path"'
+        )
+        execution = await self._sandbox.commands.run(
+            command,
+            opts=RunCommandOpts(
+                background=True,
+                working_directory=self._spec.cwd,
+                envs=dict(self._spec.env) or None,
+            ),
+        )
+        if execution.id is None:
+            raise RuntimeError("OpenSandbox background command has no execution id")
+        self._execution_id = str(execution.id)
+        self._started.set()
+        cursor: int | None = None
+
+        async def emit_stdout() -> None:
+            nonlocal cursor
+            logs = await self._sandbox.commands.get_background_command_logs(
+                self._execution_id,
+                cursor,
             )
-        try:
-            execution = await self._sandbox.commands.run(
-                command,
-                opts=RunCommandOpts(
-                    working_directory=self._spec.cwd,
-                    envs=dict(self._spec.env) or None,
-                ),
-                handlers=handlers,
-            )
-            if self._execution_id is None and execution.id is not None:
-                self._execution_id = str(execution.id)
-            self._started.set()
-            exit_code = execution.exit_code
-            if exit_code is None:
-                exit_code = 1 if execution.error is not None else 0
-            await self._queue.put(TransportExited(exit_code))
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self._started.set()
-            await self._queue.put(
-                TransportOutput("stderr", f"OpenSandbox command failed: {error}".encode())
-            )
-            await self._queue.put(TransportExited(1))
-        finally:
-            await self._queue.put(None)
+            if logs.content:
+                await self._queue.put(TransportOutput("stdout", logs.content.encode()))
+            if logs.cursor is not None:
+                cursor = logs.cursor
+
+        while True:
+            await emit_stdout()
+            status = await self._sandbox.commands.get_command_status(self._execution_id)
+            if status.running is False:
+                await emit_stdout()
+                with contextlib.suppress(Exception):
+                    stderr = await self._sandbox.files.read_bytes(self._stderr_path)
+                    if stderr:
+                        await self._queue.put(TransportOutput("stderr", stderr))
+                exit_code = status.exit_code
+                if exit_code is None:
+                    exit_code = 1 if status.error else 0
+                await self._queue.put(TransportExited(exit_code))
+                return
+            await asyncio.sleep(0.2)
 
     async def events(self) -> AsyncIterator[TransportEvent]:
         while (event := await self._queue.get()) is not None:
@@ -201,7 +252,13 @@ class OpenSandboxRuntime(BufferedSandboxRuntime):
         ]
 
     async def stat(self, path: str) -> FileMetadata:
-        entries = await self.sandbox.files.get_file_info([path])
+        try:
+            entries = await self.sandbox.files.get_file_info([path])
+        except SandboxApiException as error:
+            error_code = getattr(getattr(error, "error", None), "code", None)
+            if error.status_code == 404 or error_code == "FILE_NOT_FOUND":
+                raise FileNotFoundError(path) from error
+            raise
         entry = entries.get(path)
         if entry is None:
             raise FileNotFoundError(path)

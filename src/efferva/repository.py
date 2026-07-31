@@ -747,6 +747,48 @@ class SystemRepository:
             run["input"] = run.pop("input_json")
             return run
 
+    async def claim_session(
+        self,
+        session_id: UUID,
+        owner_id: str,
+        lease_ttl_seconds: int,
+    ) -> int | None:
+        """Claim a Session lease without requiring a queued Run.
+
+        This is used to warm a newly-created Session before its first message.
+        Existing ownership is preserved and a different live owner is never
+        preempted.
+        """
+
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                INSERT INTO session_leases(
+                    session_id, owner_id, fencing_epoch, expires_at, updated_at
+                )
+                SELECT
+                    id, %s, 1, now() + make_interval(secs => %s), now()
+                FROM app_sessions
+                WHERE id = %s
+                ON CONFLICT (session_id) DO UPDATE
+                SET owner_id = EXCLUDED.owner_id,
+                    fencing_epoch = CASE
+                        WHEN session_leases.owner_id = EXCLUDED.owner_id
+                            THEN session_leases.fencing_epoch
+                        ELSE session_leases.fencing_epoch + 1
+                    END,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = now()
+                WHERE session_leases.owner_id = EXCLUDED.owner_id
+                   OR session_leases.expires_at < now()
+                RETURNING fencing_epoch
+                """,
+                (owner_id, lease_ttl_seconds, session_id),
+            )
+            row = await cursor.fetchone()
+            await connection.commit()
+        return int(row["fencing_epoch"]) if row is not None else None
+
     async def renew_owned_leases(self, owner_id: str, lease_ttl_seconds: int) -> None:
         async with self._database.connection() as connection:
             await connection.execute(

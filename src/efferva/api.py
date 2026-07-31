@@ -100,6 +100,7 @@ def create_api_router(
     identity: IdentityResolver,
     system_repository: Callable[[], SystemRepository],
     worker_healthy: Callable[[], bool],
+    session_warmer: Callable[[dict[str, Any]], None] | None = None,
     skill_root_ids: tuple[str, ...] = (),
     native_memory_enabled: bool = False,
 ) -> APIRouter:
@@ -136,7 +137,10 @@ def create_api_router(
         payload: SessionCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        return await authorized(principal).create_session(payload.name)
+        session = await authorized(principal).create_session(payload.name)
+        if session_warmer is not None:
+            session_warmer(session)
+        return session
 
     @router.get("/api/sessions", response_model=list[Session])
     async def list_sessions(
