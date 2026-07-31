@@ -469,7 +469,7 @@ class CodexProxy:
             config.setdefault("features", {})["memories"] = False
         params: dict[str, Any] = {
             "approvalPolicy": "never",
-            "sandbox": "dangerFullAccess",
+            "sandbox": "danger-full-access",
         }
         selected_model = model or self._settings.codex_model
         if selected_model:
