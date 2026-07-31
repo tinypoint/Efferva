@@ -115,6 +115,8 @@ class _OpenSandboxExecTransport(ProcessTransport):
             opts=RunCommandOpts(
                 working_directory=self._spec.cwd,
                 envs=dict(self._spec.env) or None,
+                uid=self._spec.uid,
+                gid=self._spec.gid,
             ),
             handlers=ExecutionHandlers(
                 on_init=on_init,
@@ -148,6 +150,8 @@ class _OpenSandboxExecTransport(ProcessTransport):
                 background=True,
                 working_directory=self._spec.cwd,
                 envs=dict(self._spec.env) or None,
+                uid=self._spec.uid,
+                gid=self._spec.gid,
             ),
         )
         if execution.id is None:
@@ -270,6 +274,10 @@ class OpenSandboxRuntime(BufferedSandboxRuntime):
             created_at_ms=int(entry.created_at.timestamp() * 1000),
             modified_at_ms=int(entry.modified_at.timestamp() * 1000),
         )
+
+    async def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
+        endpoint = await self.sandbox.get_endpoint(port)
+        return endpoint.endpoint, dict(endpoint.headers)
 
     async def close(self) -> None:
         await super().close()

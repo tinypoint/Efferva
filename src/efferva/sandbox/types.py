@@ -33,6 +33,7 @@ class SandboxCapabilities:
                 self.file_operations,
                 self.persistent_workspace,
                 self.concurrent_processes,
+                self.port_forwarding,
             )
         )
 
@@ -42,7 +43,7 @@ class SandboxContext:
     session_id: UUID
     workspace_id: UUID
     workspace_ref: str
-    workspace_path: str = "/session/workspace"
+    workspace_path: str = "/home/sandbox/workspace"
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -80,12 +81,16 @@ class ProcessSpec:
     pipe_stdin: bool = False
     arg0: str | None = None
     initial_stdin: bytes | None = None
+    uid: int | None = None
+    gid: int | None = None
 
     def __post_init__(self) -> None:
         if not self.argv:
             raise ValueError("process argv must not be empty")
         if not self.cwd.startswith("/"):
             raise ValueError("process cwd must be an absolute path")
+        if self.gid is not None and self.uid is None:
+            raise ValueError("process gid requires uid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +156,8 @@ class SandboxRuntime(Protocol):
     async def list_directory(self, path: str) -> list[DirectoryEntry]: ...
 
     async def stat(self, path: str) -> FileMetadata: ...
+
+    async def get_endpoint(self, port: int) -> tuple[str, Mapping[str, str]]: ...
 
 
 @dataclass(frozen=True, slots=True)

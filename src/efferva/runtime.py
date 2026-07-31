@@ -1,40 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import logging
 import os
 import posixpath
 import shlex
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from uuid import UUID
+
+from websockets.asyncio.client import ClientConnection, connect
 
 from efferva.capabilities import SkillRoot
-from efferva.sandbox import ProcessHandle, ProcessSpec, SandboxEnvironment
-
-logger = logging.getLogger(__name__)
-
-SANDBOX_ENVIRONMENT_ID = "$EFFERVA_SANDBOX_ENVIRONMENT_ID"
-SANDBOX_WORKSPACE_PATH = "$EFFERVA_SANDBOX_WORKSPACE_PATH"
-
-
-def _resolve_sandbox_config(
-    value: Any,
-    sandbox: SandboxEnvironment,
-) -> Any:
-    if value == SANDBOX_ENVIRONMENT_ID:
-        return sandbox.environment_id
-    if value == SANDBOX_WORKSPACE_PATH:
-        return sandbox.workspace_path
-    if isinstance(value, Mapping):
-        return {key: _resolve_sandbox_config(item, sandbox) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_resolve_sandbox_config(item, sandbox) for item in value]
-    return deepcopy(value)
+from efferva.config import Settings
+from efferva.sandbox import ProcessSpec, SandboxControlPlane, SandboxEnvironment
 
 
 class CodexRpcError(RuntimeError):
@@ -44,691 +27,460 @@ class CodexRpcError(RuntimeError):
         super().__init__(f"{method}: {error.get('message', error)}")
 
 
-class _SessionCodexRuntime:
+class CodexProxy:
+    """A stateless router to the long-lived Codex app-server inside each Sandbox."""
+
     def __init__(
         self,
         binary: Path,
-        sandbox: SandboxEnvironment,
+        settings: Settings,
+        sandboxes: SandboxControlPlane,
         *,
-        binary_bytes: bytes,
-        codex_home_path: str,
-        runtime_sha256: str,
-        current_release_sha256: str,
         developer_instructions: str | None = None,
-        openai_base_url: str | None = None,
-        model: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
         skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
         native_memory_enabled: bool = False,
     ) -> None:
-        self._binary = binary
-        self._binary_bytes = binary_bytes
-        self._runtime_sha256 = runtime_sha256
-        self._current_release_sha256 = current_release_sha256
-        self._sandbox = sandbox
-        self._sandbox_runtime = sandbox.runtime
-        self._codex_home_path = codex_home_path
-        session_root = posixpath.dirname(codex_home_path.rstrip("/"))
-        self._sandbox_binary = posixpath.join(
-            session_root,
-            "runtimes",
-            runtime_sha256,
-            "codex",
-        )
+        self._binary_bytes = binary.read_bytes()
+        self._binary_sha256 = sha256(self._binary_bytes).hexdigest()
+        self._settings = settings
+        self._sandboxes = sandboxes
         self._developer_instructions = developer_instructions
-        self._openai_base_url = openai_base_url
-        self._model = model
         self._codex_config = deepcopy(dict(codex_config or {}))
-        self._skill_roots = {root.id: root for root in skill_roots or ()}
-        if len(self._skill_roots) != len(skill_roots or ()):
-            raise ValueError("Efferva SkillRoot ids must be unique")
+        self._skill_roots = tuple(skill_roots or ())
         self._native_memory_enabled = native_memory_enabled
-        self._process: ProcessHandle | None = None
-        self._reader_task: asyncio.Task[None] | None = None
-        self._pending: dict[int, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
-        self._thread_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._server_request_tasks: set[asyncio.Task[None]] = set()
-        self._write_lock = asyncio.Lock()
-        self._start_lock = asyncio.Lock()
+        self._locks: dict[UUID, asyncio.Lock] = {}
         self._next_id = 1
-        self._closed = False
+        self._id_lock = asyncio.Lock()
 
-    async def start(self) -> None:
-        async with self._start_lock:
-            if self.healthy:
-                return
-            previous_process = self._process
-            if previous_process is not None:
-                with contextlib.suppress(Exception):
-                    await self._sandbox_runtime.terminate_process(previous_process)
-            for task in (self._reader_task,):
-                if task is not None and not task.done():
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-            await self._cancel_server_request_tasks()
-            self._closed = False
-            try:
-                await self._sandbox_runtime.stat(self._sandbox_binary)
-            except FileNotFoundError:
-                if self._runtime_sha256 != self._current_release_sha256:
-                    raise RuntimeError(
-                        "Session requires Codex runtime "
-                        f"{self._runtime_sha256}, but it is not present on the "
-                        "persistent volume and the current official release provides "
-                        f"{self._current_release_sha256}"
-                    )
-                await self._run_sandbox_command(
-                    (
-                        "sh",
-                        "-lc",
-                        "mkdir -p "
-                        f"{shlex.quote(posixpath.dirname(self._sandbox_binary))}",
-                    ),
-                    cwd="/",
-                )
-                await self._sandbox_runtime.write_file(
-                    self._sandbox_binary,
-                    self._binary_bytes,
-                )
-            await self._run_sandbox_command(
-                (
-                    "sh",
-                    "-lc",
-                    (
-                        f"mkdir -p {shlex.quote(self._codex_home_path)} "
-                        f"{shlex.quote(self._sandbox.workspace_path)} && "
-                        f"chmod 755 {shlex.quote(self._sandbox_binary)}"
-                    ),
-                ),
-                cwd="/",
-            )
-            environment = {
-                "CODEX_HOME": self._codex_home_path,
-                "HOME": self._codex_home_path,
-            }
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if api_key:
-                environment["OPENAI_API_KEY"] = (
-                    "efferva-credential-proxy"
-                    if self._sandbox.sandbox.state.get("credentialProxy")
-                    else api_key
-                )
-            process = await self._sandbox_runtime.start_process(
-                ProcessSpec(
-                    argv=(self._sandbox_binary, "app-server"),
-                    cwd=self._sandbox.workspace_path,
-                    env=environment,
-                    pipe_stdin=True,
-                )
-            )
-            self._process = process
-            self._reader_task = asyncio.create_task(self._read_loop(process))
-            await self.request(
-                "initialize",
-                {
-                    "clientInfo": {
-                        "name": "efferva",
-                        "title": "Efferva",
-                        "version": "0.1.0",
-                    },
-                    "capabilities": {
-                        "experimentalApi": True,
-                        "requestAttestation": False,
-                    },
-                },
-            )
-            await self.notify("notifications/initialized")
-
-    def _runtime_command(self) -> list[str]:
-        return [self._sandbox_binary, "app-server"]
-
-    def _thread_config(
-        self,
-        sandbox: SandboxEnvironment,
-        runtime_config: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        config = _resolve_sandbox_config(self._codex_config, sandbox)
-        thread_config = runtime_config or {}
-        if self._openai_base_url:
-            providers = config.setdefault("model_providers", {})
-            if not isinstance(providers, dict):
-                raise ValueError("Codex config model_providers must be a table")
-            providers["efferva_proxy"] = {
-                "name": "Efferva LLM proxy",
-                "base_url": self._openai_base_url,
-                "env_key": "OPENAI_API_KEY",
-                "wire_api": "responses",
-            }
-            config.setdefault("model_provider", "efferva_proxy")
-        model_provider = thread_config.get("model_provider")
-        if model_provider is not None:
-            if not isinstance(model_provider, str) or not model_provider.strip():
-                raise ValueError("model_provider must be a non-empty string")
-            providers = config.get("model_providers", {})
-            if model_provider not in providers:
-                raise ValueError(f"Unknown Codex model provider: {model_provider}")
-            config["model_provider"] = model_provider
-        if not self._native_memory_enabled:
-            features = config.setdefault("features", {})
-            if not isinstance(features, dict):
-                raise ValueError("Codex config features must be a table")
-            features["memories"] = False
-        return config
+    @property
+    def healthy(self) -> bool:
+        return True
 
     async def request(
         self,
+        session: Mapping[str, Any],
         method: str,
         params: dict[str, Any] | None = None,
-        *,
-        request_timeout: float = 120,
     ) -> dict[str, Any]:
-        await self._ensure_process()
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[dict[str, Any]] = loop.create_future()
-        async with self._write_lock:
-            request_id = self._next_id
-            self._next_id += 1
-            self._pending[request_id] = (method, future)
-            message: dict[str, Any] = {"id": request_id, "method": method}
-            if params is not None:
-                message["params"] = params
-            await self._write(message)
-        try:
-            return await asyncio.wait_for(future, request_timeout)
-        finally:
-            self._pending.pop(request_id, None)
+        sandbox = await self._ensure_session(session)
+        async with self._connection(sandbox) as websocket:
+            return await self._rpc(websocket, method, params or {})
 
-    async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        await self._ensure_process()
-        message: dict[str, Any] = {"method": method}
-        if params is not None:
-            message["params"] = params
-        async with self._write_lock:
-            await self._write(message)
-
-    async def ensure_environment(self, sandbox: SandboxEnvironment) -> None:
-        if sandbox.sandbox.external_ref != self._sandbox.sandbox.external_ref:
-            raise RuntimeError("Codex runtime is bound to another Session sandbox")
-        await self.start()
+    async def list_threads(self, session: Mapping[str, Any]) -> list[dict[str, Any]]:
+        result = await self.request(
+            session,
+            "thread/list",
+            {
+                "limit": 100,
+                "sortKey": "updated_at",
+                "sortDirection": "desc",
+            },
+        )
+        return list(result.get("data") or [])
 
     async def start_thread(
         self,
-        sandbox: SandboxEnvironment,
-        runtime_config: Mapping[str, Any] | None = None,
-    ) -> str:
-        thread_config = runtime_config or {}
-        params = {
-            "cwd": sandbox.workspace_path,
-            "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
-        }
-        config = self._thread_config(sandbox, thread_config)
-        if config:
-            params["config"] = config
-        model_provider = thread_config.get("model_provider")
-        if model_provider or self._openai_base_url:
-            params["modelProvider"] = model_provider or "efferva_proxy"
-        model = thread_config.get("model") or self._model
-        if model:
-            params["model"] = model
-        effort = thread_config.get("reasoning_effort")
-        if effort:
-            params["reasoningEffort"] = effort
-        if self._developer_instructions is not None:
-            params["developerInstructions"] = self._developer_instructions
-        response = await self.request("thread/start", params)
-        thread_id = str(response["thread"]["id"])
-        return thread_id
-
-    async def resume_thread(
-        self,
-        thread_id: str,
-        sandbox: SandboxEnvironment,
-        runtime_config: Mapping[str, Any] | None = None,
-    ) -> None:
-        thread_config = runtime_config or {}
-        params = {
-            "threadId": thread_id,
-            "cwd": sandbox.workspace_path,
-            "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
-        }
-        config = self._thread_config(sandbox, thread_config)
-        if config:
-            params["config"] = config
-        model_provider = thread_config.get("model_provider")
-        if model_provider or self._openai_base_url:
-            params["modelProvider"] = model_provider or "efferva_proxy"
-        model = thread_config.get("model") or self._model
-        if model:
-            params["model"] = model
-        if self._developer_instructions is not None:
-            params["developerInstructions"] = self._developer_instructions
-        await self.request("thread/resume", params)
-
-    async def start_turn(
-        self,
-        thread_id: str,
-        prompt: str,
-        sandbox: SandboxEnvironment,
+        session: Mapping[str, Any],
         *,
+        title: str | None = None,
+        workspace: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
-    ) -> str:
-        params: dict[str, Any] = {
-            "threadId": thread_id,
-            "input": [
-                {
-                    "type": "text",
-                    "text": prompt,
-                    "textElements": [],
-                }
-            ],
-            "cwd": sandbox.workspace_path,
-        }
-        if model:
-            params["model"] = model
-        if reasoning_effort:
-            params["effort"] = reasoning_effort
-        response = await self.request(
-            "turn/start",
-            params,
-        )
-        return str(response["turn"]["id"])
-
-    async def set_goal(
-        self,
-        thread_id: str,
-        *,
-        objective: str | None = None,
-        status: str | None = None,
-        token_budget: int | None | object = ...,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"threadId": thread_id}
-        if objective is not None:
-            params["objective"] = objective
-        if status is not None:
-            params["status"] = status
-        if token_budget is not ...:
-            params["tokenBudget"] = token_budget
-        response = await self.request("thread/goal/set", params)
-        return dict(response["goal"])
-
-    async def get_goal(self, thread_id: str) -> dict[str, Any] | None:
-        response = await self.request("thread/goal/get", {"threadId": thread_id})
-        goal = response.get("goal")
-        return dict(goal) if isinstance(goal, Mapping) else None
-
-    async def clear_goal(self, thread_id: str) -> bool:
-        response = await self.request("thread/goal/clear", {"threadId": thread_id})
-        return bool(response.get("cleared"))
-
-    async def set_memory_mode(self, thread_id: str, mode: str) -> None:
-        if mode == "enabled" and not self._native_memory_enabled:
-            raise ValueError(
-                "Native Codex memory is disabled by product configuration"
-            )
-        await self.request(
-            "thread/memoryMode/set",
-            {"threadId": thread_id, "mode": mode},
+        workspace = posixpath.normpath(workspace or self._settings.workspace_path)
+        if not workspace.startswith("/"):
+            raise ValueError("Thread workspace must be an absolute Sandbox path")
+        sandbox = await self._ensure_session(session)
+        await self._run_command(
+            sandbox,
+            (
+                "sh",
+                "-lc",
+                (
+                    f"mkdir -p {shlex.quote(workspace)} && "
+                    f"chown {self._settings.sandbox_uid}:{self._settings.sandbox_gid} "
+                    f"{shlex.quote(workspace)}"
+                ),
+            ),
         )
+        params = self._thread_params(model=model, reasoning_effort=reasoning_effort)
+        params["cwd"] = workspace
+        async with self._connection(sandbox) as websocket:
+            result = await self._rpc(websocket, "thread/start", params)
+        thread = dict(result["thread"])
+        if title:
+            async with self._connection(sandbox) as websocket:
+                await self._rpc(
+                    websocket,
+                    "thread/name/set",
+                    {"threadId": thread["id"], "name": title},
+                )
+            thread["name"] = title
+        return thread
 
-    async def compact_thread(self, thread_id: str) -> None:
-        await self.request("thread/compact/start", {"threadId": thread_id})
+    async def read_thread(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+    ) -> dict[str, Any]:
+        result = await self.request(
+            session,
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": True},
+        )
+        return dict(result["thread"])
 
-    async def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
+    async def interrupt_turn(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
         await self.request(
+            session,
             "turn/interrupt",
             {"threadId": thread_id, "turnId": turn_id},
         )
 
-    def subscribe(self, thread_id: str) -> asyncio.Queue[dict[str, Any]]:
-        if thread_id in self._thread_queues:
-            raise RuntimeError(f"thread {thread_id} already has an active run")
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._thread_queues[thread_id] = queue
-        return queue
-
-    def unsubscribe(self, thread_id: str) -> None:
-        self._thread_queues.pop(thread_id, None)
-
-    @property
-    def healthy(self) -> bool:
-        return (
-            self._process is not None
-            and self._reader_task is not None
-            and not self._reader_task.done()
-            and not self._closed
-        )
-
-    async def unload_thread(self, thread_id: str) -> None:
-        await self.request("thread/unsubscribe", {"threadId": thread_id})
-
-    async def close(self) -> None:
-        process = self._process
-        self._process = None
-        self._closed = True
-        if process is None:
-            return
-        with contextlib.suppress(Exception):
-            await self._sandbox_runtime.terminate_process(process)
-        for task in (self._reader_task,):
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-        with contextlib.suppress(Exception):
-            await self._forget_process(process)
-        await self._cancel_server_request_tasks()
-        self._fail_pending(RuntimeError("Codex runtime closed"))
-
-    async def _ensure_process(self) -> None:
-        if self._process is None or self._closed:
-            raise RuntimeError("Codex runtime is not running")
-
-    async def _write(self, message: dict[str, Any]) -> None:
-        assert self._process is not None
-        payload = json.dumps(message, separators=(",", ":")).encode() + b"\n"
-        await self._sandbox_runtime.write_stdin(self._process, payload)
-
-    async def _read_loop(self, process: ProcessHandle) -> None:
-        cursor = 0
-        stdout_buffer = b""
-        try:
-            while True:
-                output = await self._sandbox_runtime.read_process(process, cursor)
-                cursor = output.next_cursor
-                for chunk in output.chunks:
-                    if chunk.stream == "stderr":
-                        logger.info(
-                            "codex-runtime[%s]: %s",
-                            self._sandbox.environment_id,
-                            chunk.data.decode(errors="replace").rstrip(),
-                        )
-                        continue
-                    stdout_buffer += chunk.data
-                    while b"\n" in stdout_buffer:
-                        line, stdout_buffer = stdout_buffer.split(b"\n", 1)
-                        if line.strip():
-                            self._handle_message(json.loads(line))
-                if output.exited or output.closed:
-                    if stdout_buffer.strip():
-                        self._handle_message(json.loads(stdout_buffer))
-                    break
-                await asyncio.sleep(0.02)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Codex runtime reader failed")
-        finally:
-            error = RuntimeError("Codex runtime stream ended")
-            self._fail_pending(error)
-            self._fail_subscribers(error)
-
-    def _handle_message(self, message: dict[str, Any]) -> None:
-        if "id" in message and ("result" in message or "error" in message):
-            self._resolve_response(message)
-        elif "id" in message and "method" in message:
-            task = asyncio.create_task(self._handle_server_request(message))
-            self._server_request_tasks.add(task)
-            task.add_done_callback(self._server_request_completed)
-        elif "method" in message:
-            self._route_notification(message)
-
-    async def _run_sandbox_command(
+    async def stream_turn(
         self,
-        argv: tuple[str, ...],
+        session: Mapping[str, Any],
+        thread_id: str,
+        prompt: str,
         *,
-        cwd: str,
-        timeout: float = 30,
-    ) -> None:
-        process = await self._sandbox_runtime.start_process(
-            ProcessSpec(argv=argv, cwd=cwd)
-        )
-        deadline = asyncio.get_running_loop().time() + timeout
-        cursor = 0
-        output = None
-        while asyncio.get_running_loop().time() < deadline:
-            output = await self._sandbox_runtime.read_process(process, cursor)
-            cursor = output.next_cursor
-            if output.exited or output.closed:
-                break
-            await asyncio.sleep(0.02)
-        if output is None or not output.exited:
-            with contextlib.suppress(Exception):
-                await self._sandbox_runtime.terminate_process(process)
-            with contextlib.suppress(Exception):
-                await self._forget_process(process)
-            raise TimeoutError(f"sandbox command timed out: {argv[0]}")
-        if output.exit_code != 0:
-            detail = b"".join(chunk.data for chunk in output.chunks).decode(
-                errors="replace"
-            )
-            with contextlib.suppress(Exception):
-                await self._forget_process(process)
-            raise RuntimeError(f"sandbox command failed ({output.exit_code}): {detail}")
-        with contextlib.suppress(Exception):
-            await self._forget_process(process)
-
-    async def _forget_process(self, process: ProcessHandle) -> None:
-        forget = getattr(self._sandbox_runtime, "forget_process", None)
-        if forget is not None:
-            await forget(process)
-
-    def _resolve_response(self, message: dict[str, Any]) -> None:
-        pending = self._pending.get(message["id"])
-        if pending is None:
-            return
-        method, future = pending
-        if future.done():
-            return
-        if "error" in message:
-            future.set_exception(CodexRpcError(method, message["error"]))
-        else:
-            future.set_result(message.get("result") or {})
-
-    async def _handle_server_request(self, message: dict[str, Any]) -> None:
-        await self._send_server_error(
-            message["id"],
-            -32601,
-            f"Efferva cannot handle server request {message['method']}",
-        )
-
-    async def _send_server_error(
-        self,
-        request_id: Any,
-        code: int,
-        message: str,
-    ) -> None:
-        async with self._write_lock:
-            await self._write({"id": request_id, "error": {"code": code, "message": message}})
-
-    async def _cancel_server_request_tasks(self) -> None:
-        tasks = tuple(self._server_request_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._server_request_tasks.clear()
-
-    def _server_request_completed(self, task: asyncio.Task[None]) -> None:
-        self._server_request_tasks.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            logger.error(
-                "Efferva failed to handle a Codex server request",
-                exc_info=(type(error), error, error.__traceback__),
-            )
-
-    def _route_notification(self, message: dict[str, Any]) -> None:
-        params = message.get("params") or {}
-        thread_id = params.get("threadId")
-        if thread_id is None:
-            return
-        queue = self._thread_queues.get(str(thread_id))
-        if queue is not None:
-            queue.put_nowait(message)
-
-    def _fail_pending(self, error: Exception) -> None:
-        for _, future in self._pending.values():
-            if not future.done():
-                future.set_exception(error)
-
-    def _fail_subscribers(self, error: Exception) -> None:
-        for thread_id, queue in self._thread_queues.items():
-            queue.put_nowait(
-                {
-                    "method": "efferva/runtimeError",
-                    "params": {
-                        "threadId": thread_id,
-                        "message": str(error),
-                    },
-                }
-            )
-
-    @staticmethod
-    def _environment_selection(sandbox: SandboxEnvironment) -> dict[str, Any]:
-        return {
-            "environmentId": sandbox.environment_id,
-            "cwd": sandbox.workspace_path,
-            "runtimeWorkspaceRoots": [sandbox.workspace_path],
-        }
-
-    def _selected_skill_roots(
-        self,
-        sandbox: SandboxEnvironment,
-        runtime_config: Mapping[str, Any],
-    ) -> list[dict[str, object]]:
-        requested = runtime_config.get("skill_roots")
-        if requested is None:
-            roots = [root for root in self._skill_roots.values() if root.enabled_by_default]
-        else:
-            if not isinstance(requested, list) or not all(
-                isinstance(item, str) for item in requested
-            ):
-                raise ValueError("skill_roots must be a list of registered root ids")
-            unknown = set(requested) - self._skill_roots.keys()
-            if unknown:
-                names = ", ".join(sorted(unknown))
-                raise ValueError(f"Unknown SkillRoot ids: {names}")
-            roots = [self._skill_roots[root_id] for root_id in requested]
-        return [root.codex_spec(sandbox.environment_id) for root in roots]
-
-
-class CodexRuntime:
-    """Application-side pool of Codex app-servers, one per Session sandbox."""
-
-    def __init__(
-        self,
-        binary: Path,
-        *,
-        codex_home_path: str,
-        developer_instructions: str | None = None,
-        openai_base_url: str | None = None,
         model: str | None = None,
-        codex_config: Mapping[str, Any] | None = None,
-        skill_roots: tuple[SkillRoot, ...] | list[SkillRoot] | None = None,
-        native_memory_enabled: bool = False,
-    ) -> None:
-        self._binary = binary
-        self._binary_bytes = binary.read_bytes()
-        self._current_release_sha256 = sha256(self._binary_bytes).hexdigest()
-        self._codex_home_path = codex_home_path
-        self._options = {
-            "developer_instructions": developer_instructions,
-            "openai_base_url": openai_base_url,
-            "model": model,
-            "codex_config": deepcopy(dict(codex_config or {})),
-            "skill_roots": tuple(skill_roots or ()),
-            "native_memory_enabled": native_memory_enabled,
-        }
-        self._sessions: dict[str, _SessionCodexRuntime] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
-        self._last_used: dict[str, float] = {}
-        self._started = False
-
-    async def start(self) -> None:
-        self._started = True
-
-    @property
-    def healthy(self) -> bool:
-        return self._started
-
-    async def ensure_environment(
-        self,
-        sandbox: SandboxEnvironment,
-        *,
-        runtime_sha256: str | None = None,
-    ) -> _SessionCodexRuntime:
-        if not self._started:
-            raise RuntimeError("Codex runtime pool is not running")
-        key = sandbox.environment_id
-        requested_sha256 = (
-            runtime_sha256.lower()
-            if runtime_sha256 is not None
-            and len(runtime_sha256) == 64
-            and all(character in "0123456789abcdefABCDEF" for character in runtime_sha256)
-            else self._current_release_sha256
-        )
-        lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            current = self._sessions.get(key)
-            if (
-                current is not None
-                and current.healthy
-                and current._sandbox.sandbox.external_ref
-                == sandbox.sandbox.external_ref
-                and current._runtime_sha256 == requested_sha256
-            ):
-                self._last_used[key] = asyncio.get_running_loop().time()
-                return current
-            if current is not None:
-                await current.close()
-            runtime = _SessionCodexRuntime(
-                self._binary,
-                sandbox,
-                binary_bytes=self._binary_bytes,
-                codex_home_path=self._codex_home_path,
-                runtime_sha256=requested_sha256,
-                current_release_sha256=self._current_release_sha256,
-                **self._options,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        sandbox = await self._ensure_session(session)
+        async with self._connection(sandbox) as websocket:
+            await self._rpc(
+                websocket,
+                "thread/resume",
+                {
+                    "threadId": thread_id,
+                    **self._thread_params(
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                    ),
+                },
             )
-            await runtime.start()
-            self._sessions[key] = runtime
-            self._last_used[key] = asyncio.get_running_loop().time()
-            return runtime
+            request_id = await self._request_id()
+            params: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt, "textElements": []}],
+            }
+            if model:
+                params["model"] = model
+            if reasoning_effort:
+                params["effort"] = reasoning_effort
+            await websocket.send(
+                json.dumps(
+                    {"method": "turn/start", "id": request_id, "params": params},
+                    separators=(",", ":"),
+                )
+            )
+            turn_id: str | None = None
+            while True:
+                message = json.loads(await websocket.recv())
+                if message.get("id") == request_id:
+                    if "error" in message:
+                        raise CodexRpcError("turn/start", message["error"])
+                    turn = message.get("result", {}).get("turn", {})
+                    turn_id = str(turn.get("id")) if turn.get("id") else None
+                    yield {
+                        "method": "efferva/turn-started",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                        },
+                    }
+                    continue
+                if "method" in message and "id" in message:
+                    await self._reject_server_request(websocket, message)
+                    continue
+                if "method" not in message:
+                    continue
+                yield message
+                if message["method"] == "turn/completed":
+                    completed = message.get("params", {}).get("turn", {})
+                    completed_id = completed.get("id")
+                    if turn_id is None or completed_id in {None, turn_id}:
+                        return
 
-    def mark_environment_idle(self, session_id: str) -> None:
-        if session_id in self._sessions:
-            self._last_used[session_id] = asyncio.get_running_loop().time()
-
-    def idle_environment_ids(self, idle_seconds: int) -> tuple[str, ...]:
-        cutoff = asyncio.get_running_loop().time() - idle_seconds
-        return tuple(
-            session_id
-            for session_id, last_used in self._last_used.items()
-            if session_id in self._sessions and last_used <= cutoff
-        )
-
-    async def release_environment(self, session_id: str) -> None:
+    async def _ensure_session(
+        self,
+        session: Mapping[str, Any],
+    ) -> SandboxEnvironment:
+        session_id = UUID(str(session["id"]))
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            runtime = self._sessions.pop(session_id, None)
-            self._last_used.pop(session_id, None)
-            if runtime is not None:
-                await runtime.close()
-
-    async def close(self) -> None:
-        self._started = False
-        runtimes = tuple(self._sessions.values())
-        self._sessions.clear()
-        self._locks.clear()
-        self._last_used.clear()
-        if runtimes:
-            await asyncio.gather(
-                *(runtime.close() for runtime in runtimes),
-                return_exceptions=True,
+            sandbox = await self._sandboxes.ensure(
+                session_id,
+                str(session["workspace_ref"]),
             )
+            await self._install_and_start(sandbox)
+            return sandbox
+
+    async def _install_and_start(self, sandbox: SandboxEnvironment) -> None:
+        runtime_root = posixpath.join(
+            self._settings.codex_runtime_dir,
+            self._binary_sha256,
+        )
+        sandbox_binary = posixpath.join(runtime_root, "codex")
+        try:
+            await sandbox.runtime.stat(sandbox_binary)
+        except FileNotFoundError:
+            await self._run_command(
+                sandbox,
+                (
+                    "sh",
+                    "-lc",
+                    f"mkdir -p {shlex.quote(runtime_root)}",
+                ),
+            )
+            await sandbox.runtime.write_file(sandbox_binary, self._binary_bytes)
+
+        codex_home = self._settings.codex_home_path
+        pid_file = "/tmp/efferva-app-server.pid"
+        log_file = posixpath.join(codex_home, "app-server.log")
+        start_lock = "/tmp/efferva-app-server-start.lock"
+        listen = f"ws://0.0.0.0:{self._settings.codex_appserver_port}"
+        bootstrap = (
+            f"if [ -d {shlex.quote(posixpath.join(self._settings.session_volume_path, 'codex-home'))} ] "
+            f"&& [ ! -e {shlex.quote(codex_home)} ]; then "
+            f"mv {shlex.quote(posixpath.join(self._settings.session_volume_path, 'codex-home'))} "
+            f"{shlex.quote(codex_home)}; fi; "
+            "if ! id sandbox >/dev/null 2>&1; then "
+            "if command -v useradd >/dev/null 2>&1; then "
+            f"useradd -u {self._settings.sandbox_uid} "
+            f"-d {shlex.quote(self._settings.session_volume_path)} "
+            "-M -s /bin/sh sandbox 2>/dev/null || true; "
+            "elif command -v adduser >/dev/null 2>&1; then "
+            f"adduser -D -u {self._settings.sandbox_uid} "
+            f"-h {shlex.quote(self._settings.session_volume_path)} "
+            "sandbox 2>/dev/null || true; fi; fi; "
+            f"mkdir -p {shlex.quote(codex_home)} "
+            f"{shlex.quote(self._settings.workspace_path)} && "
+            f"chmod 755 {shlex.quote(sandbox_binary)} && "
+            f"chown {self._settings.sandbox_uid}:{self._settings.sandbox_gid} "
+            f"{shlex.quote(self._settings.session_volume_path)} "
+            f"{shlex.quote(codex_home)} "
+            f"{shlex.quote(self._settings.workspace_path)}"
+        )
+        await self._run_command(sandbox, ("sh", "-lc", bootstrap))
+        command = (
+            f"if ! mkdir {shlex.quote(start_lock)} 2>/dev/null; then exit 0; fi; "
+            f"trap 'rmdir {shlex.quote(start_lock)} 2>/dev/null || true' EXIT; "
+            f"if [ -s {shlex.quote(pid_file)} ]; then "
+            f"read -r efferva_pid efferva_sha <{shlex.quote(pid_file)}; "
+            f"if kill -0 \"$efferva_pid\" 2>/dev/null && "
+            f"[ \"$efferva_sha\" = {shlex.quote(self._binary_sha256)} ]; then "
+            "exit 0; fi; "
+            f"kill \"$efferva_pid\" 2>/dev/null || true; fi; "
+            f"cd {shlex.quote(self._settings.workspace_path)} && "
+            f"{shlex.quote(sandbox_binary)} app-server "
+            f"--listen {shlex.quote(listen)} "
+            f"</dev/null >>{shlex.quote(log_file)} 2>&1 & "
+            f"echo \"$! {self._binary_sha256}\" >{shlex.quote(pid_file)}"
+        )
+        environment = {
+            "CODEX_HOME": codex_home,
+            "HOME": self._settings.session_volume_path,
+        }
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            environment["OPENAI_API_KEY"] = (
+                "efferva-credential-proxy"
+                if sandbox.sandbox.state.get("credentialProxy")
+                else api_key
+            )
+        await self._run_command(
+            sandbox,
+            ("sh", "-lc", command),
+            env=environment,
+            uid=self._settings.sandbox_uid,
+            gid=self._settings.sandbox_gid,
+        )
+
+    async def _run_command(
+        self,
+        sandbox: SandboxEnvironment,
+        argv: tuple[str, ...],
+        *,
+        env: Mapping[str, str] | None = None,
+        uid: int | None = None,
+        gid: int | None = None,
+    ) -> None:
+        process = await sandbox.runtime.start_process(
+            ProcessSpec(
+                argv=argv,
+                cwd="/",
+                env=env or {},
+                uid=uid,
+                gid=gid,
+            )
+        )
+        cursor = 0
+        for _ in range(400):
+            output = await sandbox.runtime.read_process(process, cursor)
+            cursor = output.next_cursor
+            if output.exited:
+                if output.exit_code != 0:
+                    detail = b"".join(
+                        chunk.data for chunk in output.chunks
+                    ).decode(errors="replace")
+                    raise RuntimeError(detail or f"sandbox command exited {output.exit_code}")
+                return
+            await asyncio.sleep(0.025)
+        raise TimeoutError(f"sandbox command did not exit: {argv[0]}")
+
+    @asynccontextmanager
+    async def _connection(
+        self,
+        sandbox: SandboxEnvironment,
+    ) -> AsyncIterator[ClientConnection]:
+        endpoint, headers = await sandbox.runtime.get_endpoint(
+            self._settings.codex_appserver_port
+        )
+        url = _websocket_url(endpoint)
+        last_error: Exception | None = None
+        for attempt in range(8):
+            try:
+                websocket = await connect(
+                    url,
+                    additional_headers=dict(headers),
+                    open_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=16 * 1024 * 1024,
+                )
+                break
+            except Exception as error:
+                last_error = error
+                if attempt == 7:
+                    raise RuntimeError(
+                        f"Codex app-server is not reachable at {url}: {error}"
+                    ) from error
+                await asyncio.sleep(0.1 * (2**attempt))
+        else:
+            raise RuntimeError(str(last_error))
+        try:
+            await self._initialize(websocket)
+            yield websocket
+        finally:
+            await websocket.close()
+
+    async def _initialize(self, websocket: ClientConnection) -> None:
+        await self._rpc(
+            websocket,
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "efferva",
+                    "title": "Efferva",
+                    "version": "0.1.0",
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "requestAttestation": False,
+                },
+            },
+        )
+        await websocket.send(
+            json.dumps(
+                {"method": "initialized", "params": {}},
+                separators=(",", ":"),
+            )
+        )
+
+    async def _rpc(
+        self,
+        websocket: ClientConnection,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        request_id = await self._request_id()
+        await websocket.send(
+            json.dumps(
+                {"method": method, "id": request_id, "params": params},
+                separators=(",", ":"),
+            )
+        )
+        while True:
+            message = json.loads(await websocket.recv())
+            if message.get("id") == request_id:
+                if "error" in message:
+                    raise CodexRpcError(method, message["error"])
+                return dict(message.get("result") or {})
+            if "method" in message and "id" in message:
+                await self._reject_server_request(websocket, message)
+
+    async def _reject_server_request(
+        self,
+        websocket: ClientConnection,
+        message: Mapping[str, Any],
+    ) -> None:
+        await websocket.send(
+            json.dumps(
+                {
+                    "id": message["id"],
+                    "error": {
+                        "code": -32601,
+                        "message": f"unsupported server request: {message['method']}",
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+
+    async def _request_id(self) -> int:
+        async with self._id_lock:
+            value = self._next_id
+            self._next_id += 1
+            return value
+
+    def _thread_params(
+        self,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        config = deepcopy(self._codex_config)
+        if self._settings.codex_openai_base_url:
+            providers = config.setdefault("model_providers", {})
+            providers["efferva_proxy"] = {
+                "name": "Efferva LLM proxy",
+                "base_url": self._settings.codex_openai_base_url,
+                "env_key": "OPENAI_API_KEY",
+                "wire_api": "responses",
+            }
+            config["model_provider"] = "efferva_proxy"
+        if not self._native_memory_enabled:
+            config.setdefault("features", {})["memories"] = False
+        params: dict[str, Any] = {
+            "approvalPolicy": "never",
+            "sandbox": "dangerFullAccess",
+        }
+        selected_model = model or self._settings.codex_model
+        if selected_model:
+            params["model"] = selected_model
+        if reasoning_effort:
+            params["effort"] = reasoning_effort
+        if self._settings.codex_openai_base_url:
+            params["modelProvider"] = "efferva_proxy"
+        if self._developer_instructions:
+            params["developerInstructions"] = self._developer_instructions
+        if config:
+            params["config"] = config
+        return params
+
+
+def _websocket_url(endpoint: str) -> str:
+    if endpoint.startswith("https://"):
+        return "wss://" + endpoint.removeprefix("https://")
+    if endpoint.startswith("http://"):
+        return "ws://" + endpoint.removeprefix("http://")
+    if endpoint.startswith(("ws://", "wss://")):
+        return endpoint
+    return f"ws://{endpoint}"

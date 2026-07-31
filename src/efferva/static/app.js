@@ -5,7 +5,7 @@ const state = {
   sessionId: null,
   threads: [],
   threadId: null,
-  eventSource: null,
+  streamAbortController: null,
   streamingRunId: null,
 };
 
@@ -198,20 +198,18 @@ function appendUserMessage(content) {
 async function selectThread(id) {
   stopStreaming();
   state.threadId = id;
-  const thread = await request(`/api/threads/${id}`);
+  const thread = await request(`/api/sessions/${state.sessionId}/threads/${id}`);
   $("#thread-title").textContent = thread.title || "Untitled thread";
   $("#empty").classList.add("hidden");
   $("#chat").classList.remove("hidden");
   renderMessages(thread.messages);
   renderSidebar();
   updateWriteControls();
-  const activeRun = thread.runs.find((run) => ["queued", "running"].includes(run.status));
-  if (activeRun) streamRun(activeRun);
 }
 
 function stopStreaming() {
-  state.eventSource?.close();
-  state.eventSource = null;
+  state.streamAbortController?.abort();
+  state.streamAbortController = null;
   state.streamingRunId = null;
   $("#run-status").textContent = "";
   updateWriteControls();
@@ -229,42 +227,78 @@ function openCreator(kind) {
   $("#create-name").select();
 }
 
-function streamRun(run) {
-  if (state.streamingRunId === run.id) return;
+async function streamTurn(prompt) {
   stopStreaming();
+  const run = { id: crypto.randomUUID() };
+  const sessionId = state.sessionId;
   const threadId = state.threadId;
-  const source = new EventSource(endpoint(`/api/runs/${run.id}/events/stream`));
-  state.eventSource = source;
+  const controller = new AbortController();
+  state.streamAbortController = controller;
   state.streamingRunId = run.id;
-  $("#run-status").textContent = "Run 执行中 · 可安全刷新页面";
+  $("#run-status").textContent = "Codex 执行中 · 刷新后从 Thread 快照恢复";
   updateWriteControls();
 
-  source.onmessage = async (message) => {
-    const event = JSON.parse(message.data);
-    if (threadId !== state.threadId) return;
-    if (event.type === "TEXT_MESSAGE_START") {
-      startStreamingMessage(run, event.messageId);
-    } else if (event.type === "TEXT_MESSAGE_CONTENT") {
-      appendStreamingMessage(run, event);
+  try {
+    const response = await fetch(
+      endpoint(`/api/sessions/${sessionId}/threads/${threadId}/turns`),
+      {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt }),
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(body.detail || response.statusText);
     }
-    if (["RUN_FINISHED", "RUN_ERROR", "RUN_CANCELLED"].includes(event.type)) {
-      stopStreaming();
-      const thread = await request(`/api/threads/${threadId}`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() || "";
+      for (const frame of frames) {
+        const data = frame
+          .split("\n")
+          .find((line) => line.startsWith("data: "));
+        if (!data || threadId !== state.threadId) continue;
+        const event = JSON.parse(data.slice(6));
+        if (event.type === "TEXT_MESSAGE_START") {
+          startStreamingMessage(run, event.messageId);
+        } else if (event.type === "TEXT_MESSAGE_CONTENT") {
+          appendStreamingMessage(run, event);
+        } else if (event.type === "RUN_ERROR") {
+          $("#run-status").textContent = event.message || "Codex 执行失败";
+        }
+      }
+      if (done) break;
+    }
+    if (threadId === state.threadId && sessionId === state.sessionId) {
+      const thread = await request(
+        `/api/sessions/${sessionId}/threads/${threadId}`,
+      );
       renderMessages(thread.messages);
     }
-  };
-
-  source.onerror = () => {
-    if (source.readyState === EventSource.CLOSED && state.eventSource === source) {
-      stopStreaming();
-    } else if (state.eventSource === source) {
-      $("#run-status").textContent = "连接中断，正在自动补流…";
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      $("#run-status").textContent =
+        "浏览器连接已断开；Codex 仍在 Sandbox 中执行，刷新 Thread 可恢复状态";
     }
-  };
+  } finally {
+    if (state.streamAbortController === controller) {
+      state.streamAbortController = null;
+      state.streamingRunId = null;
+      updateWriteControls();
+    }
+  }
 }
 
 window.addEventListener("beforeunload", () => {
-  state.eventSource?.close();
+  state.streamAbortController?.abort();
 });
 
 $("#sessions").addEventListener("click", (event) => {
@@ -310,12 +344,8 @@ $("#composer").addEventListener("submit", async (event) => {
   const prompt = $("#prompt").value.trim();
   if (!prompt) return;
   $("#prompt").value = "";
-  const run = await request(`/api/threads/${state.threadId}/runs`, {
-    method: "POST",
-    body: JSON.stringify({ prompt }),
-  });
   appendUserMessage(prompt);
-  streamRun(run);
+  await streamTurn(prompt);
 });
 
 await Promise.all([loadMeta(), loadPrincipal()]);

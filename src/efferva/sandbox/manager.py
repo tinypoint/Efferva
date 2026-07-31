@@ -9,7 +9,6 @@ from efferva.sandbox.registry import create_registered_provider
 from efferva.sandbox.types import (
     SandboxContext,
     SandboxEnvironment,
-    SandboxFiles,
     SandboxHandle,
     SandboxProvider,
 )
@@ -38,9 +37,6 @@ class SandboxControlPlane:
         self,
         session_id: UUID,
         workspace_ref: str,
-        *,
-        owner_id: str,
-        fencing_token: int,
     ) -> SandboxEnvironment:
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
@@ -60,23 +56,13 @@ class SandboxControlPlane:
                 status="ready",
             )
             sandbox = await self.provider.start(context, workspace)
-            await self._repository.upsert_sandbox_lease(
+            await self._repository.upsert_sandbox_binding(
                 workspace_id=context.workspace_id,
                 provider=self.provider.name,
                 external_ref=sandbox.external_ref,
                 state=dict(sandbox.state),
-                owner_id=owner_id,
-                fencing_token=fencing_token,
-                lease_ttl_seconds=self._settings.lease_ttl_seconds,
             )
             runtime = await self.provider.connect(sandbox)
-
-            async def validate_fence() -> bool:
-                return await self._repository.sandbox_fence_is_current(
-                    context.workspace_id,
-                    owner_id,
-                    fencing_token,
-                )
 
             return SandboxEnvironment(
                 environment_id=str(session_id),
@@ -84,7 +70,6 @@ class SandboxControlPlane:
                 workspace_path=context.workspace_path,
                 sandbox=sandbox,
                 runtime=runtime,
-                files=SandboxFiles(runtime=runtime, validate_fence=validate_fence),
             )
 
     async def close(self) -> None:

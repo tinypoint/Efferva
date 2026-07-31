@@ -28,33 +28,24 @@ from efferva.repository import (
     NotFoundError,
     SystemRepository,
 )
-from efferva.runtime import CodexRuntime
+from efferva.runtime import CodexProxy, CodexRpcError
 from efferva.sandbox import create_sandbox_control_plane, register_sandbox_provider
-from efferva.worker import RunWorker
 
 
 @dataclass(slots=True)
 class _RuntimeResources:
     repository: SystemRepository | None = None
-    runtime: CodexRuntime | None = None
-    worker: RunWorker | None = None
+    proxy: CodexProxy | None = None
 
     def require_repository(self) -> SystemRepository:
         if self.repository is None:
             raise RuntimeError("Efferva application has not started")
         return self.repository
 
-    def worker_healthy(self) -> bool:
-        return self.worker is not None and self.worker.healthy
-
-    def warm_session(self, session: dict[str, Any]) -> None:
-        if self.worker is None:
-            return
-        self.worker.warm_session(
-            session["id"],
-            session["workspace_ref"],
-            session.get("codex_runtime_sha256"),
-        )
+    def require_proxy(self) -> CodexProxy:
+        if self.proxy is None:
+            raise RuntimeError("Efferva application has not started")
+        return self.proxy
 
 class Efferva:
     """Product-facing facade for installing Efferva into an authenticated application."""
@@ -103,8 +94,6 @@ class Efferva:
                 self.codex_config,
             )
             database = Database(settings.database_url)
-            runtime: CodexRuntime | None = None
-            worker: RunWorker | None = None
             sandboxes = None
             await database.open()
             try:
@@ -114,37 +103,26 @@ class Efferva:
                     codex_version=codex_release.version,
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
-                runtime = CodexRuntime(
+                sandboxes = create_sandbox_control_plane(settings, repository)
+                await sandboxes.start()
+                proxy = CodexProxy(
                     codex_release.binary,
-                    codex_home_path=settings.codex_home_path,
+                    settings,
+                    sandboxes,
                     developer_instructions=self.developer_instructions,
-                    openai_base_url=settings.codex_openai_base_url,
-                    model=settings.codex_model,
                     codex_config=codex_config,
                     skill_roots=self.skill_roots,
                     native_memory_enabled=self.native_memory_enabled,
                 )
-                await runtime.start()
-                sandboxes = create_sandbox_control_plane(settings, repository)
-                await sandboxes.start()
-                worker = RunWorker(settings, repository, runtime, sandboxes)
                 resources.repository = repository
-                resources.runtime = runtime
-                resources.worker = worker
-                await worker.start()
+                resources.proxy = proxy
                 yield
             finally:
-                resources.worker = None
-                resources.runtime = None
+                resources.proxy = None
                 resources.repository = None
                 try:
-                    if worker is not None:
-                        await worker.close()
-                    else:
-                        if sandboxes is not None:
-                            await sandboxes.close()
-                        if runtime is not None:
-                            await runtime.close()
+                    if sandboxes is not None:
+                        await sandboxes.close()
                 finally:
                     await database.close()
 
@@ -153,10 +131,7 @@ class Efferva:
             create_api_router(
                 identity=self.identity,
                 system_repository=resources.require_repository,
-                worker_healthy=resources.worker_healthy,
-                session_warmer=resources.warm_session,
-                skill_root_ids=tuple(root.id for root in self.skill_roots),
-                native_memory_enabled=self.native_memory_enabled,
+                codex_proxy=resources.require_proxy,
             )
         )
 
@@ -214,7 +189,14 @@ class Efferva:
         async def forbidden_handler(_, error: ForbiddenError) -> JSONResponse:
             return JSONResponse(status_code=403, content={"detail": str(error)})
 
+        async def codex_rpc_handler(_, error: CodexRpcError) -> JSONResponse:
+            return JSONResponse(
+                status_code=502,
+                content={"detail": str(error), "codex_error": error.error},
+            )
+
         app.add_exception_handler(NotFoundError, not_found_handler)
         app.add_exception_handler(ConflictError, conflict_handler)
         app.add_exception_handler(UnauthenticatedError, unauthenticated_handler)
         app.add_exception_handler(ForbiddenError, forbidden_handler)
+        app.add_exception_handler(CodexRpcError, codex_rpc_handler)

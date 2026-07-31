@@ -1,8 +1,9 @@
+import posixpath
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from efferva.identity import Capability
 
@@ -21,78 +22,45 @@ class Session(BaseModel):
     workspace_ref: str
     codex_version: str
     codex_runtime_sha256: str
+    last_active_at: datetime
     created_at: datetime
     updated_at: datetime
 
 
 class ThreadCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
+    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
     model: str | None = Field(default=None, min_length=1, max_length=200)
-    model_provider: str | None = Field(default=None, min_length=1, max_length=100)
-    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "ultra"] | None = None
-    skill_roots: list[str] | None = None
-    memory_mode: Literal["disabled", "enabled"] = "disabled"
+    reasoning_effort: Literal[
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra",
+    ] | None = None
 
-
-class Thread(BaseModel):
-    id: UUID
-    session_id: UUID
-    codex_thread_id: UUID | None
-    title: str | None
-    runtime_config: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime
-    updated_at: datetime
+    @field_validator("workspace")
+    @classmethod
+    def validate_workspace(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.startswith("/"):
+            raise ValueError("workspace must be an absolute Sandbox path")
+        return posixpath.normpath(value)
 
 
 class RunCreate(BaseModel):
     prompt: str = Field(min_length=1)
     model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "ultra"] | None = None
-
-
-class ThreadGoalSet(BaseModel):
-    objective: str = Field(min_length=1, max_length=10_000)
-    token_budget: int | None = Field(default=None, gt=0)
-
-
-class ThreadGoal(BaseModel):
-    thread_id: str
-    objective: str
-    status: str
-    token_budget: int | None = None
-    tokens_used: int = 0
-    time_used_seconds: int = 0
-    created_at: int
-    updated_at: int
-
-
-class Run(BaseModel):
-    id: UUID
-    agui_run_id: str
-    thread_id: UUID
-    status: str
-    input: dict[str, Any]
-    codex_turn_id: str | None
-    error: str | None
-    last_seq: int
-    created_at: datetime
-    updated_at: datetime
-
-
-class Message(BaseModel):
-    id: UUID
-    thread_id: UUID
-    run_id: UUID | None
-    role: Literal["user", "assistant", "system", "tool"]
-    content: str
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class ThreadDetail(Thread):
-    messages: list[Message]
-    runs: list[Run]
+    reasoning_effort: Literal[
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra",
+    ] | None = None
 
 
 class PrincipalView(BaseModel):

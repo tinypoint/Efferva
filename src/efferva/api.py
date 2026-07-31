@@ -1,9 +1,9 @@
-import asyncio
+from __future__ import annotations
+
 import json
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -11,18 +11,14 @@ from fastapi.responses import StreamingResponse
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
     PrincipalView,
-    Run,
     RunAgentInput,
     RunCreate,
     Session,
     SessionCreate,
-    Thread,
     ThreadCreate,
-    ThreadDetail,
-    ThreadGoal,
-    ThreadGoalSet,
 )
-from efferva.repository import AuthorizedRepository, NotFoundError, SystemRepository
+from efferva.repository import AccessMode, AuthorizedRepository, SystemRepository
+from efferva.runtime import CodexProxy
 
 
 def principal_dependency(
@@ -44,12 +40,11 @@ def _prompt_from_agui(input_payload: RunAgentInput) -> str:
         if isinstance(message.content, str):
             return message.content
         if isinstance(message.content, list):
-            text_parts = [
+            prompt = "".join(
                 part.get("text", "")
                 for part in message.content
                 if part.get("type") in {"text", "input_text"}
-            ]
-            prompt = "".join(text_parts)
+            )
             if prompt:
                 return prompt
     raise HTTPException(status_code=422, detail="AG-UI input requires a user message")
@@ -59,48 +54,140 @@ def _sse(seq: int, event: dict[str, Any]) -> str:
     return f"id: {seq}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
 
 
-def _stream_cursor(request: Request, query_cursor: int) -> int:
-    header = request.headers.get("last-event-id", "")
-    header_cursor = int(header) if header.isdigit() else 0
-    return max(query_cursor, header_cursor)
-
-
-async def _stream_run(
-    request: Request,
-    repository: AuthorizedRepository,
-    run_id: UUID,
-    after: int,
+async def _agui_stream(
+    proxy: CodexProxy,
+    session: dict[str, Any],
+    thread_id: str,
+    prompt: str,
+    *,
+    run_id: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> AsyncIterator[str]:
-    cursor = after
-    while True:
-        events = await repository.list_run_events(run_id, cursor)
-        if events:
-            for stored in events:
-                cursor = stored["seq"]
-                yield _sse(cursor, stored["event"])
-                if stored["event"]["type"] in {
-                    "RUN_FINISHED",
-                    "RUN_ERROR",
-                    "RUN_CANCELLED",
-                }:
-                    return
-            continue
-        if await request.is_disconnected():
-            return
-        if await repository.run_is_terminal(run_id):
-            return
-        yield ": keep-alive\n\n"
-        await asyncio.sleep(1)
+    seq = 0
+    message_id: str | None = None
+    saw_delta = False
+    yield _sse(
+        seq := seq + 1,
+        {
+            "type": "RUN_STARTED",
+            "runId": run_id,
+            "threadId": thread_id,
+            "input": {"prompt": prompt},
+        },
+    )
+    try:
+        async for notification in proxy.stream_turn(
+            session,
+            thread_id,
+            prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ):
+            method = notification["method"]
+            params = notification.get("params") or {}
+            if method == "efferva/turn-started":
+                yield _sse(
+                    seq := seq + 1,
+                    {
+                        "type": "RAW",
+                        "event": notification,
+                        "turnId": params.get("turnId"),
+                    },
+                )
+                continue
+            if method == "item/agentMessage/delta":
+                item_id = str(params.get("itemId") or uuid4())
+                if message_id is None:
+                    message_id = f"{run_id}:{item_id}"
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_START", "messageId": message_id},
+                    )
+                delta = str(params.get("delta") or "")
+                if delta:
+                    saw_delta = True
+                    yield _sse(
+                        seq := seq + 1,
+                        {
+                            "type": "TEXT_MESSAGE_CONTENT",
+                            "messageId": message_id,
+                            "delta": delta,
+                        },
+                    )
+                continue
+            if method == "item/completed":
+                item = params.get("item") or {}
+                if item.get("type") == "agentMessage":
+                    item_id = str(item.get("id") or uuid4())
+                    if message_id is None:
+                        message_id = f"{run_id}:{item_id}"
+                        yield _sse(
+                            seq := seq + 1,
+                            {"type": "TEXT_MESSAGE_START", "messageId": message_id},
+                        )
+                    text = str(item.get("text") or "")
+                    if text and not saw_delta:
+                        yield _sse(
+                            seq := seq + 1,
+                            {
+                                "type": "TEXT_MESSAGE_CONTENT",
+                                "messageId": message_id,
+                                "delta": text,
+                            },
+                        )
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+                    )
+                    message_id = None
+                    saw_delta = False
+                    continue
+            if method == "turn/completed":
+                turn = params.get("turn") or {}
+                status = turn.get("status")
+                if message_id is not None:
+                    yield _sse(
+                        seq := seq + 1,
+                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+                    )
+                if status == "completed":
+                    event = {
+                        "type": "RUN_FINISHED",
+                        "runId": run_id,
+                        "threadId": thread_id,
+                    }
+                elif status in {"interrupted", "cancelled"}:
+                    event = {"type": "RUN_CANCELLED", "runId": run_id}
+                else:
+                    error = turn.get("error") or {}
+                    event = {
+                        "type": "RUN_ERROR",
+                        "code": "RUNTIME_ERROR",
+                        "message": error.get("message") or f"turn {status}",
+                    }
+                yield _sse(seq := seq + 1, event)
+                return
+            yield _sse(
+                seq := seq + 1,
+                {"type": "RAW", "event": notification},
+            )
+    except Exception as error:
+        yield _sse(
+            seq := seq + 1,
+            {
+                "type": "RUN_ERROR",
+                "code": "RUNTIME_ERROR",
+                "message": str(error),
+            },
+        )
 
 
 def create_api_router(
     *,
     identity: IdentityResolver,
     system_repository: Callable[[], SystemRepository],
-    worker_healthy: Callable[[], bool],
-    session_warmer: Callable[[dict[str, Any]], None] | None = None,
-    skill_root_ids: tuple[str, ...] = (),
-    native_memory_enabled: bool = False,
+    codex_proxy: Callable[[], CodexProxy],
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
@@ -111,10 +198,9 @@ def create_api_router(
 
     @router.get("/healthz")
     async def healthz() -> dict[str, str]:
-        repository = system_repository()
-        await repository.ping()
-        if not worker_healthy():
-            raise HTTPException(status_code=503, detail="run worker is not healthy")
+        await system_repository().ping()
+        if not codex_proxy().healthy:
+            raise HTTPException(status_code=503, detail="Codex proxy is not healthy")
         return {"status": "ok"}
 
     @router.get("/api/meta", include_in_schema=False)
@@ -135,10 +221,7 @@ def create_api_router(
         payload: SessionCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        session = await authorized(principal).create_session(payload.name)
-        if session_warmer is not None:
-            session_warmer(session)
-        return session
+        return await authorized(principal).create_session(payload.name)
 
     @router.get("/api/sessions", response_model=list[Session])
     async def list_sessions(
@@ -154,212 +237,163 @@ def create_api_router(
     ) -> dict[str, Any]:
         return await authorized(principal).get_session(session_id)
 
-    @router.post(
-        "/api/sessions/{session_id}/threads",
-        response_model=Thread,
-        status_code=201,
-    )
+    @router.get("/api/sessions/{session_id}/threads")
+    async def list_threads(
+        session_id: UUID,
+        principal: PrincipalParameter,
+    ) -> list[dict[str, Any]]:
+        session = await authorized(principal).get_session(session_id, touch=True)
+        threads = await codex_proxy().list_threads(session)
+        return [_thread_summary(thread, session_id) for thread in threads]
+
+    @router.post("/api/sessions/{session_id}/threads", status_code=201)
     async def create_thread(
         session_id: UUID,
         payload: ThreadCreate,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        if payload.skill_roots is not None:
-            if len(payload.skill_roots) != len(set(payload.skill_roots)):
-                raise HTTPException(status_code=422, detail="skill_roots must be unique")
-            unknown = set(payload.skill_roots) - set(skill_root_ids)
-            if unknown:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Unknown skill roots: {', '.join(sorted(unknown))}",
-                )
-        if payload.memory_mode == "enabled" and not native_memory_enabled:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Native Codex memory is disabled by product configuration."
-                ),
-            )
-        runtime_config = {
-            key: value
-            for key, value in {
-                "model": payload.model,
-                "model_provider": payload.model_provider,
-                "reasoning_effort": payload.reasoning_effort,
-                "skill_roots": payload.skill_roots,
-                "memory_mode": payload.memory_mode,
-            }.items()
-            if value is not None
-        }
-        return await authorized(principal).create_thread(
+        session = await authorized(principal).get_session(
             session_id,
-            payload.title,
-            runtime_config,
+            mode=AccessMode.WRITE,
+            touch=True,
         )
-
-    @router.get("/api/sessions/{session_id}/threads", response_model=list[Thread])
-    async def list_threads(
-        session_id: UUID,
-        principal: PrincipalParameter,
-    ) -> list[dict[str, Any]]:
-        return await authorized(principal).list_threads(session_id)
-
-    @router.get("/api/threads/{thread_id}", response_model=ThreadDetail)
-    async def get_thread(
-        thread_id: UUID,
-        principal: PrincipalParameter,
-    ) -> dict[str, Any]:
-        return await authorized(principal).get_thread_detail(thread_id)
-
-    @router.post("/api/threads/{thread_id}/runs", response_model=Run, status_code=202)
-    async def create_run(
-        thread_id: UUID,
-        payload: RunCreate,
-        principal: PrincipalParameter,
-    ) -> dict[str, Any]:
-        return await authorized(principal).create_run(
-            thread_id,
-            payload.prompt,
+        thread = await codex_proxy().start_thread(
+            session,
+            title=payload.title,
+            workspace=payload.workspace,
             model=payload.model,
             reasoning_effort=payload.reasoning_effort,
         )
+        return _thread_summary(thread, session_id)
 
-    @router.get("/api/runs/{run_id}", response_model=Run)
-    async def get_run(run_id: UUID, principal: PrincipalParameter) -> dict[str, Any]:
-        return await authorized(principal).get_run(run_id)
-
-    @router.post("/api/runs/{run_id}/cancel", response_model=Run, status_code=202)
-    async def cancel_run(
-        run_id: UUID,
+    @router.get("/api/sessions/{session_id}/threads/{thread_id}")
+    async def read_thread(
+        session_id: UUID,
+        thread_id: str,
         principal: PrincipalParameter,
     ) -> dict[str, Any]:
-        return await authorized(principal).request_run_cancel(run_id)
+        session = await authorized(principal).get_session(session_id, touch=True)
+        thread = await codex_proxy().read_thread(session, thread_id)
+        return _thread_detail(thread, session_id)
 
-    @router.put("/api/threads/{thread_id}/goal", response_model=ThreadGoal)
-    async def set_thread_goal(
-        thread_id: UUID,
-        payload: ThreadGoalSet,
+    @router.post("/api/sessions/{session_id}/threads/{thread_id}/turns")
+    async def start_turn(
+        session_id: UUID,
+        thread_id: str,
+        payload: RunCreate,
         principal: PrincipalParameter,
-    ) -> dict[str, Any]:
-        repository = authorized(principal)
-        await repository.get_thread_for_write(thread_id)
-        if await repository.thread_has_active_run(thread_id):
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot replace a goal while the thread has an active run",
-            )
-        now = int(datetime.now(UTC).timestamp())
-        goal: dict[str, Any] = {
-            "threadId": str(thread_id),
-            "objective": payload.objective,
-            "status": "active",
-            "tokenBudget": payload.token_budget,
-            "tokensUsed": 0,
-            "timeUsedSeconds": 0,
-            "createdAt": now,
-            "updatedAt": now,
-            "pending": True,
-        }
-        await repository.set_thread_goal(thread_id, goal)
-        return _goal_to_api(goal, thread_id)
+    ) -> StreamingResponse:
+        session = await authorized(principal).get_session(
+            session_id,
+            mode=AccessMode.WRITE,
+            touch=True,
+        )
+        return StreamingResponse(
+            _agui_stream(
+                codex_proxy(),
+                session,
+                thread_id,
+                payload.prompt,
+                run_id=str(uuid4()),
+                model=payload.model,
+                reasoning_effort=payload.reasoning_effort,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
-    @router.get("/api/threads/{thread_id}/goal", response_model=ThreadGoal)
-    async def get_thread_goal(
-        thread_id: UUID,
-        principal: PrincipalParameter,
-    ) -> dict[str, Any]:
-        repository = authorized(principal)
-        goal = await repository.get_thread_goal(thread_id)
-        if goal is None:
-            raise HTTPException(status_code=404, detail=f"No goal for thread {thread_id}")
-        return _goal_to_api(goal, thread_id)
-
-    @router.delete("/api/threads/{thread_id}/goal")
-    async def clear_thread_goal(
-        thread_id: UUID,
+    @router.post(
+        "/api/sessions/{session_id}/threads/{thread_id}/turns/{turn_id}/interrupt"
+    )
+    async def interrupt_turn(
+        session_id: UUID,
+        thread_id: str,
+        turn_id: str,
         principal: PrincipalParameter,
     ) -> dict[str, bool]:
-        repository = authorized(principal)
-        await repository.get_thread_for_write(thread_id)
-        stored_cleared = await repository.clear_thread_goal(thread_id)
-        return {"cleared": stored_cleared}
-
-    @router.get("/api/runs/{run_id}/events")
-    async def list_run_events(
-        run_id: UUID,
-        principal: PrincipalParameter,
-        after: int = Query(default=0, ge=0),
-    ) -> list[dict[str, Any]]:
-        return await authorized(principal).list_run_events(run_id, after)
-
-    @router.get("/api/runs/{run_id}/events/stream")
-    async def stream_run_events(
-        run_id: UUID,
-        request: Request,
-        principal: PrincipalParameter,
-        after: int = Query(default=0, ge=0),
-    ) -> StreamingResponse:
-        repository = authorized(principal)
-        await repository.get_run(run_id)
-        return StreamingResponse(
-            _stream_run(request, repository, run_id, _stream_cursor(request, after)),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+        session = await authorized(principal).get_session(
+            session_id,
+            mode=AccessMode.WRITE,
+            touch=True,
         )
+        await codex_proxy().interrupt_turn(session, thread_id, turn_id)
+        return {"interrupted": True}
 
     @router.post("/api/ag-ui")
     async def run_agui(
         payload: RunAgentInput,
-        request: Request,
         principal: PrincipalParameter,
     ) -> StreamingResponse:
-        repository = authorized(principal)
-        try:
-            thread_id = UUID(payload.thread_id)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail="threadId must be a UUID") from error
-        prompt = _prompt_from_agui(payload)
-        existing = None
-        if payload.run_id is not None:
-            try:
-                existing = await repository.get_run_by_agui_id(thread_id, payload.run_id)
-            except NotFoundError:
-                pass
-        if existing is None:
-            run = await repository.create_run(
-                thread_id,
-                prompt,
-                agui_run_id=payload.run_id,
-                input_payload=payload.model_dump(by_alias=True),
+        forwarded = (
+            payload.forwarded_props
+            if isinstance(payload.forwarded_props, dict)
+            else {}
+        )
+        raw_session_id = forwarded.get("sessionId")
+        if not raw_session_id:
+            raise HTTPException(
+                status_code=422,
+                detail="forwardedProps.sessionId is required",
             )
-        else:
-            run = existing
+        try:
+            session_id = UUID(str(raw_session_id))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="sessionId must be a UUID") from error
+        session = await authorized(principal).get_session(
+            session_id,
+            mode=AccessMode.WRITE,
+            touch=True,
+        )
+        run_id = payload.run_id or str(uuid4())
         return StreamingResponse(
-            _stream_run(request, repository, run["id"], _stream_cursor(request, 0)),
+            _agui_stream(
+                codex_proxy(),
+                session,
+                payload.thread_id,
+                _prompt_from_agui(payload),
+                run_id=run_id,
+            ),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     return router
 
 
-def _goal_to_api(goal: dict[str, Any], thread_id: UUID) -> dict[str, Any]:
+def _thread_summary(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
     return {
-        "thread_id": str(thread_id),
-        "objective": goal["objective"],
-        "status": goal.get("status", "active"),
-        "token_budget": goal.get("tokenBudget", goal.get("token_budget")),
-        "tokens_used": goal.get("tokensUsed", goal.get("tokens_used", 0)),
-        "time_used_seconds": goal.get(
-            "timeUsedSeconds",
-            goal.get("time_used_seconds", 0),
-        ),
-        "created_at": goal.get("createdAt", goal.get("created_at", 0)),
-        "updated_at": goal.get("updatedAt", goal.get("updated_at", 0)),
+        "id": str(thread["id"]),
+        "session_id": str(session_id),
+        "title": thread.get("name") or thread.get("preview") or "Untitled thread",
+        "workspace": thread.get("cwd"),
+        "status": thread.get("status"),
+        "created_at": thread.get("createdAt"),
+        "updated_at": thread.get("updatedAt") or thread.get("createdAt"),
     }
+
+
+def _thread_detail(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
+    summary = _thread_summary(thread, session_id)
+    messages: list[dict[str, Any]] = []
+    for turn in thread.get("turns") or []:
+        for item in turn.get("items") or []:
+            item_type = item.get("type")
+            if item_type == "userMessage":
+                content = item.get("content") or []
+                text = "".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict)
+                )
+                messages.append(
+                    {"id": item.get("id"), "role": "user", "content": text}
+                )
+            elif item_type == "agentMessage":
+                messages.append(
+                    {
+                        "id": item.get("id"),
+                        "role": "assistant",
+                        "content": item.get("text") or "",
+                    }
+                )
+    return {**summary, "messages": messages}
