@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 
 from efferva import Efferva, Principal
+from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
 
 
 async def resolve_local_principal(_: Request) -> Principal:
@@ -22,5 +23,5 @@ async def index() -> RedirectResponse:
 
 Efferva(
     identity=resolve_local_principal,
-    codex_config={"model_reasoning_effort": "low"},
+    sandbox=OpenSandboxProvider(),
 ).install(app, prefix="/agent")

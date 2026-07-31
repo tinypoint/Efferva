@@ -54,14 +54,6 @@ class SandboxControlPlane:
 
 def create_sandbox_control_plane(
     settings: Settings,
-    provider: SandboxProvider | None = None,
+    provider: SandboxProvider,
 ) -> SandboxControlPlane:
-    if provider is None:
-        try:
-            from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
-        except ImportError as error:
-            raise RuntimeError(
-                "The OpenSandbox provider requires the 'efferva[opensandbox]' extra"
-            ) from error
-        provider = OpenSandboxProvider(settings)
     return SandboxControlPlane(settings, provider)

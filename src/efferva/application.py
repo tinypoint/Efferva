@@ -52,17 +52,17 @@ class Efferva:
         self,
         *,
         identity: IdentityResolver,
+        sandbox: SandboxProvider,
         settings: Settings | None = None,
         codex_config: Mapping[str, Any] | None = None,
         developer_instructions: str | None = None,
-        sandbox_provider: SandboxProvider | None = None,
         native_memory_enabled: bool = True,
     ) -> None:
         self.identity = identity
+        self.sandbox = sandbox
         self.settings = settings or get_settings()
         self.codex_config = dict(codex_config or {})
         self.developer_instructions = developer_instructions
-        self.sandbox_provider = sandbox_provider
         self.native_memory_enabled = native_memory_enabled
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
@@ -95,7 +95,7 @@ class Efferva:
                 )
                 sandboxes = create_sandbox_control_plane(
                     settings,
-                    self.sandbox_provider,
+                    self.sandbox,
                 )
                 await sandboxes.start()
                 proxy = CodexProxy(

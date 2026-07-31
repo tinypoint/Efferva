@@ -20,7 +20,7 @@ from opensandbox.models.sandboxes import (
     Volume,
 )
 
-from efferva.config import Settings
+from efferva.config import Settings, get_settings
 from efferva.sandbox.protocol import (
     CommandResult,
     DirectoryEntry,
@@ -139,7 +139,8 @@ class OpenSandboxProvider:
         network_policy=True,
     )
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
+        settings = settings or get_settings()
         if not settings.opensandbox_server_url:
             raise ValueError(
                 "EFFERVA_OPENSANDBOX_SERVER_URL is required for the OpenSandbox provider"
