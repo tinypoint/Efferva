@@ -40,6 +40,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./opensandbox.toml:/etc/opensandbox/config.toml:ro
       - opensandbox-data:/var/lib/opensandbox
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - efferva-local
 
@@ -59,7 +61,7 @@ services:
       EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
-      EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "true"
+      EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"
       EFFERVA_CODEX_RELEASE_CACHE_DIR: /var/cache/efferva/codex
       EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
       EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-}

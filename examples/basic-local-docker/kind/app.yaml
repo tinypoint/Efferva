@@ -119,7 +119,7 @@ spec:
             - name: EFFERVA_OPENSANDBOX_API_KEY
               value: local-dev-key
             - name: EFFERVA_OPENSANDBOX_USE_SERVER_PROXY
-              value: "true"
+              value: "false"
             - name: EFFERVA_CODEX_RELEASE_CACHE_DIR
               value: /var/cache/efferva/codex
             - name: OPENAI_API_KEY
