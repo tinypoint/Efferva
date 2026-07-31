@@ -93,21 +93,14 @@ class CodexProxy:
         if not workspace.startswith("/"):
             raise ValueError("Thread workspace must be an absolute Sandbox path")
         sandbox = await self._ensure_session(session)
-        await self._run_command(
-            sandbox,
-            (
-                "sh",
-                "-lc",
-                (
-                    f"mkdir -p {shlex.quote(workspace)} && "
-                    f"chown {self._settings.sandbox_uid}:{self._settings.sandbox_gid} "
-                    f"{shlex.quote(workspace)}"
-                ),
-            ),
-        )
         params = self._thread_params(model=model, reasoning_effort=reasoning_effort)
         params["cwd"] = workspace
         async with self._connection(sandbox) as websocket:
+            await self._rpc(
+                websocket,
+                "fs/createDirectory",
+                {"path": workspace, "recursive": True},
+            )
             result = await self._rpc(websocket, "thread/start", params)
             thread = dict(result["thread"])
             if title:
