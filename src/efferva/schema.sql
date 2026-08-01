@@ -27,6 +27,21 @@ CREATE INDEX IF NOT EXISTS app_sessions_tenant_updated_idx
 CREATE INDEX IF NOT EXISTS app_sessions_last_active_idx
     ON app_sessions(last_active_at);
 
+ALTER TABLE app_sessions
+    ADD COLUMN IF NOT EXISTS default_model text;
+
+ALTER TABLE app_sessions
+    ADD COLUMN IF NOT EXISTS default_reasoning_effort text;
+
+CREATE TABLE IF NOT EXISTS thread_execution_settings (
+    session_id uuid NOT NULL REFERENCES app_sessions(id) ON DELETE CASCADE,
+    thread_id text NOT NULL,
+    model text NOT NULL,
+    reasoning_effort text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, thread_id)
+);
+
 CREATE TABLE IF NOT EXISTS agent_runs (
     id text PRIMARY KEY,
     session_id uuid NOT NULL REFERENCES app_sessions(id) ON DELETE CASCADE,

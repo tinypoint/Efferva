@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.resources import files
 
 from fastapi import FastAPI, Request
@@ -5,7 +7,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from efferva import Efferva, Principal
-from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
+from efferva.config import get_settings
+from efferva.db import Database
+from semantic_alpha.industry_reports import create_industry_reports_router
+from semantic_alpha.sandbox import create_sandbox_provider
 
 
 async def resolve_local_principal(_: Request) -> Principal:
@@ -16,7 +21,21 @@ async def resolve_local_principal(_: Request) -> Principal:
     )
 
 
-app = FastAPI(title="Semantic Alpha")
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    database = Database(get_settings().database_url)
+    await database.open()
+    try:
+        schema = files("semantic_alpha").joinpath("schema.sql").read_text()
+        await database.initialize(schema)
+        app.state.industry_report_database = database
+        yield
+    finally:
+        app.state.industry_report_database = None
+        await database.close()
+
+
+app = FastAPI(title="Semantic Alpha", lifespan=lifespan)
 static_dir = files("semantic_alpha").joinpath("static")
 
 
@@ -32,9 +51,12 @@ app.mount(
 )
 
 
+sandbox_provider = create_sandbox_provider()
+app.include_router(create_industry_reports_router(sandbox_provider))
+
 Efferva(
     identity=resolve_local_principal,
-    sandbox=OpenSandboxProvider(),
+    sandbox=sandbox_provider,
 ).install(app, prefix="/agent")
 
 

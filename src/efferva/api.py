@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from efferva.broker import RedisRunBroker, RunQueueFullError
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
+    ExecutionSettings,
+    ExecutionSettingsUpdate,
     PrincipalView,
     RunAgentInput,
     RunCreate,
@@ -18,7 +20,12 @@ from efferva.models import (
     SessionCreate,
     ThreadCreate,
 )
-from efferva.repository import AccessMode, RunRepository, SessionRepository
+from efferva.repository import (
+    AccessMode,
+    ExecutionSettingsRepository,
+    RunRepository,
+    SessionRepository,
+)
 from efferva.runtime import CodexProxy
 
 
@@ -1135,6 +1142,7 @@ def create_api_router(
     codex_proxy: Callable[[], CodexProxy],
     run_broker: Callable[[], RedisRunBroker],
     runs: Callable[[], RunRepository],
+    execution_settings: Callable[[], ExecutionSettingsRepository],
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
@@ -1158,6 +1166,28 @@ def create_api_router(
         except Exception as error:
             await runs().update(run_id, status="failed", error=str(error))
             raise
+
+    async def validate_execution_settings(
+        session: dict[str, Any],
+        payload: ExecutionSettingsUpdate,
+    ) -> None:
+        models = await codex_proxy().list_models(session)
+        selected = next(
+            (item for item in models if item.get("model") == payload.model),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(status_code=422, detail="unsupported model")
+        efforts = {
+            str(item.get("reasoningEffort"))
+            for item in selected.get("supportedReasoningEfforts") or []
+            if item.get("reasoningEffort")
+        }
+        if payload.reasoning_effort not in efforts:
+            raise HTTPException(
+                status_code=422,
+                detail="unsupported reasoning effort for this model",
+            )
 
     @router.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -1221,6 +1251,38 @@ def create_api_router(
         session = await repository().get_session(principal, session_id, touch=True)
         return await codex_proxy().list_models(session)
 
+    @router.get(
+        "/api/sessions/{session_id}/settings",
+        response_model=ExecutionSettings,
+    )
+    async def get_session_execution_settings(
+        session_id: UUID,
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, str | None]:
+        await repository().get_session(principal, session_id)
+        return await execution_settings().get_session(session_id)
+
+    @router.put(
+        "/api/sessions/{session_id}/settings",
+        response_model=ExecutionSettings,
+    )
+    async def update_session_execution_settings(
+        session_id: UUID,
+        payload: ExecutionSettingsUpdate,
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, str]:
+        session = await repository().get_session(
+            principal,
+            session_id,
+            mode=AccessMode.WRITE,
+        )
+        await validate_execution_settings(session, payload)
+        return await execution_settings().set_session(
+            session_id,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+        )
+
     @router.get("/api/sessions/{session_id}/skills")
     async def list_skills(
         session_id: UUID,
@@ -1266,13 +1328,25 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
+        defaults = await execution_settings().get_session(session_id)
+        model = payload.model or defaults["model"]
+        reasoning_effort = (
+            payload.reasoning_effort or defaults["reasoning_effort"]
+        )
         thread = await codex_proxy().start_thread(
             session,
             workspace=payload.workspace,
-            model=payload.model,
-            reasoning_effort=payload.reasoning_effort,
+            model=model,
+            reasoning_effort=reasoning_effort,
             dynamic_tools=payload.tools,
         )
+        if model and reasoning_effort:
+            await execution_settings().set_thread(
+                session_id,
+                str(thread["id"]),
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         return _thread_summary(thread, session_id)
 
     @router.get("/api/sessions/{session_id}/threads/{thread_id}")
@@ -1295,6 +1369,41 @@ def create_api_router(
                 detail["active_turn_started_at"] = active_run["started_at"].isoformat()
         return detail
 
+    @router.get(
+        "/api/sessions/{session_id}/threads/{thread_id}/settings",
+        response_model=ExecutionSettings,
+    )
+    async def get_thread_execution_settings(
+        session_id: UUID,
+        thread_id: str,
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, str | None]:
+        await repository().get_session(principal, session_id)
+        return await execution_settings().get_thread(session_id, thread_id)
+
+    @router.put(
+        "/api/sessions/{session_id}/threads/{thread_id}/settings",
+        response_model=ExecutionSettings,
+    )
+    async def update_thread_execution_settings(
+        session_id: UUID,
+        thread_id: str,
+        payload: ExecutionSettingsUpdate,
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, str]:
+        session = await repository().get_session(
+            principal,
+            session_id,
+            mode=AccessMode.WRITE,
+        )
+        await validate_execution_settings(session, payload)
+        return await execution_settings().set_thread(
+            session_id,
+            thread_id,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+        )
+
     @router.delete("/api/sessions/{session_id}/threads/{thread_id}")
     async def delete_thread(
         session_id: UUID,
@@ -1308,6 +1417,7 @@ def create_api_router(
             touch=True,
         )
         await codex_proxy().delete_thread(session, thread_id)
+        await execution_settings().delete_thread(session_id, thread_id)
         return {"deleted": True}
 
     @router.get("/api/sessions/{session_id}/threads/{thread_id}/resume")
@@ -1352,6 +1462,16 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
+        saved = await execution_settings().get_thread(session_id, thread_id)
+        model = payload.model or saved["model"]
+        reasoning_effort = payload.reasoning_effort or saved["reasoning_effort"]
+        if model and reasoning_effort:
+            await execution_settings().set_thread(
+                session_id,
+                thread_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         run_id = str(uuid4())
         await enqueue(
             {
@@ -1360,8 +1480,8 @@ def create_api_router(
                 "sessionId": str(session["id"]),
                 "threadId": thread_id,
                 "prompt": payload.prompt,
-                "model": payload.model,
-                "reasoningEffort": payload.reasoning_effort,
+                "model": model,
+                "reasoningEffort": reasoning_effort,
             }
         )
         return _brokered_response(run_broker(), run_id)
@@ -1491,6 +1611,32 @@ def create_api_router(
         reasoning_effort = (
             str(forwarded.get("reasoningEffort") or "").strip() or None
         )
+        saved_settings = (
+            await execution_settings().get_session(session_id)
+            if payload.thread_id == "new"
+            else await execution_settings().get_thread(
+                session_id,
+                payload.thread_id,
+            )
+        )
+        model = model or saved_settings["model"]
+        reasoning_effort = (
+            reasoning_effort or saved_settings["reasoning_effort"]
+        )
+        if model and reasoning_effort:
+            if payload.thread_id == "new":
+                await execution_settings().set_session(
+                    session_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            else:
+                await execution_settings().set_thread(
+                    session_id,
+                    payload.thread_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
         workspace = str(forwarded.get("workspace") or "").strip() or None
         command, separator, argument = prompt.partition(" ")
         argument = argument.strip() if separator else ""

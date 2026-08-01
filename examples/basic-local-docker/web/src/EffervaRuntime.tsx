@@ -533,15 +533,7 @@ function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
         className="h-8 max-w-40 truncate rounded-md border-0 bg-transparent px-1.5 text-xs font-medium outline-none hover:bg-muted"
         value={runtime.model}
         onChange={(event) => {
-          const nextModel = runtime.models.find(
-            (item) => item.model === event.target.value,
-          );
           runtime.onModelChange(event.target.value);
-          if (nextModel) {
-            runtime.onReasoningEffortChange(
-              nextModel.defaultReasoningEffort,
-            );
-          }
         }}
         aria-label="Model"
       >

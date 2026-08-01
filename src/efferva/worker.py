@@ -10,7 +10,7 @@ from contextlib import suppress
 from contextvars import ContextVar
 from importlib.resources import files
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from prometheus_client import Gauge, start_http_server
 
@@ -19,7 +19,7 @@ from efferva.broker import RedisRunBroker, RunQueueFullError
 from efferva.codex_release import prepare_official_codex
 from efferva.config import Settings, get_settings, load_codex_config, merge_codex_config
 from efferva.db import Database
-from efferva.repository import RunRepository
+from efferva.repository import ExecutionSettingsRepository, RunRepository
 from efferva.runtime import CodexProxy, ServerRequestHandler, _default_server_response
 from efferva.sandbox import SandboxProvider, create_sandbox_control_plane
 
@@ -110,6 +110,7 @@ class RunWorker:
         proxy: CodexProxy,
         broker: RedisRunBroker,
         runs: RunRepository,
+        execution_settings: ExecutionSettingsRepository,
         settings: Settings | None = None,
         server_request_handler: ServerRequestHandler | None = None,
     ) -> None:
@@ -117,6 +118,7 @@ class RunWorker:
         self._proxy = proxy
         self._broker = broker
         self._runs = runs
+        self._execution_settings = execution_settings
         self._worker_id = os.environ.get("HOSTNAME") or f"worker-{uuid4()}"
         self._server_request_handler = server_request_handler
         self._active: dict[str, asyncio.Task[None]] = {}
@@ -473,6 +475,19 @@ class RunWorker:
                 snapshot = event.setdefault("snapshot", {})
                 snapshot.setdefault("startedAt", context["startedAt"])
             updates = self._track_event(event, context)
+            raw = event.get("event") if event.get("type") == "RAW" else None
+            if isinstance(raw, dict) and raw.get("method") == "efferva/thread-created":
+                model = _optional_string(command.get("model"))
+                reasoning_effort = _optional_string(
+                    command.get("reasoningEffort")
+                )
+                if model and reasoning_effort:
+                    await self._execution_settings.set_thread(
+                        UUID(str(command["sessionId"])),
+                        str(updates["threadId"]),
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                    )
             if updates.get("threadId") and lease_context.get("threadId") is None:
                 thread_id = str(updates["threadId"])
                 acquired_thread = await self._broker.acquire_thread_lease(
@@ -768,6 +783,7 @@ async def serve_worker(
             proxy,
             broker,
             RunRepository(database),
+            ExecutionSettingsRepository(database),
             settings,
             server_request_handler=server_request_handler,
         )

@@ -1,41 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Code2,
   LoaderCircle,
   MoreHorizontal,
   Plus,
-  Search,
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { api } from "./api";
 import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
-import type { CreateThreadInput, ThreadSummary } from "./types";
-
-const COMPOSER_SETTINGS_KEY = "efferva:composer-settings";
-
-function readComposerSettings(): {
-  model?: string;
-  reasoningEffort?: string;
-} {
-  try {
-    const saved: unknown = JSON.parse(
-      window.localStorage.getItem(COMPOSER_SETTINGS_KEY) ?? "{}",
-    );
-    if (!saved || typeof saved !== "object") return {};
-    const values = saved as Record<string, unknown>;
-    return {
-      model: typeof values.model === "string" ? values.model : undefined,
-      reasoningEffort:
-        typeof values.reasoningEffort === "string"
-          ? values.reasoningEffort
-          : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
+import type {
+  ExecutionSettings,
+  ThreadSummary,
+} from "./types";
 
 export function App() {
   const navigate = useNavigate();
@@ -44,11 +22,6 @@ export function App() {
     sessionId?: string;
     threadId?: string;
   }>();
-  const [model, setModel] = useState("");
-  const [reasoningEffort, setReasoningEffort] =
-    useState<NonNullable<CreateThreadInput["reasoning_effort"]>>("low");
-  const [search, setSearch] = useState("");
-
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.listSessions,
@@ -63,6 +36,25 @@ export function App() {
     queryFn: () => api.listModels(sessionId!),
     enabled: Boolean(sessionId),
   });
+  const executionSettings = useQuery({
+    queryKey: ["execution-settings", sessionId, threadId ?? null],
+    queryFn: () => api.getExecutionSettings(sessionId!, threadId),
+    enabled: Boolean(sessionId),
+  });
+  const selectedModel =
+    models.data?.find(
+      (item) => item.model === executionSettings.data?.model,
+    ) ??
+    models.data?.find((item) => item.isDefault) ??
+    models.data?.[0];
+  const model = selectedModel?.model ?? "";
+  const reasoningEffort =
+    selectedModel?.supportedReasoningEfforts.find(
+      (item) =>
+        item.reasoningEffort === executionSettings.data?.reasoning_effort,
+    )?.reasoningEffort ??
+    selectedModel?.defaultReasoningEffort ??
+    "low";
   const selectedThread = threads.data?.find((item) => item.id === threadId);
   const skills = useQuery({
     queryKey: ["skills", sessionId, selectedThread?.workspace],
@@ -100,41 +92,78 @@ export function App() {
   }, [navigate, selectedThread, sessionId, threadId, threads.data]);
 
   useEffect(() => {
-    if (!models.data?.length) return;
-    const current = models.data.find((item) => item.model === model);
-    if (current) {
-      if (
-        !current.supportedReasoningEfforts.some(
-          (item) => item.reasoningEffort === reasoningEffort,
-        )
-      ) {
-        setReasoningEffort(current.defaultReasoningEffort);
-      }
-      return;
-    }
-    const saved = readComposerSettings();
-    const nextModel =
-      models.data.find((item) => item.model === saved.model) ??
-      models.data.find((item) => item.isDefault) ??
-      models.data[0];
-    const savedEffort = nextModel.supportedReasoningEfforts.find(
-      (item) => item.reasoningEffort === saved.reasoningEffort,
-    );
-    setModel(nextModel.model);
-    setReasoningEffort(
-      savedEffort?.reasoningEffort ?? nextModel.defaultReasoningEffort,
-    );
-  }, [model, models.data, reasoningEffort]);
-
-  useEffect(() => {
-    if (!model) return;
-    try {
-      window.localStorage.setItem(
-        COMPOSER_SETTINGS_KEY,
-        JSON.stringify({ model, reasoningEffort }),
+    if (!selectedModel || !executionSettings.data || !sessionId) return;
+    if (
+      executionSettings.data.model !== model ||
+      executionSettings.data.reasoning_effort !== reasoningEffort
+    ) {
+      const normalized: Required<ExecutionSettings> = {
+        model,
+        reasoning_effort: reasoningEffort,
+      };
+      queryClient.setQueryData(
+        ["execution-settings", sessionId, threadId ?? null],
+        normalized,
       );
-    } catch {}
-  }, [model, reasoningEffort]);
+      const queryKey = [
+        "execution-settings",
+        sessionId,
+        threadId ?? null,
+      ];
+      void api
+        .updateExecutionSettings(sessionId, normalized, threadId)
+        .catch(() => queryClient.invalidateQueries({ queryKey }));
+    }
+  }, [
+    executionSettings.data,
+    model,
+    queryClient,
+    reasoningEffort,
+    selectedModel,
+    sessionId,
+    threadId,
+  ]);
+
+  const persistExecutionSettings = useCallback(
+    (nextModel: string, nextEffort: string) => {
+      if (!sessionId) return;
+      const settings: Required<ExecutionSettings> = {
+        model: nextModel,
+        reasoning_effort: nextEffort,
+      };
+      const queryKey = [
+        "execution-settings",
+        sessionId,
+        threadId ?? null,
+      ];
+      queryClient.setQueryData(queryKey, settings);
+      void api
+        .updateExecutionSettings(sessionId, settings, threadId)
+        .catch(() => queryClient.invalidateQueries({ queryKey }));
+    },
+    [queryClient, sessionId, threadId],
+  );
+
+  const handleModelChange = useCallback(
+    (nextModelId: string) => {
+      const nextModel = models.data?.find(
+        (item) => item.model === nextModelId,
+      );
+      if (!nextModel) return;
+      persistExecutionSettings(
+        nextModel.model,
+        nextModel.defaultReasoningEffort,
+      );
+    },
+    [models.data, persistExecutionSettings],
+  );
+
+  const handleReasoningEffortChange = useCallback(
+    (nextEffort: string) => {
+      persistExecutionSettings(model, nextEffort);
+    },
+    [model, persistExecutionSettings],
+  );
 
   const handleThreadCreated = useCallback(
     (thread: ThreadSummary) => {
@@ -151,8 +180,21 @@ export function App() {
       void queryClient.invalidateQueries({
         queryKey: ["threads", thread.session_id],
       });
+      const settings: Required<ExecutionSettings> = {
+        model,
+        reasoning_effort: reasoningEffort,
+      };
+      queryClient.setQueryData(
+        ["execution-settings", thread.session_id, thread.id],
+        settings,
+      );
+      void api.updateExecutionSettings(
+        thread.session_id,
+        settings,
+        thread.id,
+      );
     },
-    [navigate, queryClient],
+    [model, navigate, queryClient, reasoningEffort],
   );
 
   const handleRunSettled = useCallback(
@@ -200,20 +242,14 @@ export function App() {
       ),
     [skills.data],
   );
-  const visibleThreads = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
-    if (!query) return threads.data ?? [];
-    return (threads.data ?? []).filter((thread) =>
-      thread.title.toLocaleLowerCase().includes(query),
-    );
-  }, [search, threads.data]);
-
   if (
     !sessionId ||
     threads.isLoading ||
     !threads.data ||
     models.isLoading ||
-    !models.data
+    !models.data ||
+    executionSettings.isLoading ||
+    !executionSettings.data
   ) {
     return (
       <div className="grid h-screen place-items-center bg-background">
@@ -233,8 +269,8 @@ export function App() {
       model={model}
       reasoningEffort={reasoningEffort}
       models={models.data}
-      onModelChange={setModel}
-      onReasoningEffortChange={setReasoningEffort}
+      onModelChange={handleModelChange}
+      onReasoningEffortChange={handleReasoningEffortChange}
       workspace={selectedThread?.workspace}
       skills={enabledSkills}
       onThreadCreated={handleThreadCreated}
@@ -261,18 +297,8 @@ export function App() {
             <Plus className="size-4" />
             New Thread
           </button>
-          <label className="mb-3 flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-muted-foreground">
-            <Search className="size-4" />
-            <input
-              className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search threads"
-              aria-label="Search threads"
-            />
-          </label>
           <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
-            {visibleThreads.map((thread) => (
+            {threads.data.map((thread) => (
               <div
                 key={thread.id}
                 className={`group flex items-center rounded-lg ${

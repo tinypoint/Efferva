@@ -1,5 +1,6 @@
 import type {
   CreateThreadInput,
+  ExecutionSettings,
   FileSearchResult,
   ModelOption,
   Session,
@@ -73,6 +74,26 @@ export const api = {
     request<ThreadSummary[]>(`/sessions/${sessionId}/threads`),
   listModels: (sessionId: string) =>
     request<ModelOption[]>(`/sessions/${sessionId}/models`),
+  getExecutionSettings: (sessionId: string, threadId?: string) =>
+    request<ExecutionSettings>(
+      threadId
+        ? `/sessions/${sessionId}/threads/${threadId}/settings`
+        : `/sessions/${sessionId}/settings`,
+    ),
+  updateExecutionSettings: (
+    sessionId: string,
+    settings: Required<ExecutionSettings>,
+    threadId?: string,
+  ) =>
+    request<ExecutionSettings>(
+      threadId
+        ? `/sessions/${sessionId}/threads/${threadId}/settings`
+        : `/sessions/${sessionId}/settings`,
+      {
+        method: "PUT",
+        body: JSON.stringify(settings),
+      },
+    ),
   listSkills: (sessionId: string, workspace?: string) => {
     const query = workspace
       ? `?workspace=${encodeURIComponent(workspace)}`

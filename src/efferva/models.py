@@ -48,6 +48,16 @@ class RunCreate(BaseModel):
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
 
 
+class ExecutionSettings(BaseModel):
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
+
+
+class ExecutionSettingsUpdate(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+    reasoning_effort: str = Field(min_length=1, max_length=50)
+
+
 class PrincipalView(BaseModel):
     tenant_id: str
     issuer: str

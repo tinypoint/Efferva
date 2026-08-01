@@ -48,6 +48,11 @@ export type ModelOption = {
   isDefault: boolean;
 };
 
+export type ExecutionSettings = {
+  model?: string | null;
+  reasoning_effort?: string | null;
+};
+
 export type SkillMetadata = {
   name: string;
   description: string;
