@@ -1,549 +1,650 @@
 import {
+  createContext,
   useCallback,
+  useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
-  type Dispatch,
+  type ComponentProps,
   type ReactNode,
-  type SetStateAction,
 } from "react";
-import { HttpAgent } from "@ag-ui/client";
 import {
-  AssistantRuntimeProvider,
-  CompositeAttachmentAdapter,
-  ExportedMessageRepository,
-  SimpleImageAttachmentAdapter,
-  type AttachmentAdapter,
-  type ChatModelRunResult,
-  type CompleteAttachment,
-  type PendingAttachment,
-  type ThreadHistoryAdapter,
-} from "@assistant-ui/react";
+  HttpAgent,
+  type BaseEvent,
+  type Message,
+  type RunAgentInput,
+} from "@ag-ui/client";
 import {
-  fromAgUiMessages,
-  useAgUiRuntime,
-  type UseAgUiThreadListAdapter,
-} from "@assistant-ui/react-ag-ui";
-import { finalize, tap } from "rxjs";
-import type { ReadonlyJSONObject } from "assistant-stream/utils";
+  CopilotChatConfigurationProvider,
+  CopilotChatInput,
+  CopilotChatView,
+  CopilotKitProvider,
+  UseAgentUpdate,
+  useAgent,
+  useCopilotKit,
+  type ToolsMenuItem,
+} from "@copilotkit/react-core/v2";
+import { from, type Observable } from "rxjs";
 
 import { api } from "./api";
-import { RunControlsProvider } from "./RunControls";
-import type { CreateThreadInput, ThreadSummary } from "./types";
+import type {
+  AgUiMessage,
+  CreateThreadInput,
+  ModelOption,
+  SkillMetadata,
+  ThreadSummary,
+} from "./types";
 
-type ProcessPart =
-  | { type: "reasoning"; text: string }
-  | { type: "tool-call"; toolCallId: string };
+const AGENT_ID = "efferva";
+const AGENT_UPDATES = [
+  UseAgentUpdate.OnMessagesChanged,
+  UseAgentUpdate.OnStateChanged,
+  UseAgentUpdate.OnRunStatusChanged,
+];
 
-class AudioAttachmentAdapter implements AttachmentAdapter {
-  accept = "audio/mpeg,audio/mp3,audio/wav,audio/x-wav";
+type ResumeSource = {
+  sessionId: string;
+  threadId: string;
+  turnId: string;
+  signal: AbortSignal;
+};
 
-  async add({ file }: { file: File }): Promise<PendingAttachment> {
-    return {
-      id: crypto.randomUUID(),
-      type: "audio",
-      name: file.name,
-      contentType: file.type,
-      file,
-      status: { type: "requires-action", reason: "composer-send" },
-    };
+class EffervaAgent extends HttpAgent {
+  private resumeSource?: ResumeSource;
+
+  setResumeSource(source: ResumeSource) {
+    this.resumeSource = source;
   }
 
-  async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
-    const format = attachment.contentType?.includes("wav") ? "wav" : "mp3";
-    const data = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(attachment.file);
-    });
-    return {
-      ...attachment,
-      status: { type: "complete" },
-      content: [{ type: "audio", audio: { data, format } }],
-    };
+  protected override connect(_input: RunAgentInput): Observable<BaseEvent> {
+    const source = this.resumeSource;
+    this.resumeSource = undefined;
+    if (!source) return from([]);
+    return from(
+      api.resumeThread(
+        source.sessionId,
+        source.threadId,
+        source.turnId,
+        source.signal,
+      ),
+    ) as Observable<BaseEvent>;
   }
-
-  async remove() {}
 }
 
-const restoreMessages = (messages: readonly unknown[]) => {
-  const rawById = new Map(
-    messages
-      .filter(
-        (message): message is Record<string, unknown> =>
-          typeof message === "object" && message !== null,
-      )
-      .map((message) => [String(message.id ?? ""), message]),
-  );
-  return fromAgUiMessages(messages, { showThinking: false }).map((message) => {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) {
-      return message;
+function restoreMessages(messages: AgUiMessage[]): Message[] {
+  return messages.flatMap((message) => {
+    if (message.role !== "assistant" || !message.process?.length) {
+      return [message as Message];
     }
-    const raw = rawById.get(String(message.id ?? ""));
-    const process = Array.isArray(raw?.process)
-      ? (raw.process as ProcessPart[])
-      : [];
-    if (process.length === 0) return message;
-    const toolCalls = new Map(
-      message.content
-        .filter(
-          (part) => typeof part === "object" && part?.type === "tool-call",
-        )
-        .map((part) => [part.toolCallId, part]),
+    const reasoning = message.process.flatMap((part, index) =>
+      part.type === "reasoning" && part.text.trim()
+        ? [
+            {
+              id: `${message.id}:process:${index}`,
+              role: "reasoning" as const,
+              content: part.text,
+            },
+          ]
+        : [],
     );
-    const processContent = process.flatMap((part) => {
-      if (part.type === "reasoning") {
-        return [{ type: "reasoning" as const, text: part.text }];
-      }
-      const toolCall = toolCalls.get(part.toolCallId);
-      return toolCall ? [toolCall] : [];
-    });
-    return {
-      ...message,
-      metadata: {
-        ...message.metadata,
-        custom: {
-          ...message.metadata?.custom,
-          ...(typeof raw?.processDurationMs === "number"
-            ? { processDurationMs: raw.processDurationMs }
-            : {}),
-        },
-      },
-      content: [
-        ...processContent,
-        ...message.content.filter(
-          (part) => !(typeof part === "object" && part?.type === "tool-call"),
-        ),
-      ],
-    };
+    const { process: _process, processDurationMs: _duration, ...assistant } =
+      message;
+    return [...reasoning, assistant as Message];
   });
+}
+
+type RuntimeContextValue = {
+  sessionId: string;
+  workspace?: string | null;
+  loading: boolean;
+  error: string | null;
+  clearError: () => void;
+  skills: SkillMetadata[];
+  models: ModelOption[];
+  model: string;
+  reasoningEffort: NonNullable<CreateThreadInput["reasoning_effort"]>;
+  onModelChange: (model: string) => void;
+  onReasoningEffortChange: (
+    effort: NonNullable<CreateThreadInput["reasoning_effort"]>,
+  ) => void;
 };
+
+const RuntimeContext = createContext<RuntimeContextValue | null>(null);
 
 type EffervaRuntimeProps = {
   sessionId: string;
   threadId?: string;
-  threads: ThreadSummary[];
   model?: string;
   reasoningEffort: NonNullable<CreateThreadInput["reasoning_effort"]>;
+  models: ModelOption[];
+  onModelChange: (model: string) => void;
+  onReasoningEffortChange: (
+    effort: NonNullable<CreateThreadInput["reasoning_effort"]>,
+  ) => void;
+  workspace?: string | null;
+  skills: SkillMetadata[];
   children: ReactNode;
-  onNewThread: () => void;
-  onOpenThread: (threadId: string) => void;
   onThreadCreated: (thread: ThreadSummary) => void;
-  onThreadDeleted: (threadId: string) => void;
-  queuedMessages: string[];
-  setQueuedMessages: Dispatch<SetStateAction<string[]>>;
+  onRunSettled: (threadId: string) => void;
 };
 
 export function EffervaRuntime({
   sessionId,
   threadId,
-  threads,
   model,
   reasoningEffort,
+  models,
+  onModelChange,
+  onReasoningEffortChange,
+  workspace,
+  skills,
   children,
-  onNewThread,
-  onOpenThread,
   onThreadCreated,
-  onThreadDeleted,
-  queuedMessages,
-  setQueuedMessages,
+  onRunSettled,
 }: EffervaRuntimeProps) {
+  const [loading, setLoading] = useState(Boolean(threadId));
   const [error, setError] = useState<string | null>(null);
-  const attachmentAdapter = useMemo(
-    () =>
-      new CompositeAttachmentAdapter([
-        new SimpleImageAttachmentAdapter(),
-        new AudioAttachmentAdapter(),
-      ]),
-    [],
-  );
-  const activeTurn = useRef<{ threadId: string; turnId: string } | null>(null);
-  const visibleThreadId = useRef(threadId);
-  const runtimeRef = useRef<ReturnType<typeof useAgUiRuntime> | null>(null);
-  visibleThreadId.current = threadId;
+  const settingsRef = useRef({ model, reasoningEffort });
+  const onThreadCreatedRef = useRef(onThreadCreated);
+  const onRunSettledRef = useRef(onRunSettled);
+  const createdThreadIdRef = useRef<string | null>(null);
+  settingsRef.current = { model, reasoningEffort };
+  onThreadCreatedRef.current = onThreadCreated;
+  onRunSettledRef.current = onRunSettled;
 
   const agent = useMemo(() => {
-    let pendingCreatedThread: ThreadSummary | undefined;
-    let notified = false;
-    let settledThreadId: string | undefined;
-    const current = new HttpAgent({
-      url: "/agent/api/ag-ui",
+    const current = new EffervaAgent({
+      agentId: AGENT_ID,
       threadId: threadId ?? "new",
-      headers: { Accept: "text/event-stream" },
+      url: "/agent/api/ag-ui",
     });
-
     current.use((input, next) => {
-      let activeThreadId = threadId ?? "new";
+      const forwarded =
+        typeof input.forwardedProps === "object" && input.forwardedProps
+          ? input.forwardedProps
+          : {};
+      const settings = settingsRef.current;
       return next.run({
         ...input,
-        threadId: activeThreadId,
+        threadId: current.threadId,
         forwardedProps: {
-          ...(input.forwardedProps ?? {}),
+          ...forwarded,
           sessionId,
-          ...(!threadId
-            ? {
-                ...(model?.trim() ? { model: model.trim() } : {}),
-                reasoningEffort,
-              }
+          ...(settings.model?.trim()
+            ? { model: settings.model.trim() }
             : {}),
+          reasoningEffort: settings.reasoningEffort,
         },
-      }).pipe(
-        tap((event) => {
-          const raw = event as {
-            type?: string;
-            outcome?: { type?: string };
-            event?: {
+      });
+    });
+    return current;
+  }, [sessionId]);
+
+  useEffect(() => {
+    const subscription = agent.subscribe({
+      onRawEvent({ event, agent: current }) {
+        const raw = event.event as
+          | {
               method?: string;
-              params?: { turnId?: string; thread?: ThreadSummary };
-            };
-          };
-          if (
-            raw.type === "RAW" &&
-            raw.event?.method === "efferva/thread-created" &&
-            raw.event.params?.thread
-          ) {
-            pendingCreatedThread = raw.event.params.thread;
-            activeThreadId = pendingCreatedThread.id;
-          }
-          if (
-            raw.type === "RAW" &&
-            raw.event?.method === "efferva/turn-started" &&
-            raw.event.params?.turnId
-          ) {
-            activeTurn.current = {
-              threadId: activeThreadId,
-              turnId: raw.event.params.turnId,
-            };
-            if (pendingCreatedThread && !notified) {
-              notified = true;
-              onThreadCreated(pendingCreatedThread);
+              params?: { thread?: ThreadSummary; turnId?: string };
             }
-          }
-          if (
-            (raw.type === "RUN_FINISHED" && raw.outcome?.type !== "interrupt") ||
-            raw.type === "RUN_CANCELLED" ||
-            raw.type === "RUN_ERROR"
-          ) {
-            settledThreadId =
-              activeThreadId === "new" ? undefined : activeThreadId;
-            activeTurn.current = null;
-          }
-        }),
-        finalize(() => {
-          if (!settledThreadId) return;
-          const completedThreadId = settledThreadId;
-          void api
-            .readThread(sessionId, completedThreadId)
-            .then((thread) => {
-              if (visibleThreadId.current !== completedThreadId) return;
-              const repository = ExportedMessageRepository.fromArray(
-                restoreMessages(thread.messages),
-              );
-              const currentRuntime = runtimeRef.current;
-              if (!currentRuntime) return;
-              currentRuntime.thread.reset([]);
-              currentRuntime.thread.reset(
-                repository.messages.map((item) => item.message),
-              );
-            })
-            .catch((cause: unknown) =>
+          | undefined;
+        if (
+          raw?.method === "efferva/thread-created" &&
+          raw.params?.thread
+        ) {
+          const created = raw.params.thread;
+          createdThreadIdRef.current = created.id;
+          current.threadId = created.id;
+          onThreadCreatedRef.current(created);
+        }
+      },
+      async onRunFinalized({ agent: current, state }) {
+        const settledThreadId = current.threadId;
+        if (!settledThreadId || settledThreadId === "new") return;
+        onRunSettledRef.current(settledThreadId);
+        try {
+          const detail = await api.readThread(sessionId, settledThreadId);
+          if (current.threadId !== settledThreadId) return;
+          return {
+            messages: restoreMessages(detail.messages),
+            state: {
+              ...(typeof state === "object" && state ? state : {}),
+              threadId: settledThreadId,
+              turnId: null,
+              status: "idle",
+            },
+          };
+        } catch (cause) {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Failed to refresh the completed turn",
+          );
+        }
+      },
+      onRunFailed({ error: cause }) {
+        setError(cause.message);
+      },
+    });
+    return subscription.unsubscribe;
+  }, [agent, sessionId]);
+
+  useEffect(() => {
+    const desiredThreadId = threadId ?? "new";
+    const controller = new AbortController();
+    let cancelled = false;
+
+    if (
+      agent.isRunning &&
+      createdThreadIdRef.current === desiredThreadId &&
+      agent.threadId === desiredThreadId
+    ) {
+      setLoading(false);
+      return () => controller.abort();
+    }
+
+    const load = async () => {
+      setError(null);
+      if (desiredThreadId === "new") {
+        if (agent.isRunning) await agent.detachActiveRun();
+        createdThreadIdRef.current = null;
+        agent.threadId = "new";
+        agent.setMessages([]);
+        agent.setState({});
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      if (agent.isRunning) await agent.detachActiveRun();
+      try {
+        const detail = await api.readThread(sessionId, desiredThreadId);
+        if (cancelled) return;
+        agent.threadId = desiredThreadId;
+        agent.setMessages(restoreMessages(detail.messages));
+        agent.setState({
+          threadId: desiredThreadId,
+          turnId: detail.active_turn_id ?? null,
+          status: detail.active_turn_id ? "running" : "idle",
+          activities: {},
+        });
+        setLoading(false);
+        if (detail.active_turn_id) {
+          agent.setResumeSource({
+            sessionId,
+            threadId: desiredThreadId,
+            turnId: detail.active_turn_id,
+            signal: controller.signal,
+          });
+          void agent.connectAgent().catch((cause: unknown) => {
+            if (!cancelled) {
               setError(
                 cause instanceof Error
                   ? cause.message
-                  : "Failed to refresh the completed turn",
-              ),
-            );
-        }),
-      );
-    });
-    return current;
-  }, [model, onThreadCreated, reasoningEffort, sessionId, threadId]);
-
-  const history = useMemo<ThreadHistoryAdapter>(
-    () => ({
-      async load() {
-        if (!threadId) return ExportedMessageRepository.fromArray([]);
-        const thread = await api.readThread(sessionId, threadId);
-        activeTurn.current = thread.active_turn_id
-          ? { threadId, turnId: thread.active_turn_id }
-          : null;
-        const repository = ExportedMessageRepository.fromArray(
-          restoreMessages(thread.messages),
-        );
-        return {
-          ...repository,
-          unstable_resume: Boolean(thread.active_turn_id),
-        };
-      },
-      async *resume(options) {
-        if (!threadId) return;
-        const resumedTurnId = activeTurn.current?.turnId;
-        if (!resumedTurnId) return;
-        const partOrder: Array<{ type: "text" | "tool"; id: string }> = [];
-        const textByPart = new Map<string, string>();
-        const toolByPart = new Map<
-          string,
-          {
-            type: "tool-call";
-            toolCallId: string;
-            toolName: string;
-            argsText: string;
-            args: ReadonlyJSONObject;
-            result?: unknown;
-            isError?: boolean;
-          }
-        >();
-        const snapshot = (): ChatModelRunResult["content"] =>
-          partOrder.map((part) => {
-            if (part.type === "tool") return toolByPart.get(part.id)!;
-            return {
-              type: "text" as const,
-              text: textByPart.get(part.id) ?? "",
-            };
+                  : "Failed to resume the active turn",
+              );
+            }
           });
-        for await (const event of api.resumeThread(
-          sessionId,
-          threadId,
-          resumedTurnId,
-          options.abortSignal,
-        )) {
-          const type = String(event.type ?? "");
-          if (type === "RAW") {
-            const raw = event.event as
-              | { method?: string; params?: { turnId?: string } }
-              | undefined;
-            if (
-              raw?.method === "efferva/turn-started" &&
-              raw.params?.turnId
-            ) {
-              activeTurn.current = {
-                threadId,
-                turnId: raw.params.turnId,
-              };
-            }
-            continue;
-          }
-          if (type === "TEXT_MESSAGE_START") {
-            const messageId = String(event.messageId ?? "");
-            if (messageId && !textByPart.has(messageId)) {
-              partOrder.push({ type: "text", id: messageId });
-              textByPart.set(messageId, "");
-            }
-            continue;
-          }
-          if (type === "TEXT_MESSAGE_CONTENT") {
-            const messageId = String(event.messageId ?? "");
-            if (!textByPart.has(messageId)) {
-              partOrder.push({ type: "text", id: messageId });
-            }
-            textByPart.set(
-              messageId,
-              `${textByPart.get(messageId) ?? ""}${String(event.delta ?? "")}`,
-            );
-            yield { content: snapshot(), status: { type: "running" } };
-            continue;
-          }
-          if (type === "TOOL_CALL_START") {
-            const toolCallId = String(event.toolCallId ?? "");
-            if (toolCallId && !toolByPart.has(toolCallId)) {
-              partOrder.push({ type: "tool", id: toolCallId });
-              toolByPart.set(toolCallId, {
-                type: "tool-call",
-                toolCallId,
-                toolName: String(event.toolCallName ?? "tool"),
-                argsText: "",
-                args: {},
-              });
-            }
-            continue;
-          }
-          if (type === "TOOL_CALL_ARGS" || type === "TOOL_CALL_CHUNK") {
-            const toolCallId = String(event.toolCallId ?? "");
-            const tool = toolByPart.get(toolCallId);
-            if (!tool) continue;
-            tool.argsText += String(event.delta ?? "");
-            try {
-              tool.args = JSON.parse(tool.argsText) as ReadonlyJSONObject;
-            } catch {
-              // Arguments can be incomplete while streaming.
-            }
-            yield { content: snapshot(), status: { type: "running" } };
-            continue;
-          }
-          if (type === "TOOL_CALL_RESULT") {
-            const toolCallId = String(event.toolCallId ?? "");
-            const tool = toolByPart.get(toolCallId);
-            if (!tool) continue;
-            const content = event.content;
-            try {
-              tool.result =
-                typeof content === "string" ? JSON.parse(content) : content;
-            } catch {
-              tool.result = content;
-            }
-            tool.isError = event.isError === true;
-            yield { content: snapshot(), status: { type: "running" } };
-            continue;
-          }
-          if (type === "RUN_STARTED") {
-            yield { status: { type: "running" } };
-            continue;
-          }
-          if (type === "RUN_FINISHED") {
-            const outcome = event.outcome as
-              | { type?: string; interrupts?: unknown[] }
-              | undefined;
-            if (outcome?.type === "interrupt" && outcome.interrupts?.length) {
-              yield {
-                content: snapshot(),
-                status: { type: "requires-action", reason: "interrupt" },
-                metadata: {
-                  custom: { agui: { interrupts: outcome.interrupts } },
-                },
-              };
-              return;
-            }
-            activeTurn.current = null;
-            yield {
-              content: snapshot(),
-              status: { type: "complete", reason: "unknown" },
-            };
-            return;
-          }
-          if (type === "RUN_CANCELLED") {
-            activeTurn.current = null;
-            yield {
-              content: snapshot(),
-              status: { type: "incomplete", reason: "cancelled" },
-            };
-            return;
-          }
-          if (type === "RUN_ERROR") {
-            activeTurn.current = null;
-            yield {
-              content: snapshot(),
-              status: {
-                type: "incomplete",
-                reason: "error",
-                error: String(event.message ?? "Unable to resume the turn"),
-              },
-            };
-            return;
-          }
         }
-      },
-      async append() {
-        // Codex persists the native thread; the history adapter restores it.
-      },
-    }),
-    [sessionId, threadId],
-  );
-
-  const threadList = useMemo<UseAgUiThreadListAdapter>(
-    () => ({
-      threadId: threadId ?? "new",
-      threads: threads.map((thread) => ({
-        id: thread.id,
-        title: thread.title,
-        status: "regular" as const,
-        custom: {
-          workspace: thread.workspace,
-          updatedAt: thread.updated_at,
-        },
-      })),
-      onSwitchToNewThread() {
-        onNewThread();
-      },
-      async onSwitchToThread(nextThreadId) {
-        const thread = await api.readThread(sessionId, nextThreadId);
-        onOpenThread(nextThreadId);
-        const repository = ExportedMessageRepository.fromArray(
-          restoreMessages(thread.messages),
+      } catch (cause) {
+        if (cancelled) return;
+        setLoading(false);
+        setError(
+          cause instanceof Error ? cause.message : "Failed to load the thread",
         );
-        return {
-          messages: repository.messages.map((item) => item.message),
-        };
-      },
-      async onDelete(deletedThreadId) {
-        if (!window.confirm("Delete this thread permanently?")) return;
-        await api.deleteThread(sessionId, deletedThreadId);
-        onThreadDeleted(deletedThreadId);
-      },
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [agent, sessionId, threadId]);
+
+  const agents = useMemo(() => ({ [AGENT_ID]: agent }), [agent]);
+  const context = useMemo<RuntimeContextValue>(
+    () => ({
+      loading,
+      error,
+      sessionId,
+      workspace,
+      clearError: () => setError(null),
+      skills,
+      models,
+      model: model ?? "",
+      reasoningEffort,
+      onModelChange,
+      onReasoningEffortChange,
     }),
     [
-      onNewThread,
-      onOpenThread,
-      onThreadDeleted,
+      error,
+      loading,
+      model,
+      models,
+      onModelChange,
+      onReasoningEffortChange,
+      reasoningEffort,
       sessionId,
-      threadId,
-      threads,
+      skills,
+      workspace,
     ],
   );
 
-  const runtime = useAgUiRuntime({
-    agent,
-    showThinking: false,
-    adapters: {
-      history,
-      threadList,
-      attachments: attachmentAdapter,
-    },
-    onCancel: () => {
-      const active = activeTurn.current;
-      if (!active) return;
-      void api
-        .interruptTurn(sessionId, active.threadId, active.turnId)
-        .catch((cause: unknown) =>
-          setError(
-            cause instanceof Error ? cause.message : "Failed to stop the turn",
-          ),
-        );
-    },
-    onError: (cause) => setError(cause.message),
-  });
-  runtimeRef.current = runtime;
+  return (
+    <CopilotKitProvider agents__unsafe_dev_only={agents} showDevConsole={false}>
+      <CopilotChatConfigurationProvider
+        agentId={AGENT_ID}
+        threadId={threadId ?? "new"}
+        hasExplicitThreadId={false}
+        labels={{
+          chatInputPlaceholder:
+            "Send a message… Use @ files, $ skills, or / commands",
+          welcomeMessageText: "How can I help you today?",
+        }}
+      >
+        <RuntimeContext.Provider value={context}>
+          {children}
+        </RuntimeContext.Provider>
+      </CopilotChatConfigurationProvider>
+    </CopilotKitProvider>
+  );
+}
 
-  const steer = useCallback(
-    async (prompt: string) => {
-      const active = activeTurn.current;
-      const normalized = prompt.trim();
-      if (!normalized) return;
-      if (!active) {
-        setQueuedMessages((current) => [...current, normalized]);
-        return;
-      }
-      try {
-        await api.steerTurn(
-          sessionId,
-          active.threadId,
-          active.turnId,
-          normalized,
-        );
-      } catch {
-        setQueuedMessages((current) => [...current, normalized]);
-      }
-    },
-    [sessionId, setQueuedMessages],
+type ComposerAddMenuButtonProps = ComponentProps<
+  typeof CopilotChatInput.AddMenuButton
+>;
+
+function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
+  const runtime = useContext(RuntimeContext);
+  if (!runtime) return <CopilotChatInput.AddMenuButton {...props} />;
+  const selectedModel = runtime.models.find(
+    (item) => item.model === runtime.model,
   );
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <RunControlsProvider
-        queuedMessages={queuedMessages}
-        setQueuedMessages={setQueuedMessages}
-        steer={steer}
+    <div
+      className="flex min-w-0 items-center gap-1"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <CopilotChatInput.AddMenuButton {...props} />
+      <select
+        className="h-8 max-w-40 truncate rounded-md border-0 bg-transparent px-1.5 text-xs font-medium outline-none hover:bg-muted"
+        value={runtime.model}
+        onChange={(event) => {
+          const nextModel = runtime.models.find(
+            (item) => item.model === event.target.value,
+          );
+          runtime.onModelChange(event.target.value);
+          if (nextModel) {
+            runtime.onReasoningEffortChange(
+              nextModel.defaultReasoningEffort,
+            );
+          }
+        }}
+        aria-label="Model"
       >
-        {children}
-        {error && (
+        {runtime.models.map((item) => (
+          <option key={item.id} value={item.model}>
+            {item.displayName}
+          </option>
+        ))}
+      </select>
+      <select
+        className="h-8 max-w-28 truncate rounded-md border-0 bg-transparent px-1.5 text-xs outline-none hover:bg-muted"
+        value={runtime.reasoningEffort}
+        onChange={(event) =>
+          runtime.onReasoningEffortChange(event.target.value)
+        }
+        aria-label="Reasoning effort"
+      >
+        {selectedModel?.supportedReasoningEfforts.map((item) => (
+          <option key={item.reasoningEffort} value={item.reasoningEffort}>
+            {item.reasoningEffort}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+export function EffervaChat() {
+  const runtime = useContext(RuntimeContext);
+  if (!runtime) throw new Error("EffervaChat must be inside EffervaRuntime");
+  const { agent } = useAgent({ agentId: AGENT_ID, updates: AGENT_UPDATES });
+  const { copilotkit } = useCopilotKit();
+  const [input, setInput] = useState("");
+  const [queued, setQueued] = useState<string[]>([]);
+  const [fileOptions, setFileOptions] = useState<
+    Array<{ value: string; label: string; description: string }>
+  >([]);
+  const dispatchingRef = useRef(false);
+
+  const send = useCallback(
+    async (value: string) => {
+      const prompt = value.trim();
+      if (!prompt) return;
+      if (agent.isRunning) {
+        setQueued((current) => [...current, prompt]);
+        setInput("");
+        return;
+      }
+      setInput("");
+      agent.addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: prompt,
+      });
+      await copilotkit.runAgent({ agent });
+    },
+    [agent, copilotkit],
+  );
+
+  useEffect(() => {
+    if (agent.isRunning) {
+      dispatchingRef.current = false;
+      return;
+    }
+    if (dispatchingRef.current || queued.length === 0) return;
+    dispatchingRef.current = true;
+    const next = queued[0]!;
+    setQueued((current) => current.slice(1));
+    void send(next).finally(() => {
+      dispatchingRef.current = false;
+    });
+  }, [agent.isRunning, queued, send]);
+
+  const appendDirective = useCallback((directive: string) => {
+    setInput((current) => `${current}${current && !current.endsWith(" ") ? " " : ""}${directive} `);
+  }, []);
+  const trigger = useMemo(() => {
+    const match = input.match(/(^|\s)([$/@])([^\s]*)$/u);
+    if (!match) return null;
+    return {
+      char: match[2]!,
+      query: match[3]!,
+      tokenLength: match[2]!.length + match[3]!.length,
+    };
+  }, [input]);
+
+  useEffect(() => {
+    if (trigger?.char !== "@") {
+      setFileOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      void api
+        .searchFiles(runtime.sessionId, trigger.query, runtime.workspace ?? undefined)
+        .then((files) => {
+          if (cancelled) return;
+          setFileOptions(
+            files.slice(0, 8).map((file) => ({
+              value: file.path,
+              label: file.file_name,
+              description: file.path,
+            })),
+          );
+        })
+        .catch(() => {
+          if (!cancelled) setFileOptions([]);
+        });
+    }, 80);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [runtime.sessionId, runtime.workspace, trigger]);
+
+  const triggerOptions = useMemo(() => {
+    if (!trigger) return [];
+    const query = trigger.query.toLocaleLowerCase();
+    if (trigger.char === "$") {
+      return runtime.skills
+        .filter((skill) => skill.name.toLocaleLowerCase().includes(query))
+        .slice(0, 8)
+        .map((skill) => ({
+          value: skill.name,
+          label: `$${skill.name}`,
+          description:
+            skill.interface?.shortDescription ||
+            skill.shortDescription ||
+            skill.description,
+        }));
+    }
+    if (trigger.char === "/") {
+      return [
+        { value: "plan", label: "/plan", description: "Enter Plan mode" },
+        { value: "goal", label: "/goal", description: "Manage the thread goal" },
+      ].filter((item) => item.value.includes(query));
+    }
+    return fileOptions;
+  }, [fileOptions, runtime.skills, trigger]);
+
+  const selectTriggerOption = useCallback(
+    (value: string) => {
+      if (!trigger) return;
+      setInput(
+        (current) =>
+          `${current.slice(0, current.length - trigger.tokenLength)}${trigger.char}${value} `,
+      );
+    },
+    [trigger],
+  );
+  const toolsMenu = useMemo<(ToolsMenuItem | "-")[]>(
+    () => [
+      {
+        label: "Commands",
+        items: [
+          { label: "/plan", action: () => appendDirective("/plan") },
+          { label: "/goal", action: () => appendDirective("/goal") },
+        ],
+      },
+      ...(runtime.skills.length
+        ? [
+            "-" as const,
+            {
+              label: "Skills",
+              items: runtime.skills.map((skill) => ({
+                label: `$${skill.name}`,
+                action: () => appendDirective(`$${skill.name}`),
+              })),
+            },
+          ]
+        : []),
+    ],
+    [appendDirective, runtime.skills],
+  );
+
+  const stop = useCallback(() => {
+    const state =
+      typeof agent.state === "object" && agent.state
+        ? (agent.state as Record<string, unknown>)
+        : {};
+    const activeThreadId = String(state.threadId ?? agent.threadId ?? "");
+    const turnId = String(state.turnId ?? "");
+    if (activeThreadId && activeThreadId !== "new" && turnId) {
+      void api.interruptTurn(runtime.sessionId, activeThreadId, turnId);
+    }
+    agent.abortRun();
+  }, [agent, runtime.sessionId]);
+
+  const steer = useCallback(() => {
+    const prompt = input.trim();
+    if (!prompt) return;
+    const state = agent.state as Record<string, unknown>;
+    const activeThreadId = String(state.threadId ?? agent.threadId ?? "");
+    const turnId = String(state.turnId ?? "");
+    if (!activeThreadId || !turnId) return;
+    setInput("");
+    void api.steerTurn(runtime.sessionId, activeThreadId, turnId, prompt);
+  }, [agent, input, runtime.sessionId]);
+
+  return (
+    <div className="relative h-full min-h-0">
+      <CopilotChatView
+        className="h-full"
+        messages={[...agent.messages]}
+        isRunning={agent.isRunning}
+        inputValue={input}
+        onInputChange={setInput}
+        onSubmitMessage={(value) => void send(value)}
+        onStop={stop}
+        input={{ toolsMenu, addMenuButton: ComposerAddMenuButton }}
+        welcomeScreen={agent.messages.length === 0}
+      />
+      {queued.length > 0 && (
+        <div className="absolute right-6 bottom-24 left-6 mx-auto max-w-2xl rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-sm">
+          Queued: {queued.join(" · ")}
+        </div>
+      )}
+      {trigger && triggerOptions.length > 0 && (
+        <div className="absolute right-6 bottom-24 left-6 z-20 mx-auto max-h-72 max-w-2xl overflow-y-auto rounded-xl border bg-background p-1 shadow-lg">
+          {triggerOptions.map((option) => (
+            <button
+              key={`${trigger.char}:${option.value}`}
+              type="button"
+              className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-muted"
+              onClick={() => selectTriggerOption(option.value)}
+            >
+              <span className="text-sm font-medium">{option.label}</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                {option.description}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {agent.isRunning && input.trim() && (
+        <div className="absolute right-8 bottom-24 flex gap-2">
           <button
-            className="fixed right-4 bottom-4 z-50 max-w-md rounded-lg border border-destructive/25 bg-background px-3 py-2 text-left text-xs text-destructive shadow-lg"
-            onClick={() => setError(null)}
+            className="rounded-md border bg-background px-3 py-1.5 text-xs"
+            onClick={() => void send(input)}
           >
-            {error}
+            Queue
           </button>
-        )}
-      </RunControlsProvider>
-    </AssistantRuntimeProvider>
+          <button
+            className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground"
+            onClick={steer}
+          >
+            Steer
+          </button>
+        </div>
+      )}
+      {runtime.loading && (
+        <div className="absolute inset-0 grid place-items-center bg-background/75 text-sm text-muted-foreground">
+          Opening thread…
+        </div>
+      )}
+      {runtime.error && (
+        <button
+          className="absolute right-4 bottom-4 max-w-md rounded-lg border border-destructive/25 bg-background px-3 py-2 text-left text-xs text-destructive shadow-lg"
+          onClick={runtime.clearError}
+        >
+          {runtime.error}
+        </button>
+      )}
+    </div>
   );
 }

@@ -1,212 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  unstable_useLiveCompletionAdapter,
-  unstable_useMentionAdapter,
-  type Unstable_DirectiveFormatter,
-  type Unstable_DirectiveSegment,
-} from "@assistant-ui/react";
-import {
   Code2,
-  FileIcon,
-  FolderIcon,
-  ListTodoIcon,
   LoaderCircle,
-  TargetIcon,
+  MoreHorizontal,
+  Plus,
+  Search,
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { ComposerTriggerPopover } from "@/components/assistant-ui/composer-trigger-popover";
-import { Thread } from "@/components/assistant-ui/thread";
-import { ThreadList } from "@/components/assistant-ui/thread-list";
 import { api } from "./api";
-import { EffervaRuntime } from "./EffervaRuntime";
-import type {
-  CreateThreadInput,
-  SkillMetadata,
-  ThreadSummary,
-} from "./types";
-
-const SKILL_DIRECTIVE_FORMATTER: Unstable_DirectiveFormatter = {
-  serialize(item) {
-    return `$${item.id}`;
-  },
-  parse(text) {
-    const segments: Unstable_DirectiveSegment[] = [];
-    let lastIndex = 0;
-    for (const match of text.matchAll(/\$([A-Za-z0-9:_-]+)/gu)) {
-      if (match.index > lastIndex) {
-        segments.push({
-          kind: "text",
-          text: text.slice(lastIndex, match.index),
-        });
-      }
-      const name = match[1]!;
-      segments.push({
-        kind: "mention",
-        type: "skill",
-        id: name,
-        label: name,
-      });
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < text.length) {
-      segments.push({ kind: "text", text: text.slice(lastIndex) });
-    }
-    return segments;
-  },
-};
-
-const FILE_DIRECTIVE_FORMATTER: Unstable_DirectiveFormatter = {
-  serialize(item) {
-    return `@${item.id}`;
-  },
-  parse(text) {
-    const segments: Unstable_DirectiveSegment[] = [];
-    let lastIndex = 0;
-    for (const match of text.matchAll(/@([^\s]+)/gu)) {
-      if (match.index > lastIndex) {
-        segments.push({
-          kind: "text",
-          text: text.slice(lastIndex, match.index),
-        });
-      }
-      const path = match[1]!;
-      segments.push({
-        kind: "mention",
-        type: "file",
-        id: path,
-        label: path,
-      });
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < text.length) {
-      segments.push({ kind: "text", text: text.slice(lastIndex) });
-    }
-    return segments;
-  },
-};
-
-const COMMAND_DIRECTIVE_FORMATTER: Unstable_DirectiveFormatter = {
-  serialize(item) {
-    return `/${item.id} `;
-  },
-  parse(text) {
-    const segments: Unstable_DirectiveSegment[] = [];
-    let lastIndex = 0;
-    for (const match of text.matchAll(/\/(plan|goal)\b/gu)) {
-      if (match.index > lastIndex) {
-        segments.push({
-          kind: "text",
-          text: text.slice(lastIndex, match.index),
-        });
-      }
-      const command = match[1]!;
-      segments.push({
-        kind: "mention",
-        type: "command",
-        id: command,
-        label: `/${command}`,
-      });
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < text.length) {
-      segments.push({ kind: "text", text: text.slice(lastIndex) });
-    }
-    return segments;
-  },
-};
-
-function SkillPicker({ skills }: { skills: SkillMetadata[] }) {
-  const mention = unstable_useMentionAdapter({
-    items: skills.map((skill) => ({
-      id: skill.name,
-      type: "skill",
-      label: skill.interface?.displayName || skill.name,
-      description:
-        skill.interface?.shortDescription ||
-        skill.shortDescription ||
-        skill.description,
-    })),
-    includeModelContextTools: false,
-    formatter: SKILL_DIRECTIVE_FORMATTER,
-  });
-  return (
-    <ComposerTriggerPopover
-      char="$"
-      {...mention}
-      emptyItemsLabel="No matching skills"
-    />
-  );
-}
-
-function FilePicker({
-  sessionId,
-  workspace,
-}: {
-  sessionId: string;
-  workspace?: string | null;
-}) {
-  const fetcher = useCallback(
-    async (query: string) =>
-      (await api.searchFiles(sessionId, query, workspace ?? undefined)).map(
-        (file) => ({
-          id: file.path,
-          type: "file",
-          label: file.file_name,
-          description: file.path,
-          metadata: { icon: file.match_type },
-        }),
-      ),
-    [sessionId, workspace],
-  );
-  const files = unstable_useLiveCompletionAdapter({
-    fetcher,
-    debounceMs: 80,
-  });
-  return (
-    <ComposerTriggerPopover
-      char="@"
-      adapter={files.adapter}
-      isLoading={files.isLoading}
-      directive={{ formatter: FILE_DIRECTIVE_FORMATTER }}
-      iconMap={{ file: FileIcon, directory: FolderIcon }}
-      fallbackIcon={FileIcon}
-      emptyItemsLabel="No matching files"
-    />
-  );
-}
-
-function CommandPicker() {
-  const commands = unstable_useMentionAdapter({
-    items: [
-      {
-        id: "plan",
-        type: "command",
-        label: "/plan",
-        description: "Enter Codex Plan mode, optionally with a prompt",
-        icon: "plan",
-      },
-      {
-        id: "goal",
-        type: "command",
-        label: "/goal",
-        description: "Set, view, pause, resume, or clear the thread goal",
-        icon: "goal",
-      },
-    ],
-    includeModelContextTools: false,
-    formatter: COMMAND_DIRECTIVE_FORMATTER,
-    iconMap: { plan: ListTodoIcon, goal: TargetIcon },
-  });
-  return (
-    <ComposerTriggerPopover
-      char="/"
-      {...commands}
-      emptyItemsLabel="No matching commands"
-    />
-  );
-}
+import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
+import type { CreateThreadInput, ThreadSummary } from "./types";
 
 export function App() {
   const navigate = useNavigate();
@@ -218,7 +23,7 @@ export function App() {
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] =
     useState<NonNullable<CreateThreadInput["reasoning_effort"]>>("low");
-  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
 
   const sessions = useQuery({
     queryKey: ["sessions"],
@@ -232,14 +37,13 @@ export function App() {
   const models = useQuery({
     queryKey: ["models", sessionId],
     queryFn: () => api.listModels(sessionId!),
-    enabled: Boolean(sessionId && !threadId),
+    enabled: Boolean(sessionId),
   });
-  const skillWorkspace = threads.data?.find(
-    (item) => item.id === threadId,
-  )?.workspace;
+  const selectedThread = threads.data?.find((item) => item.id === threadId);
   const skills = useQuery({
-    queryKey: ["skills", sessionId, skillWorkspace],
-    queryFn: () => api.listSkills(sessionId!, skillWorkspace ?? undefined),
+    queryKey: ["skills", sessionId, selectedThread?.workspace],
+    queryFn: () =>
+      api.listSkills(sessionId!, selectedThread?.workspace ?? undefined),
     enabled: Boolean(sessionId),
   });
   const createDefaultSession = useMutation({
@@ -267,13 +71,19 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (threadId || !models.data?.length) return;
+    if (!threadId || !threads.data || selectedThread) return;
+    navigate(`/sessions/${sessionId}`, { replace: true });
+  }, [navigate, selectedThread, sessionId, threadId, threads.data]);
+
+  useEffect(() => {
+    if (!models.data?.length) return;
     const current = models.data.find((item) => item.model === model);
     if (current) {
-      const supportsCurrentEffort = current.supportedReasoningEfforts.some(
-        (item) => item.reasoningEffort === reasoningEffort,
-      );
-      if (!supportsCurrentEffort) {
+      if (
+        !current.supportedReasoningEfforts.some(
+          (item) => item.reasoningEffort === reasoningEffort,
+        )
+      ) {
         setReasoningEffort(current.defaultReasoningEffort);
       }
       return;
@@ -282,7 +92,7 @@ export function App() {
       models.data.find((item) => item.isDefault) ?? models.data[0];
     setModel(defaultModel.model);
     setReasoningEffort(defaultModel.defaultReasoningEffort);
-  }, [model, models.data, reasoningEffort, threadId]);
+  }, [model, models.data, reasoningEffort]);
 
   const handleThreadCreated = useCallback(
     (thread: ThreadSummary) => {
@@ -293,32 +103,49 @@ export function App() {
           ...current.filter((item) => item.id !== thread.id),
         ],
       );
-      void queryClient.invalidateQueries({
-        queryKey: ["threads", thread.session_id],
-      });
       navigate(`/sessions/${thread.session_id}/threads/${thread.id}`, {
         replace: true,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", thread.session_id],
       });
     },
     [navigate, queryClient],
   );
 
-  const handleThreadDeleted = useCallback(
-    (deletedThreadId: string) => {
+  const handleRunSettled = useCallback(
+    (settledThreadId: string) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", sessionId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", sessionId, settledThreadId],
+      });
+    },
+    [queryClient, sessionId],
+  );
+
+  const deleteThread = useCallback(
+    async (deletedThreadId: string) => {
+      if (!sessionId || !window.confirm("Delete this thread permanently?")) {
+        return;
+      }
+      await api.deleteThread(sessionId, deletedThreadId);
       queryClient.setQueryData<ThreadSummary[]>(
         ["threads", sessionId],
         (current = []) =>
           current.filter((item) => item.id !== deletedThreadId),
       );
       if (threadId === deletedThreadId) {
-        setQueuedMessages([]);
         navigate(`/sessions/${sessionId}`);
       }
+      await queryClient.invalidateQueries({
+        queryKey: ["threads", sessionId],
+      });
     },
     [navigate, queryClient, sessionId, threadId],
   );
 
-  const selectedModel = models.data?.find((item) => item.model === model);
   const enabledSkills = useMemo(
     () =>
       Array.from(
@@ -331,70 +158,20 @@ export function App() {
       ),
     [skills.data],
   );
-  const selectedThread = threads.data?.find((item) => item.id === threadId);
-  const ComposerTriggers = useCallback(
-    () => (
-      <>
-        <FilePicker
-          sessionId={sessionId!}
-          workspace={selectedThread?.workspace}
-        />
-        <SkillPicker skills={enabledSkills} />
-        <CommandPicker />
-      </>
-    ),
-    [enabledSkills, selectedThread?.workspace, sessionId],
-  );
-
-  const ComposerControls = useCallback(
-    () => (
-      <>
-        <select
-          className="h-7 max-w-40 rounded-md border bg-background px-2 text-xs outline-none"
-          value={model}
-          onChange={(event) => {
-            const nextModel = models.data?.find(
-              (item) => item.model === event.target.value,
-            );
-            setModel(event.target.value);
-            if (nextModel) {
-              setReasoningEffort(nextModel.defaultReasoningEffort);
-            }
-          }}
-          aria-label="Model"
-        >
-          {models.data?.map((item) => (
-            <option key={item.id} value={item.model}>
-              {item.displayName}
-            </option>
-          ))}
-        </select>
-        <select
-          className="h-7 rounded-md border bg-background px-2 text-xs outline-none"
-          value={reasoningEffort}
-          onChange={(event) => setReasoningEffort(event.target.value)}
-          aria-label="Reasoning effort"
-        >
-          {selectedModel?.supportedReasoningEfforts.map((item) => (
-            <option
-              key={item.reasoningEffort}
-              value={item.reasoningEffort}
-              title={item.description}
-            >
-              {item.reasoningEffort}
-            </option>
-          ))}
-        </select>
-      </>
-    ),
-    [model, models.data, reasoningEffort, selectedModel],
-  );
+  const visibleThreads = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    if (!query) return threads.data ?? [];
+    return (threads.data ?? []).filter((thread) =>
+      thread.title.toLocaleLowerCase().includes(query),
+    );
+  }, [search, threads.data]);
 
   if (
     !sessionId ||
     threads.isLoading ||
     !threads.data ||
-    (!threadId && (models.isLoading || !models.data))
+    models.isLoading ||
+    !models.data
   ) {
     return (
       <div className="grid h-screen place-items-center bg-background">
@@ -411,21 +188,15 @@ export function App() {
       key={sessionId}
       sessionId={sessionId}
       threadId={threadId}
-      threads={threads.data}
       model={model}
       reasoningEffort={reasoningEffort}
-      queuedMessages={queuedMessages}
-      setQueuedMessages={setQueuedMessages}
-      onNewThread={() => {
-        setQueuedMessages([]);
-        navigate(`/sessions/${sessionId}`);
-      }}
-      onOpenThread={(nextThreadId) => {
-        setQueuedMessages([]);
-        navigate(`/sessions/${sessionId}/threads/${nextThreadId}`);
-      }}
+      models={models.data}
+      onModelChange={setModel}
+      onReasoningEffortChange={setReasoningEffort}
+      workspace={selectedThread?.workspace}
+      skills={enabledSkills}
       onThreadCreated={handleThreadCreated}
-      onThreadDeleted={handleThreadDeleted}
+      onRunSettled={handleRunSettled}
     >
       <div className="grid h-screen grid-cols-[17rem_minmax(0,1fr)] overflow-hidden bg-background max-md:grid-cols-1">
         <aside className="flex min-h-0 flex-col border-r bg-sidebar p-3 max-md:hidden">
@@ -440,8 +211,53 @@ export function App() {
               </div>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <ThreadList />
+          <button
+            type="button"
+            className="mb-3 flex items-center gap-2 rounded-lg px-2 py-2 text-sm font-medium hover:bg-sidebar-accent"
+            onClick={() => navigate(`/sessions/${sessionId}`)}
+          >
+            <Plus className="size-4" />
+            New Thread
+          </button>
+          <label className="mb-3 flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-muted-foreground">
+            <Search className="size-4" />
+            <input
+              className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search threads"
+              aria-label="Search threads"
+            />
+          </label>
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+            {visibleThreads.map((thread) => (
+              <div
+                key={thread.id}
+                className={`group flex items-center rounded-lg ${
+                  thread.id === threadId
+                    ? "bg-sidebar-accent"
+                    : "hover:bg-sidebar-accent/60"
+                }`}
+              >
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
+                  onClick={() =>
+                    navigate(`/sessions/${sessionId}/threads/${thread.id}`)
+                  }
+                >
+                  {thread.title}
+                </button>
+                <button
+                  type="button"
+                  className="mr-1 rounded p-1 opacity-0 hover:bg-background group-hover:opacity-100"
+                  aria-label={`Delete ${thread.title}`}
+                  onClick={() => void deleteThread(thread.id)}
+                >
+                  <MoreHorizontal className="size-4" />
+                </button>
+              </div>
+            ))}
           </div>
         </aside>
         <main className="grid min-h-0 min-w-0 grid-rows-[3.5rem_minmax(0,1fr)]">
@@ -451,12 +267,7 @@ export function App() {
             </h1>
           </header>
           <div className="min-h-0">
-            <Thread
-              components={{
-                ...(!threadId ? { ComposerControls } : {}),
-                ComposerTriggers,
-              }}
-            />
+            <EffervaChat />
           </div>
         </main>
       </div>

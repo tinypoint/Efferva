@@ -19,10 +19,12 @@ export type ThreadSummary = {
   updated_at?: string | null;
 };
 
-export type AgUiMessage = {
-  id: string;
-  role: "user" | "assistant" | "system" | "tool";
-  content: string | Array<Record<string, unknown>>;
+export type AgUiMessage = Message & {
+  process?: Array<
+    | { type: "reasoning"; text: string }
+    | { type: "tool-call"; toolCallId: string }
+  >;
+  processDurationMs?: number;
 };
 
 export type ThreadDetail = ThreadSummary & {
@@ -78,3 +80,4 @@ export type CreateThreadInput = {
   model?: string;
   reasoning_effort?: string;
 };
+import type { Message } from "@ag-ui/client";

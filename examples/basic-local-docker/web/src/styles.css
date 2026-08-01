@@ -1,9 +1,7 @@
 @import "tailwindcss";
-@import "@assistant-ui/react-markdown/styles/dot.css";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
-@import "tw-shimmer";
 
 @custom-variant dark (&:is(.dark *));
 
