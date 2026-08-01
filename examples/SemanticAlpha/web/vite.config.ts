@@ -16,6 +16,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       proxy: {
         "/agent": env.EFFERVA_API_PROXY_TARGET ?? "http://localhost:8080",
+        "/api": env.EFFERVA_API_PROXY_TARGET ?? "http://localhost:8080",
       },
     },
   };

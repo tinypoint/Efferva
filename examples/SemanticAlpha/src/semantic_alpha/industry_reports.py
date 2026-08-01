@@ -25,10 +25,43 @@ class IndustryReportCreated(BaseModel):
     markdown_path: str
 
 
+class IndustryReportSummary(BaseModel):
+    id: UUID
+    created_at: datetime
+    title: str
+
+
+class IndustryReport(BaseModel):
+    id: UUID
+    created_at: datetime
+    markdown: str
+
+
 def create_industry_reports_router(
     sandbox: SandboxProvider,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/industry-reports")
+
+    @router.get("", response_model=list[IndustryReportSummary])
+    async def list_industry_reports(request: Request) -> list[dict[str, object]]:
+        database = _database(request)
+        async with database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT id, created_at, markdown
+                FROM industry_research_reports
+                ORDER BY created_at DESC
+                """
+            )
+            rows = await cursor.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "title": _markdown_title(row["markdown"]),
+            }
+            for row in rows
+        ]
 
     @router.post("", response_model=IndustryReportCreated, status_code=201)
     async def generate_industry_report(
@@ -125,6 +158,26 @@ def create_industry_reports_router(
             "markdown_path": markdown_path,
         }
 
+    @router.get("/{report_id}", response_model=IndustryReport)
+    async def get_industry_report(
+        report_id: UUID,
+        request: Request,
+    ) -> dict[str, object]:
+        database = _database(request)
+        async with database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT id, created_at, markdown
+                FROM industry_research_reports
+                WHERE id = %s
+                """,
+                (report_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="产业调查报告不存在")
+        return dict(row)
+
     return router
 
 
@@ -192,3 +245,10 @@ def _research_prompt(industry: str, markdown_path: str) -> str:
 5. 将最终完整 Markdown 写入这个绝对路径：{markdown_path}
 6. 文件写入成功后再结束，最终回复只报告文件路径与抽检结论。
 """
+
+
+def _markdown_title(markdown: str) -> str:
+    for line in markdown.splitlines():
+        if line.startswith("# ") and line[2:].strip():
+            return line[2:].strip()
+    return "产业调查报告"

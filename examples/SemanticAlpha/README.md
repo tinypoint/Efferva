@@ -18,6 +18,9 @@ example 的 FastAPI、Efferva、PostgreSQL、Redis 与 OpenSandbox 运行链路�
 Efferva Session 与 Thread、调用 `$industry-research` 生成 Markdown，并在生成完成后
 将全文写入 `industry_research_reports`。
 
+Web 首页按 `created_at` 把报告放到日历对应日期；日历标题从 Markdown 的首个一级
+标题动态提取。点击报告后按 GitHub Flavored Markdown 渲染全文。
+
 ## 启动
 
 要求：

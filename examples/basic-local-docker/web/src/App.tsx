@@ -87,11 +87,6 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!threadId || !threads.data || selectedThread) return;
-    navigate(`/sessions/${sessionId}`, { replace: true });
-  }, [navigate, selectedThread, sessionId, threadId, threads.data]);
-
-  useEffect(() => {
     if (!selectedModel || !executionSettings.data || !sessionId) return;
     if (
       executionSettings.data.model !== model ||
@@ -209,6 +204,14 @@ export function App() {
     [queryClient, sessionId],
   );
 
+  const handleThreadNotFound = useCallback(
+    (missingThreadId: string) => {
+      if (threadId !== missingThreadId) return;
+      navigate(`/sessions/${sessionId}`, { replace: true });
+    },
+    [navigate, sessionId, threadId],
+  );
+
   const deleteThread = useCallback(
     async (deletedThreadId: string) => {
       if (!sessionId || !window.confirm("Delete this thread permanently?")) {
@@ -275,6 +278,7 @@ export function App() {
       skills={enabledSkills}
       onThreadCreated={handleThreadCreated}
       onRunSettled={handleRunSettled}
+      onThreadNotFound={handleThreadNotFound}
     >
       <div className="grid h-screen grid-cols-[17rem_minmax(0,1fr)] overflow-hidden bg-background max-md:grid-cols-1">
         <aside className="flex min-h-0 flex-col border-r bg-sidebar p-3 max-md:hidden">

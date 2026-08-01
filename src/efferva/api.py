@@ -26,7 +26,7 @@ from efferva.repository import (
     RunRepository,
     SessionRepository,
 )
-from efferva.runtime import CodexProxy
+from efferva.runtime import CodexProxy, CodexRpcError
 
 
 def principal_dependency(
@@ -1356,7 +1356,16 @@ def create_api_router(
         principal: Principal = Depends(resolve_principal),
     ) -> dict[str, Any]:
         session = await repository().get_session(principal, session_id, touch=True)
-        thread = await codex_proxy().read_thread(session, thread_id)
+        try:
+            thread = await codex_proxy().read_thread(session, thread_id)
+        except CodexRpcError as error:
+            message = str(error.error.get("message") or "").lower()
+            if "not found" in message or "no rollout found" in message:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"thread {thread_id} not found",
+                ) from error
+            raise
         detail = _thread_detail(thread, session_id)
         active_turn_id = detail.get("active_turn_id")
         if active_turn_id:

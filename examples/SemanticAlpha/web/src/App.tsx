@@ -1,15 +1,21 @@
-import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ChevronLeft, ChevronRight } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
-const CURRENT_MONTH_EVENTS = [
-  { day: 4, time: "09:00", title: "公司财报" },
-  { day: 8, time: "15:00", title: "组合复盘" },
-  { day: 13, time: "20:30", title: "宏观数据" },
-  { day: 20, time: "19:00", title: "行业跟踪" },
-  { day: 27, time: "16:00", title: "月度复盘" },
-];
+type IndustryReportSummary = {
+  id: string;
+  created_at: string;
+  title: string;
+};
+
+type IndustryReport = {
+  id: string;
+  created_at: string;
+  markdown: string;
+};
 
 function sameDay(left: Date, right: Date) {
   return (
@@ -36,15 +42,60 @@ function monthLabel(month: Date) {
   }).format(month);
 }
 
+function reportTime(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+function reportDate(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+async function requestJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, { signal });
+  if (response.ok) return response.json() as Promise<T>;
+  const body = (await response.json().catch(() => null)) as {
+    detail?: string;
+  } | null;
+  throw new Error(body?.detail ?? `请求失败：${response.status}`);
+}
+
 export function App() {
   const today = useMemo(() => new Date(), []);
   const [month, setMonth] = useState(
     () => new Date(today.getFullYear(), today.getMonth(), 1),
   );
+  const [reports, setReports] = useState<IndustryReportSummary[]>([]);
+  const [listError, setListError] = useState<string | null>(null);
+  const [activeSummary, setActiveSummary] =
+    useState<IndustryReportSummary | null>(null);
+  const [activeReport, setActiveReport] = useState<IndustryReport | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
   const days = useMemo(() => monthDays(month), [month]);
-  const showingCurrentMonth =
-    month.getFullYear() === today.getFullYear() &&
-    month.getMonth() === today.getMonth();
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson<IndustryReportSummary[]>(
+      "/api/industry-reports",
+      controller.signal,
+    )
+      .then(setReports)
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setListError(error instanceof Error ? error.message : "报告读取失败");
+      });
+    return () => controller.abort();
+  }, []);
 
   const moveMonth = (offset: number) => {
     setMonth(new Date(month.getFullYear(), month.getMonth() + offset, 1));
@@ -54,6 +105,67 @@ export function App() {
     setMonth(new Date(today.getFullYear(), today.getMonth(), 1));
   };
 
+  const openReport = async (summary: IndustryReportSummary) => {
+    setActiveSummary(summary);
+    setActiveReport(null);
+    setReportError(null);
+    try {
+      const report = await requestJson<IndustryReport>(
+        `/api/industry-reports/${summary.id}`,
+      );
+      setActiveReport(report);
+    } catch (error) {
+      setReportError(error instanceof Error ? error.message : "报告读取失败");
+    }
+  };
+
+  const closeReport = () => {
+    setActiveSummary(null);
+    setActiveReport(null);
+    setReportError(null);
+  };
+
+  if (activeSummary) {
+    return (
+      <main className="min-h-screen bg-canvas text-ink">
+        <header className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-canvas/95 px-5 py-4 backdrop-blur sm:px-8">
+          <button
+            type="button"
+            onClick={closeReport}
+            className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm font-medium hover:bg-panel"
+          >
+            <ArrowLeft className="size-4" />
+            返回日历
+          </button>
+          <span className="text-sm font-semibold tracking-[-0.02em]">
+            Semantic Alpha
+          </span>
+        </header>
+
+        <section className="px-4 py-8 sm:px-8 sm:py-12">
+          <article className="mx-auto max-w-[960px] rounded-xl border border-line bg-white px-5 py-8 shadow-sm sm:px-10 sm:py-12">
+            <div className="mb-8 border-b border-line pb-5 text-sm text-muted">
+              {reportDate(activeSummary.created_at)}
+            </div>
+            {!activeReport && !reportError ? (
+              <p className="text-sm text-muted">正在读取报告…</p>
+            ) : null}
+            {reportError ? (
+              <p className="text-sm text-red-700">{reportError}</p>
+            ) : null}
+            {activeReport ? (
+              <div className="markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {activeReport.markdown}
+                </ReactMarkdown>
+              </div>
+            ) : null}
+          </article>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="flex min-h-screen flex-col bg-canvas text-ink">
       <header className="flex flex-col justify-between gap-4 border-b border-line px-5 py-5 sm:flex-row sm:items-center sm:px-8">
@@ -62,7 +174,7 @@ export function App() {
             Semantic Alpha
           </div>
           <h1 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">
-            投资日历
+            产业调查日历
           </h1>
         </div>
 
@@ -99,6 +211,11 @@ export function App() {
       </header>
 
       <section className="min-h-0 flex-1 overflow-auto p-4 sm:p-8">
+        {listError ? (
+          <p className="mx-auto mb-3 max-w-[1500px] text-sm text-red-700">
+            {listError}
+          </p>
+        ) : null}
         <div className="mx-auto min-w-[760px] max-w-[1500px] overflow-hidden rounded-xl border border-line bg-white">
           <div className="grid grid-cols-7 border-b border-line bg-panel/60">
             {WEEKDAYS.map((day, index) => (
@@ -117,12 +234,9 @@ export function App() {
             {days.map((date) => {
               const inMonth = date.getMonth() === month.getMonth();
               const isToday = sameDay(date, today);
-              const events =
-                showingCurrentMonth && inMonth
-                  ? CURRENT_MONTH_EVENTS.filter(
-                      (event) => event.day === date.getDate(),
-                    )
-                  : [];
+              const dayReports = reports.filter((report) =>
+                sameDay(new Date(report.created_at), date),
+              );
 
               return (
                 <div
@@ -140,14 +254,18 @@ export function App() {
                   </span>
 
                   <div className="mt-2 space-y-1">
-                    {events.map((event) => (
-                      <div
-                        key={event.title}
-                        className="rounded-md bg-panel px-2 py-1.5 text-xs"
+                    {dayReports.map((report) => (
+                      <button
+                        key={report.id}
+                        type="button"
+                        onClick={() => void openReport(report)}
+                        className="block w-full rounded-md bg-[#edf4ee] px-2 py-1.5 text-left text-xs text-ink transition hover:bg-[#dfeadf]"
                       >
-                        <span className="mr-1.5 text-muted">{event.time}</span>
-                        <span className="font-medium">{event.title}</span>
-                      </div>
+                        <span className="mr-1.5 text-muted">
+                          {reportTime(report.created_at)}
+                        </span>
+                        <span className="font-medium">{report.title}</span>
+                      </button>
                     ))}
                   </div>
                 </div>

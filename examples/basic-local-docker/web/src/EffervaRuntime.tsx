@@ -29,7 +29,7 @@ import {
 } from "@copilotkit/react-core/v2";
 import { from, type Observable } from "rxjs";
 
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import type {
   AgUiMessage,
   CreateThreadInput,
@@ -285,6 +285,7 @@ type EffervaRuntimeProps = {
   children: ReactNode;
   onThreadCreated: (thread: ThreadSummary) => void;
   onRunSettled: (threadId: string) => void;
+  onThreadNotFound: (threadId: string) => void;
 };
 
 export function EffervaRuntime({
@@ -300,16 +301,19 @@ export function EffervaRuntime({
   children,
   onThreadCreated,
   onRunSettled,
+  onThreadNotFound,
 }: EffervaRuntimeProps) {
   const [loading, setLoading] = useState(Boolean(threadId));
   const [error, setError] = useState<string | null>(null);
   const settingsRef = useRef({ model, reasoningEffort });
   const onThreadCreatedRef = useRef(onThreadCreated);
   const onRunSettledRef = useRef(onRunSettled);
+  const onThreadNotFoundRef = useRef(onThreadNotFound);
   const createdThreadIdRef = useRef<string | null>(null);
   settingsRef.current = { model, reasoningEffort };
   onThreadCreatedRef.current = onThreadCreated;
   onRunSettledRef.current = onRunSettled;
+  onThreadNotFoundRef.current = onThreadNotFound;
 
   const agent = useMemo(() => {
     const current = new EffervaAgent({
@@ -451,6 +455,10 @@ export function EffervaRuntime({
       } catch (cause) {
         if (cancelled) return;
         setLoading(false);
+        if (cause instanceof ApiError && cause.status === 404) {
+          onThreadNotFoundRef.current(desiredThreadId);
+          return;
+        }
         setError(
           cause instanceof Error ? cause.message : "Failed to load the thread",
         );
