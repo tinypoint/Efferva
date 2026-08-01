@@ -62,6 +62,12 @@ class CodexProxy:
         self._next_id = 1
         self._id_lock = asyncio.Lock()
 
+    def set_server_request_handler(
+        self,
+        handler: ServerRequestHandler | None,
+    ) -> None:
+        self._server_request_handler = handler
+
     async def request(
         self,
         session: Mapping[str, Any],
@@ -84,6 +90,17 @@ class CodexProxy:
             },
         )
         return list(result.get("data") or [])
+
+    async def delete_thread(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+    ) -> None:
+        await self.request(
+            session,
+            "thread/delete",
+            {"threadId": thread_id},
+        )
 
     async def list_models(self, session: Mapping[str, Any]) -> list[dict[str, Any]]:
         result = await self.request(
@@ -239,21 +256,39 @@ class CodexProxy:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> dict[str, Any]:
-        try:
-            result = await self.request(
-                session,
-                "thread/read",
-                {"threadId": thread_id, "includeTurns": True},
-            )
-        except CodexRpcError as error:
-            if "is not materialized yet" not in str(error.error.get("message", "")):
-                raise
-            result = await self.request(
-                session,
-                "thread/read",
-                {"threadId": thread_id, "includeTurns": False},
-            )
-        return dict(result["thread"])
+        result = await self.request(
+            session,
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": False},
+        )
+        thread = dict(result["thread"])
+        turns: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            params: dict[str, Any] = {
+                "threadId": thread_id,
+                "limit": 100,
+                "sortDirection": "asc",
+                "itemsView": "full",
+            }
+            if cursor is not None:
+                params["cursor"] = cursor
+            try:
+                page = await self.request(session, "thread/turns/list", params)
+            except CodexRpcError as error:
+                message = str(error.error.get("message", ""))
+                if "is not materialized yet" not in message:
+                    raise
+                break
+            turns.extend(dict(turn) for turn in page.get("data") or [])
+            next_cursor = page.get("nextCursor")
+            if not isinstance(next_cursor, str) or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        thread["turns"] = turns
+        return thread
 
     async def find_active_turn(
         self,
@@ -306,9 +341,10 @@ class CodexProxy:
         model: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
+        extra_inputs: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         sandbox = await self._ensure_session(session)
-        input_items = await self._input_items(session, prompt)
+        input_items = await self._input_items(session, prompt, extra_inputs)
         async with self._connection(sandbox) as websocket:
             await self._rpc(
                 websocket,
@@ -342,12 +378,13 @@ class CodexProxy:
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
         dynamic_tools: list[dict[str, Any]] | None = None,
+        extra_inputs: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         workspace = posixpath.normpath(workspace or self._settings.workspace_path)
         if not workspace.startswith("/"):
             raise ValueError("Thread workspace must be an absolute Sandbox path")
         sandbox = await self._ensure_session(session)
-        input_items = await self._input_items(session, prompt)
+        input_items = await self._input_items(session, prompt, extra_inputs)
         async with self._connection(sandbox) as websocket:
             await self._rpc(
                 websocket,
@@ -513,10 +550,23 @@ class CodexProxy:
         self,
         session: Mapping[str, Any],
         prompt: str,
+        extra_inputs: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = [
             {"type": "text", "text": prompt, "textElements": []}
         ]
+        items.extend(dict(item) for item in (extra_inputs or []))
+        mentioned_paths = set(
+            re.findall(r"(?<![\w@])@([^\s]+)", prompt)
+        )
+        for path in mentioned_paths:
+            items.append(
+                {
+                    "type": "mention",
+                    "name": posixpath.basename(path.rstrip("/")) or path,
+                    "path": path,
+                }
+            )
         mentioned_skill_names = set(
             re.findall(r"(?<![\w$])\$([A-Za-z0-9:_-]+)", prompt)
         )

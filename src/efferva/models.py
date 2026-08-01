@@ -74,5 +74,6 @@ class RunAgentInput(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     context: list[dict[str, Any]] = Field(default_factory=list)
     forwarded_props: Any = Field(default=None, alias="forwardedProps")
+    resume: list[dict[str, Any]] | None = None
 
     model_config = {"populate_by_name": True}

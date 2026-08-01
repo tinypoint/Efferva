@@ -22,7 +22,7 @@ export type ThreadSummary = {
 export type AgUiMessage = {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
-  content: string;
+  content: string | Array<Record<string, unknown>>;
 };
 
 export type ThreadDetail = ThreadSummary & {

@@ -95,6 +95,11 @@ export const api = {
     }),
   readThread: (sessionId: string, threadId: string) =>
     request<ThreadDetail>(`/sessions/${sessionId}/threads/${threadId}`),
+  deleteThread: (sessionId: string, threadId: string) =>
+    request<{ deleted: boolean }>(
+      `/sessions/${sessionId}/threads/${threadId}`,
+      { method: "DELETE" },
+    ),
   resumeThread: (
     sessionId: string,
     threadId: string,

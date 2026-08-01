@@ -1,0 +1,21 @@
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      EFFERVA_API_PROXY_TARGET: http://app:8080
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${EFFERVA_WEB_PORT:-5173}:5173"
+    volumes:
+      - ./web:/web
+      - web-node-modules:/web/node_modules
+    networks:
+      - efferva-local
+
+volumes:
+  web-node-modules:

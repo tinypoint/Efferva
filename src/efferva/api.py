@@ -48,7 +48,35 @@ def _prompt_from_agui(input_payload: RunAgentInput) -> str:
             )
             if prompt:
                 return prompt
+            if any(
+                part.get("type") in {"image", "audio"}
+                for part in message.content
+            ):
+                return ""
     raise HTTPException(status_code=422, detail="AG-UI input requires a user message")
+
+
+def _media_inputs_from_agui(input_payload: RunAgentInput) -> list[dict[str, Any]]:
+    for message in reversed(input_payload.messages):
+        if message.role != "user" or not isinstance(message.content, list):
+            continue
+        inputs: list[dict[str, Any]] = []
+        for part in message.content:
+            media_type = str(part.get("type") or "")
+            if media_type not in {"image", "audio"}:
+                continue
+            source = part.get("source")
+            if not isinstance(source, dict):
+                continue
+            value = str(source.get("value") or "")
+            if not value:
+                continue
+            if source.get("type") == "data":
+                mime_type = str(source.get("mimeType") or "application/octet-stream")
+                value = f"data:{mime_type};base64,{value}"
+            inputs.append({"type": media_type, "url": value})
+        return inputs
+    return []
 
 
 def _sse(seq: int, event: dict[str, Any]) -> str:
@@ -247,6 +275,7 @@ async def _agui_stream(
     collaboration_mode: str | None = None,
     workspace: str | None = None,
     tools: list[dict[str, Any]] | None = None,
+    inputs: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     seq = 0
     open_messages: set[str] = set()
@@ -271,6 +300,7 @@ async def _agui_stream(
                 "runId": run_id,
                 "turnId": None,
                 "status": "running",
+                "activities": {},
             },
         },
     )
@@ -284,6 +314,7 @@ async def _agui_stream(
                 reasoning_effort=reasoning_effort,
                 collaboration_mode=collaboration_mode,
                 dynamic_tools=tools,
+                extra_inputs=inputs,
             )
             if thread_id == "new"
             else proxy.stream_turn(
@@ -293,6 +324,7 @@ async def _agui_stream(
                 model=model,
                 reasoning_effort=reasoning_effort,
                 collaboration_mode=collaboration_mode,
+                extra_inputs=inputs,
             )
         )
         async for notification in notifications:
@@ -612,6 +644,19 @@ async def _agui_stream(
             activity = _activity_event(notification)
             if activity is not None:
                 yield _sse(seq := seq + 1, activity)
+                yield _sse(
+                    seq := seq + 1,
+                    {
+                        "type": "STATE_DELTA",
+                        "delta": [
+                            {
+                                "op": "add",
+                                "path": f"/activities/{activity['activityType']}",
+                                "value": activity["content"],
+                            }
+                        ],
+                    },
+                )
                 continue
             yield _sse(
                 seq := seq + 1,
@@ -659,6 +704,7 @@ async def _agui_resume_stream(
                     "runId": run_id,
                     "turnId": turn_id,
                     "status": "running",
+                    "activities": {},
                 },
             },
         )
@@ -1029,6 +1075,19 @@ async def _agui_resume_stream(
             activity = _activity_event(notification)
             if activity is not None:
                 yield _sse(seq := seq + 1, activity)
+                yield _sse(
+                    seq := seq + 1,
+                    {
+                        "type": "STATE_DELTA",
+                        "delta": [
+                            {
+                                "op": "add",
+                                "path": f"/activities/{activity['activityType']}",
+                                "value": activity["content"],
+                            }
+                        ],
+                    },
+                )
                 continue
             yield _sse(seq := seq + 1, {"type": "RAW", "event": notification})
     except Exception as error:
@@ -1199,6 +1258,21 @@ def create_api_router(
         thread = await codex_proxy().read_thread(session, thread_id)
         return _thread_detail(thread, session_id)
 
+    @router.delete("/api/sessions/{session_id}/threads/{thread_id}")
+    async def delete_thread(
+        session_id: UUID,
+        thread_id: str,
+        principal: Principal = Depends(resolve_principal),
+    ) -> dict[str, bool]:
+        session = await repository().get_session(
+            principal,
+            session_id,
+            mode=AccessMode.WRITE,
+            touch=True,
+        )
+        await codex_proxy().delete_thread(session, thread_id)
+        return {"deleted": True}
+
     @router.get("/api/sessions/{session_id}/threads/{thread_id}/resume")
     async def resume_thread(
         session_id: UUID,
@@ -1209,7 +1283,11 @@ def create_api_router(
     ) -> StreamingResponse:
         session = await repository().get_session(principal, session_id, touch=True)
         existing = await runs().find_by_turn(session_id, thread_id, turn_id)
-        if existing is not None and existing["status"] in {"queued", "running"}:
+        if existing is not None and existing["status"] in {
+            "queued",
+            "running",
+            "waiting_input",
+        }:
             after = request.headers.get("last-event-id", "0-0")
             return _brokered_response(run_broker(), str(existing["id"]), after=after)
         run_id = str(uuid4())
@@ -1343,6 +1421,32 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
+        if payload.resume is not None:
+            pending = await run_broker().get_pending_interrupt(
+                str(session["id"]),
+                payload.thread_id,
+            )
+            if pending is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="this thread has no pending Codex interrupt",
+                )
+            pending_run_id = str(pending["runId"])
+            run = await runs().get(pending_run_id, session_id)
+            if run["status"] not in {"running", "waiting_input"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the interrupted Codex run is no longer active",
+                )
+            await run_broker().send_command(
+                pending_run_id,
+                {"kind": "resume_interrupt", "responses": payload.resume},
+            )
+            return _brokered_response(
+                run_broker(),
+                pending_run_id,
+                after=str(pending["eventId"]),
+            )
         run_id = str(uuid4())
         client_run_id = payload.run_id or run_id
         prompt = _prompt_from_agui(payload)
@@ -1427,6 +1531,7 @@ def create_api_router(
                 "reasoningEffort": reasoning_effort,
                 "workspace": workspace,
                 "tools": payload.tools,
+                "inputs": _media_inputs_from_agui(payload),
             }
         )
         return _brokered_response(
@@ -1450,6 +1555,31 @@ def _thread_summary(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
     }
 
 
+def _user_message_content(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    text = "".join(
+        str(part.get("text") or "")
+        for part in parts
+        if part.get("type") == "text"
+    )
+    content: list[dict[str, Any]] = []
+    if text:
+        content.append({"type": "text", "text": text})
+    for part in parts:
+        part_type = part.get("type")
+        if part_type not in {"image", "audio"}:
+            continue
+        url = str(part.get("url") or "")
+        if not url:
+            continue
+        content.append(
+            {
+                "type": part_type,
+                "source": {"type": "url", "value": url},
+            }
+        )
+    return content if any(part.get("type") != "text" for part in content) else text
+
+
 def _thread_detail(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
     summary = _thread_summary(thread, session_id)
     messages: list[dict[str, Any]] = []
@@ -1463,55 +1593,110 @@ def _thread_detail(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
     )
     active_turn_id = str(active_turn["id"]) if active_turn is not None else None
     for turn in thread.get("turns") or []:
-        for item in turn.get("items") or []:
-            item_type = item.get("type")
-            if item_type == "userMessage":
-                content = item.get("content") or []
-                text = "".join(
-                    part.get("text", "")
-                    for part in content
-                    if isinstance(part, dict)
+        items = list(turn.get("items") or [])
+        for item in items:
+            if item.get("type") != "userMessage":
+                continue
+            content = item.get("content") or []
+            messages.append(
+                {
+                    "id": item.get("id"),
+                    "role": "user",
+                    "content": _user_message_content(content),
+                }
+            )
+        if turn.get("id") == active_turn_id:
+            continue
+        final_message = next(
+            (
+                item
+                for item in reversed(items)
+                if item.get("type") == "agentMessage"
+            ),
+            None,
+        )
+        tool_calls: list[dict[str, Any]] = []
+        process: list[dict[str, Any]] = []
+        for item in items:
+            if item.get("type") == "agentMessage" and item is not final_message:
+                text = str(item.get("text") or "")
+                if text:
+                    process.append({"type": "reasoning", "text": text})
+                continue
+            if item.get("type") == "reasoning":
+                text = "\n\n".join(
+                    str(part)
+                    for part in [
+                        *(item.get("summary") or []),
+                        *(item.get("content") or []),
+                    ]
+                    if str(part).strip()
                 )
-                messages.append(
-                    {"id": item.get("id"), "role": "user", "content": text}
+                if text:
+                    process.append({"type": "reasoning", "text": text})
+                continue
+            if item.get("type") == "plan":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    process.append(
+                        {"type": "reasoning", "text": f"计划\n\n{text}"}
+                    )
+                continue
+            tool_call = _tool_call(item)
+            if tool_call is not None:
+                tool_calls.append(tool_call)
+                process.append(
+                    {"type": "tool-call", "toolCallId": tool_call["id"]}
                 )
-            elif item_type == "agentMessage" and turn.get("id") != active_turn_id:
-                messages.append(
+        if final_message is not None or tool_calls:
+            assistant_id = (
+                final_message.get("id")
+                if final_message is not None
+                else f"{turn.get('id')}:assistant"
+            )
+            assistant_message: dict[str, Any] = {
+                "id": assistant_id,
+                "role": "assistant",
+                "content": (
+                    final_message.get("text") or ""
+                    if final_message is not None
+                    else ""
+                ),
+            }
+            if tool_calls:
+                assistant_message["toolCalls"] = [
                     {
-                        "id": item.get("id"),
-                        "role": "assistant",
-                        "content": item.get("text") or "",
+                        "id": tool_call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tool_call["name"],
+                            "arguments": tool_call["arguments"],
+                        },
                     }
-                )
-            elif turn.get("id") != active_turn_id:
-                tool_call = _tool_call(item)
-                if tool_call is None:
-                    continue
-                messages.append(
-                    {
-                        "id": f"{tool_call['id']}:assistant",
-                        "role": "assistant",
-                        "content": "",
-                        "toolCalls": [
-                            {
-                                "id": tool_call["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call["name"],
-                                    "arguments": tool_call["arguments"],
-                                },
-                            }
-                        ],
-                    }
-                )
-                messages.append(
-                    {
-                        "id": f"{tool_call['id']}:result",
-                        "role": "tool",
-                        "name": tool_call["name"],
-                        "toolCallId": tool_call["id"],
-                        "content": tool_call["result"],
-                        "isError": tool_call["is_error"],
-                    }
-                )
+                    for tool_call in tool_calls
+                ]
+            if process:
+                assistant_message["process"] = process
+                duration_ms = turn.get("durationMs")
+                if not isinstance(duration_ms, (int, float)):
+                    started_at = turn.get("startedAt")
+                    completed_at = turn.get("completedAt")
+                    if isinstance(started_at, (int, float)) and isinstance(
+                        completed_at, (int, float)
+                    ):
+                        duration_ms = max(0, (completed_at - started_at) * 1000)
+                if isinstance(duration_ms, (int, float)):
+                    assistant_message["processDurationMs"] = round(duration_ms)
+            messages.append(assistant_message)
+        for tool_call in tool_calls:
+            messages.append(
+                {
+                    "id": f"{tool_call['id']}:result",
+                    "role": "tool",
+                    "name": tool_call["name"],
+                    "toolCallId": tool_call["id"],
+                    "content": tool_call["result"],
+                    "isError": tool_call["is_error"],
+                }
+            )
     return {**summary, "messages": messages, "active_turn_id": active_turn_id}

@@ -392,6 +392,39 @@ class RedisRunBroker:
         )
         return str(value) if value else None
 
+    async def set_pending_interrupt(
+        self,
+        session_id: str,
+        thread_id: str,
+        run_id: str,
+        event_id: str,
+    ) -> None:
+        await self._redis.set(
+            self._pending_interrupt_key(session_id, thread_id),
+            _encode({"runId": run_id, "eventId": event_id}),
+            ex=self._event_ttl_seconds,
+        )
+
+    async def get_pending_interrupt(
+        self,
+        session_id: str,
+        thread_id: str,
+    ) -> dict[str, str] | None:
+        value = await self._redis.get(
+            self._pending_interrupt_key(session_id, thread_id)
+        )
+        result = _decode(value) if value else None
+        return dict(result) if isinstance(result, Mapping) else None
+
+    async def clear_pending_interrupt(
+        self,
+        session_id: str,
+        thread_id: str,
+    ) -> None:
+        await self._redis.delete(
+            self._pending_interrupt_key(session_id, thread_id)
+        )
+
     def _event_stream(self, run_id: str) -> str:
         return f"{self._prefix}:run:{run_id}:events"
 
@@ -415,6 +448,12 @@ class RedisRunBroker:
 
     def _thread_lease_key(self, session_id: str, thread_id: str) -> str:
         return f"{self._prefix}:session:{session_id}:thread:{thread_id}:lease"
+
+    def _pending_interrupt_key(self, session_id: str, thread_id: str) -> str:
+        return (
+            f"{self._prefix}:session:{session_id}:thread:{thread_id}:"
+            "pending-interrupt"
+        )
 
 
 def _dispatch_rows(rows: Any) -> list[tuple[str, dict[str, Any]]]:

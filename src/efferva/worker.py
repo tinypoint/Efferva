@@ -4,8 +4,9 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import suppress
+from contextvars import ContextVar
 from importlib.resources import files
 from typing import Any
 from uuid import uuid4
@@ -18,7 +19,7 @@ from efferva.codex_release import prepare_official_codex
 from efferva.config import Settings, get_settings, load_codex_config, merge_codex_config
 from efferva.db import Database
 from efferva.repository import RunRepository
-from efferva.runtime import CodexProxy, ServerRequestHandler
+from efferva.runtime import CodexProxy, ServerRequestHandler, _default_server_response
 from efferva.sandbox import SandboxProvider, create_sandbox_control_plane
 
 ACTIVE_RUNS = Gauge(
@@ -34,6 +35,73 @@ WORKER_READY = Gauge(
     "Whether this worker has initialized all required dependencies",
 )
 
+_CURRENT_RUN_ID: ContextVar[str | None] = ContextVar(
+    "efferva_current_run_id",
+    default=None,
+)
+
+_INTERACTIVE_SERVER_REQUESTS = {
+    "item/tool/requestUserInput",
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "mcpServer/elicitation/request",
+}
+
+
+def _interrupt_from_server_request(
+    interrupt_id: str,
+    method: str,
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    reason = (
+        "input_required"
+        if method in {
+            "item/tool/requestUserInput",
+            "mcpServer/elicitation/request",
+        }
+        else "confirmation"
+    )
+    message = str(params.get("reason") or params.get("message") or "").strip()
+    if not message:
+        if method == "item/tool/requestUserInput":
+            questions = params.get("questions") or []
+            message = "\n".join(
+                str(question.get("question") or "")
+                for question in questions
+                if isinstance(question, Mapping)
+            ).strip()
+        elif method == "item/commandExecution/requestApproval":
+            message = str(params.get("command") or "Approve command execution?")
+        elif method == "item/fileChange/requestApproval":
+            message = "Approve the requested file changes?"
+        elif method == "item/permissions/requestApproval":
+            message = "Approve the requested sandbox permissions?"
+        else:
+            message = "Input is required to continue."
+    return {
+        "id": interrupt_id,
+        "reason": reason,
+        "message": message,
+        "toolCallId": str(params.get("itemId") or "") or None,
+        "metadata": {"method": method, "params": dict(params)},
+    }
+
+
+def _server_response_from_interrupt(
+    method: str,
+    params: Mapping[str, Any],
+    response: Mapping[str, Any],
+) -> dict[str, Any]:
+    if response.get("status") == "resolved" and isinstance(
+        response.get("payload"), Mapping
+    ):
+        return dict(response["payload"])
+    default = _default_server_response(method, params)
+    if default is None:
+        raise RuntimeError(f"interrupt {method} was cancelled without a default")
+    return default
+
 
 class RunWorker:
     def __init__(
@@ -42,14 +110,75 @@ class RunWorker:
         broker: RedisRunBroker,
         runs: RunRepository,
         settings: Settings | None = None,
+        server_request_handler: ServerRequestHandler | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._proxy = proxy
         self._broker = broker
         self._runs = runs
         self._worker_id = os.environ.get("HOSTNAME") or f"worker-{uuid4()}"
+        self._server_request_handler = server_request_handler
         self._active: dict[str, asyncio.Task[None]] = {}
+        self._pending_interrupts: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._stopping = asyncio.Event()
+
+    async def handle_server_request(
+        self,
+        session: Mapping[str, Any],
+        method: str,
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if method not in _INTERACTIVE_SERVER_REQUESTS:
+            if self._server_request_handler is not None:
+                response = self._server_request_handler(session, method, params)
+                if isinstance(response, Awaitable):
+                    response = await response
+                return dict(response)
+            default = _default_server_response(method, params)
+            if default is None:
+                raise NotImplementedError(f"unsupported server request: {method}")
+            return default
+
+        run_id = _CURRENT_RUN_ID.get()
+        if run_id is None:
+            raise RuntimeError(f"server request {method} is not attached to a Run")
+        state = await self._broker.get_run_state(run_id)
+        session_id = str(session["id"])
+        thread_id = str(params.get("threadId") or state.get("threadId") or "")
+        if not thread_id or thread_id == "new":
+            raise RuntimeError(f"server request {method} has no materialized thread")
+
+        interrupt_id = str(uuid4())
+        future: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending_interrupts[interrupt_id] = future
+        interrupt = _interrupt_from_server_request(interrupt_id, method, params)
+        event_id = await self._broker.publish_event(
+            run_id,
+            {
+                "type": "RUN_FINISHED",
+                "runId": str(state.get("clientRunId") or run_id),
+                "threadId": thread_id,
+                "outcome": {"type": "interrupt", "interrupts": [interrupt]},
+            },
+            state={"status": "waiting_input"},
+        )
+        await self._broker.set_pending_interrupt(
+            session_id,
+            thread_id,
+            run_id,
+            event_id,
+        )
+        await self._runs.update(run_id, status="waiting_input")
+        try:
+            response = await future
+            return _server_response_from_interrupt(method, params, response)
+        finally:
+            self._pending_interrupts.pop(interrupt_id, None)
+            await self._broker.clear_pending_interrupt(session_id, thread_id)
+            await self._broker.set_run_state(run_id, {"status": "running"})
+            await self._runs.update(run_id, status="running")
 
     async def run(self) -> None:
         RUN_CAPACITY.set(self._settings.worker_concurrency)
@@ -193,7 +322,11 @@ class RunWorker:
         }
         try:
             command_task = asyncio.create_task(self._consume_commands(run_id, context))
-            await self._stream_run(command, context, lease_context)
+            token = _CURRENT_RUN_ID.set(run_id)
+            try:
+                await self._stream_run(command, context, lease_context)
+            finally:
+                _CURRENT_RUN_ID.reset(token)
             await self._broker.acknowledge_run(dispatch_id)
         except asyncio.CancelledError:
             raise
@@ -319,6 +452,7 @@ class RunWorker:
                 collaboration_mode=_optional_string(command.get("collaborationMode")),
                 workspace=_optional_string(command.get("workspace")),
                 tools=list(command.get("tools") or []),
+                inputs=list(command.get("inputs") or []),
             )
             events = (_event_from_sse(chunk) async for chunk in stream)
 
@@ -328,6 +462,7 @@ class RunWorker:
                 "status": "running",
                 "sessionId": command["sessionId"],
                 "threadId": context["threadId"],
+                "clientRunId": agui_run_id,
             },
         )
         async for event in events:
@@ -490,6 +625,13 @@ class RunWorker:
         context: dict[str, Any],
     ) -> None:
         kind = command.get("kind")
+        if kind == "resume_interrupt":
+            for response in command.get("responses") or []:
+                interrupt_id = str(response.get("interruptId") or "")
+                future = self._pending_interrupts.get(interrupt_id)
+                if future is not None and not future.done():
+                    future.set_result(dict(response))
+            return
         while not context.get("turnId") and not context["finished"]:
             context["changed"].clear()
             with suppress(asyncio.TimeoutError):
@@ -609,15 +751,17 @@ async def serve_worker(
                 codex_config or {},
             ),
             native_memory_enabled=native_memory_enabled,
-            server_request_handler=server_request_handler,
         )
         start_http_server(settings.worker_metrics_port)
-        await RunWorker(
+        worker = RunWorker(
             proxy,
             broker,
             RunRepository(database),
             settings,
-        ).run()
+            server_request_handler=server_request_handler,
+        )
+        proxy.set_server_request_handler(worker.handle_server_request)
+        await worker.run()
     finally:
         WORKER_READY.set(0)
         await sandboxes.close()

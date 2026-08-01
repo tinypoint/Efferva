@@ -41,6 +41,12 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import {
+  useAgUiInterrupts,
+  useAgUiState,
+  useAgUiSubmitInterruptResponses,
+  type AgUiInterrupt,
+} from "@assistant-ui/react-ag-ui";
+import {
   ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
@@ -60,6 +66,7 @@ import {
 import {
   createContext,
   useContext,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -160,6 +167,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             )}
           >
             <ThreadScrollToBottom />
+            <RunActivityBar />
+            <InterruptPanel />
             <ThreadFollowupSuggestions />
             <Composer />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -169,6 +178,202 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         </div>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+  );
+};
+
+type InterruptMetadata = {
+  method?: string;
+  params?: Record<string, unknown>;
+};
+
+type EffervaAgUiState = {
+  activities?: Record<string, Record<string, unknown>>;
+};
+
+const RunActivityBar: FC = () => {
+  const isRunning = useAuiState((state) => state.thread.isRunning);
+  const state = useAgUiState<EffervaAgUiState>();
+  const activities = state?.activities ?? {};
+  const notice = activities.error ?? activities.notice;
+  const usage = activities.usage;
+  const plan = activities.plan;
+  const labels = [
+    plan ? "计划已更新" : "",
+    activities.diff || activities["file-change"] ? "文件变更已更新" : "",
+    usage ? "用量已更新" : "",
+    notice
+      ? String(notice.message ?? notice.error ?? notice.method ?? "Codex 提示")
+      : "",
+  ].filter(Boolean);
+  if (!isRunning || labels.length === 0) return null;
+  return (
+    <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 px-2 text-xs">
+      {labels.map((label) => (
+        <span key={label}>{label}</span>
+      ))}
+    </div>
+  );
+};
+
+const InterruptPanel: FC = () => {
+  const interrupts = useAgUiInterrupts();
+  return (
+    <>
+      {interrupts.map((interrupt) => (
+        <InterruptCard key={interrupt.id} interrupt={interrupt} />
+      ))}
+    </>
+  );
+};
+
+const InterruptCard: FC<{ interrupt: AgUiInterrupt }> = ({ interrupt }) => {
+  const submit = useAgUiSubmitInterruptResponses();
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [jsonInput, setJsonInput] = useState("{}");
+  const [submitting, setSubmitting] = useState(false);
+  const metadata = (interrupt.metadata ?? {}) as InterruptMetadata;
+  const method = metadata.method ?? "";
+  const params = metadata.params ?? {};
+  const questions = Array.isArray(params.questions)
+    ? (params.questions as Array<Record<string, unknown>>)
+    : [];
+
+  const respond = async (payload: Record<string, unknown> | null) => {
+    setSubmitting(true);
+    try {
+      await submit([
+        payload === null
+          ? { interruptId: interrupt.id, status: "cancelled" }
+          : { interruptId: interrupt.id, status: "resolved", payload },
+      ]);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const approval = method.endsWith("requestApproval");
+  const userInput = method === "item/tool/requestUserInput";
+  const elicitation = method === "mcpServer/elicitation/request";
+
+  return (
+    <div className="border-border bg-background rounded-xl border p-4 shadow-sm">
+      <div className="text-sm font-medium">{interrupt.message}</div>
+      {typeof params.command === "string" && (
+        <pre className="bg-muted mt-3 overflow-x-auto rounded-md p-3 text-xs">
+          {params.command}
+        </pre>
+      )}
+      {userInput && (
+        <div className="mt-3 flex flex-col gap-3">
+          {questions.map((question) => {
+            const id = String(question.id ?? "");
+            const options = Array.isArray(question.options)
+              ? (question.options as Array<Record<string, unknown>>)
+              : [];
+            return (
+              <label key={id} className="flex flex-col gap-1.5 text-sm">
+                <span>{String(question.question ?? question.header ?? id)}</span>
+                {options.length > 0 ? (
+                  <select
+                    className="border-input bg-background h-9 rounded-md border px-3"
+                    value={answers[id] ?? ""}
+                    onChange={(event) =>
+                      setAnswers((current) => ({
+                        ...current,
+                        [id]: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">请选择</option>
+                    {options.map((option) => (
+                      <option
+                        key={String(option.label ?? "")}
+                        value={String(option.label ?? "")}
+                      >
+                        {String(option.label ?? "")}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={question.isSecret ? "password" : "text"}
+                    className="border-input bg-background h-9 rounded-md border px-3"
+                    value={answers[id] ?? ""}
+                    onChange={(event) =>
+                      setAnswers((current) => ({
+                        ...current,
+                        [id]: event.target.value,
+                      }))
+                    }
+                  />
+                )}
+              </label>
+            );
+          })}
+        </div>
+      )}
+      {elicitation && params.mode !== "url" && (
+        <textarea
+          className="border-input bg-background mt-3 min-h-24 w-full rounded-md border p-3 font-mono text-xs"
+          value={jsonInput}
+          onChange={(event) => setJsonInput(event.target.value)}
+        />
+      )}
+      {params.mode === "url" && typeof params.url === "string" && (
+        <a
+          className="mt-3 block text-sm underline"
+          href={params.url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          打开授权页面
+        </a>
+      )}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={submitting}
+          onClick={() => void respond(null)}
+        >
+          拒绝
+        </Button>
+        <Button
+          type="button"
+          disabled={submitting}
+          onClick={() => {
+            if (userInput) {
+              void respond({
+                answers: Object.fromEntries(
+                  questions.map((question) => {
+                    const id = String(question.id ?? "");
+                    return [id, { answers: [answers[id] ?? ""] }];
+                  }),
+                ),
+              });
+              return;
+            }
+            if (elicitation) {
+              let content: unknown = null;
+              try {
+                content = params.mode === "url" ? null : JSON.parse(jsonInput);
+              } catch {
+                return;
+              }
+              void respond({ action: "accept", content, _meta: null });
+              return;
+            }
+            if (method === "item/permissions/requestApproval") {
+              void respond({ permissions: params.permissions ?? {}, scope: "turn" });
+              return;
+            }
+            if (approval) void respond({ decision: "accept" });
+          }}
+        >
+          允许并继续
+        </Button>
+      </div>
+    </div>
   );
 };
 
@@ -369,6 +574,47 @@ const MessageError: FC = () => {
   );
 };
 
+const formatElapsedTime = (durationMs: number) => {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    hours > 0 ? `${hours}小时` : "",
+    minutes > 0 ? `${minutes}分` : "",
+    `${seconds}秒`,
+  ].join("");
+};
+
+const ProcessGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
+  group,
+  children,
+}) => {
+  const durationMs = useAuiState((state) => {
+    const restored = state.message.metadata.custom.processDurationMs;
+    return typeof restored === "number"
+      ? restored
+      : state.message.metadata.timing?.totalStreamTime;
+  });
+  const running = group.status.type === "running";
+  const label = running
+    ? "处理中"
+    : durationMs === undefined
+      ? "已处理"
+      : `已处理 ${formatElapsedTime(durationMs)}`;
+
+  return (
+    <ToolGroupRoot variant="ghost">
+      <ToolGroupTrigger
+        count={group.indices.length}
+        label={label}
+        active={running}
+      />
+      <ToolGroupContent>{children}</ToolGroupContent>
+    </ToolGroupRoot>
+  );
+};
+
 const AssistantMessage: FC = () => {
   const {
     ToolFallback: ToolFallbackComponent = ToolFallback,
@@ -392,15 +638,15 @@ const AssistantMessage: FC = () => {
       >
         <MessagePrimitive.GroupedParts
           groupBy={groupPartByType({
-            reasoning: ["group-chainOfThought", "group-reasoning"],
-            "tool-call": ["group-chainOfThought", "group-tool"],
+            reasoning: ["group-process"],
+            "tool-call": ["group-process"],
             "standalone-tool-call": [],
           })}
         >
           {({ part, children }) => {
             switch (part.type) {
-              case "group-chainOfThought":
-                return <div data-slot="aui_chain-of-thought">{children}</div>;
+              case "group-process":
+                return <ProcessGroup group={part}>{children}</ProcessGroup>;
               case "group-tool":
                 if (ToolGroup) {
                   return <ToolGroup group={part}>{children}</ToolGroup>;

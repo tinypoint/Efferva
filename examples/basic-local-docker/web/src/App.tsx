@@ -234,9 +234,12 @@ export function App() {
     queryFn: () => api.listModels(sessionId!),
     enabled: Boolean(sessionId && !threadId),
   });
+  const skillWorkspace = threads.data?.find(
+    (item) => item.id === threadId,
+  )?.workspace;
   const skills = useQuery({
-    queryKey: ["skills", sessionId],
-    queryFn: () => api.listSkills(sessionId!),
+    queryKey: ["skills", sessionId, skillWorkspace],
+    queryFn: () => api.listSkills(sessionId!, skillWorkspace ?? undefined),
     enabled: Boolean(sessionId),
   });
   const createDefaultSession = useMutation({
@@ -283,6 +286,13 @@ export function App() {
 
   const handleThreadCreated = useCallback(
     (thread: ThreadSummary) => {
+      queryClient.setQueryData<ThreadSummary[]>(
+        ["threads", thread.session_id],
+        (current = []) => [
+          thread,
+          ...current.filter((item) => item.id !== thread.id),
+        ],
+      );
       void queryClient.invalidateQueries({
         queryKey: ["threads", thread.session_id],
       });
@@ -291,6 +301,21 @@ export function App() {
       });
     },
     [navigate, queryClient],
+  );
+
+  const handleThreadDeleted = useCallback(
+    (deletedThreadId: string) => {
+      queryClient.setQueryData<ThreadSummary[]>(
+        ["threads", sessionId],
+        (current = []) =>
+          current.filter((item) => item.id !== deletedThreadId),
+      );
+      if (threadId === deletedThreadId) {
+        setQueuedMessages([]);
+        navigate(`/sessions/${sessionId}`);
+      }
+    },
+    [navigate, queryClient, sessionId, threadId],
   );
 
   const selectedModel = models.data?.find((item) => item.model === model);
@@ -383,7 +408,7 @@ export function App() {
 
   return (
     <EffervaRuntime
-      key={`${sessionId}:${threadId ?? "new"}`}
+      key={sessionId}
       sessionId={sessionId}
       threadId={threadId}
       threads={threads.data}
@@ -400,6 +425,7 @@ export function App() {
         navigate(`/sessions/${sessionId}/threads/${nextThreadId}`);
       }}
       onThreadCreated={handleThreadCreated}
+      onThreadDeleted={handleThreadDeleted}
     >
       <div className="grid h-screen grid-cols-[17rem_minmax(0,1fr)] overflow-hidden bg-background max-md:grid-cols-1">
         <aside className="flex min-h-0 flex-col border-r bg-sidebar p-3 max-md:hidden">
