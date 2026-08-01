@@ -1169,21 +1169,24 @@ def create_api_router(
 
     async def validate_execution_settings(
         session: dict[str, Any],
-        payload: ExecutionSettingsUpdate,
+        model: str,
+        reasoning_effort: str | None = None,
     ) -> None:
         models = await codex_proxy().list_models(session)
         selected = next(
-            (item for item in models if item.get("model") == payload.model),
+            (item for item in models if item.get("model") == model),
             None,
         )
         if selected is None:
             raise HTTPException(status_code=422, detail="unsupported model")
+        if reasoning_effort is None:
+            return
         efforts = {
             str(item.get("reasoningEffort"))
             for item in selected.get("supportedReasoningEfforts") or []
             if item.get("reasoningEffort")
         }
-        if payload.reasoning_effort not in efforts:
+        if reasoning_effort not in efforts:
             raise HTTPException(
                 status_code=422,
                 detail="unsupported reasoning effort for this model",
@@ -1276,7 +1279,11 @@ def create_api_router(
             session_id,
             mode=AccessMode.WRITE,
         )
-        await validate_execution_settings(session, payload)
+        await validate_execution_settings(
+            session,
+            payload.model,
+            payload.reasoning_effort,
+        )
         return await execution_settings().set_session(
             session_id,
             model=payload.model,
@@ -1333,6 +1340,8 @@ def create_api_router(
         reasoning_effort = (
             payload.reasoning_effort or defaults["reasoning_effort"]
         )
+        if model:
+            await validate_execution_settings(session, model, reasoning_effort)
         thread = await codex_proxy().start_thread(
             session,
             workspace=payload.workspace,
@@ -1376,6 +1385,14 @@ def create_api_router(
             )
             if active_run is not None and active_run.get("started_at") is not None:
                 detail["active_turn_started_at"] = active_run["started_at"].isoformat()
+        latest_run = await runs().find_latest_for_thread(session_id, thread_id)
+        if (
+            latest_run is not None
+            and latest_run.get("status") == "failed"
+        ):
+            detail["last_run_error"] = str(
+                latest_run.get("error") or "Run failed"
+            )
         return detail
 
     @router.get(
@@ -1405,7 +1422,11 @@ def create_api_router(
             session_id,
             mode=AccessMode.WRITE,
         )
-        await validate_execution_settings(session, payload)
+        await validate_execution_settings(
+            session,
+            payload.model,
+            payload.reasoning_effort,
+        )
         return await execution_settings().set_thread(
             session_id,
             thread_id,
@@ -1474,6 +1495,8 @@ def create_api_router(
         saved = await execution_settings().get_thread(session_id, thread_id)
         model = payload.model or saved["model"]
         reasoning_effort = payload.reasoning_effort or saved["reasoning_effort"]
+        if model:
+            await validate_execution_settings(session, model, reasoning_effort)
         if model and reasoning_effort:
             await execution_settings().set_thread(
                 session_id,
@@ -1632,6 +1655,8 @@ def create_api_router(
         reasoning_effort = (
             reasoning_effort or saved_settings["reasoning_effort"]
         )
+        if model:
+            await validate_execution_settings(session, model, reasoning_effort)
         if model and reasoning_effort:
             if payload.thread_id == "new":
                 await execution_settings().set_session(

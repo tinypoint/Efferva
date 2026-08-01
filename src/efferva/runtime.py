@@ -14,6 +14,9 @@ from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 from uuid import UUID, uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -109,7 +112,46 @@ class CodexProxy:
             "model/list",
             {"limit": 100, "includeHidden": False},
         )
-        return list(result.get("data") or [])
+        models = list(result.get("data") or [])
+        if not self._settings.codex_openai_base_url:
+            return models
+
+        provider_models = await asyncio.to_thread(
+            self._fetch_provider_model_ids,
+        )
+        return [
+            model
+            for model in models
+            if str(model.get("model") or model.get("id") or "")
+            in provider_models
+        ]
+
+    def _fetch_provider_model_ids(self) -> set[str]:
+        base_url = str(self._settings.codex_openai_base_url).rstrip("/")
+        headers = {"Accept": "application/json"}
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        request = UrlRequest(f"{base_url}/models", headers=headers)
+        try:
+            with urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+        except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
+            raise CodexRpcError(
+                "model/list",
+                {"message": f"model provider discovery failed: {error}"},
+            ) from error
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            raise CodexRpcError(
+                "model/list",
+                {"message": "model provider returned an invalid /models response"},
+            )
+        return {
+            str(item["id"])
+            for item in data
+            if isinstance(item, dict) and item.get("id")
+        }
 
     async def list_skills(
         self,

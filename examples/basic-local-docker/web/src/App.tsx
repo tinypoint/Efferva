@@ -172,9 +172,6 @@ export function App() {
       navigate(`/sessions/${thread.session_id}/threads/${thread.id}`, {
         replace: true,
       });
-      void queryClient.invalidateQueries({
-        queryKey: ["threads", thread.session_id],
-      });
       const settings: Required<ExecutionSettings> = {
         model,
         reasoning_effort: reasoningEffort,

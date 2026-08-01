@@ -516,6 +516,7 @@ class RunWorker:
                     status=updates.get("status"),
                     thread_id=updates.get("threadId"),
                     turn_id=updates.get("turnId"),
+                    error=updates.get("error"),
                 )
 
     def _track_event(
@@ -578,6 +579,7 @@ class RunWorker:
             )
         elif event_type == "RUN_ERROR":
             updates["status"] = "failed"
+            updates["error"] = str(event.get("message") or "run failed")
         return updates
 
     async def _control_events(

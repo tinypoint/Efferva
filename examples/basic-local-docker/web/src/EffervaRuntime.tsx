@@ -369,6 +369,7 @@ export function EffervaRuntime({
         try {
           const detail = await api.readThread(sessionId, settledThreadId);
           if (current.threadId !== settledThreadId) return;
+          setError(detail.last_run_error ?? null);
           return {
             messages: restoreMessages(detail.messages),
             state: {
@@ -434,6 +435,7 @@ export function EffervaRuntime({
           status: detail.active_turn_id ? "running" : "idle",
           activities: {},
         });
+        setError(detail.last_run_error ?? null);
         setLoading(false);
         if (detail.active_turn_id) {
           agent.setResumeSource({

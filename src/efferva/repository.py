@@ -306,6 +306,23 @@ class RunRepository:
             )
             return await cursor.fetchone()
 
+    async def find_latest_for_thread(
+        self,
+        session_id: UUID,
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM agent_runs
+                WHERE session_id = %s AND thread_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (session_id, thread_id),
+            )
+            return await cursor.fetchone()
+
     async def list_queued(self, *, limit: int = 100) -> list[dict[str, Any]]:
         async with self._database.connection() as connection:
             cursor = await connection.execute(
