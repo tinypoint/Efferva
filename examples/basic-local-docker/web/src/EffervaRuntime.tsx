@@ -18,6 +18,8 @@ import {
 import {
   CopilotChatConfigurationProvider,
   CopilotChatInput,
+  CopilotChatReasoningMessage,
+  CopilotChatToolCallsView,
   CopilotChatView,
   CopilotKitProvider,
   UseAgentUpdate,
@@ -77,21 +79,177 @@ function restoreMessages(messages: AgUiMessage[]): Message[] {
     if (message.role !== "assistant" || !message.process?.length) {
       return [message as Message];
     }
-    const reasoning = message.process.flatMap((part, index) =>
-      part.type === "reasoning" && part.text.trim()
-        ? [
-            {
-              id: `${message.id}:process:${index}`,
-              role: "reasoning" as const,
-              content: part.text,
-            },
-          ]
-        : [],
-    );
-    const { process: _process, processDurationMs: _duration, ...assistant } =
-      message;
-    return [...reasoning, assistant as Message];
+    const reasoningText = message.process
+      .flatMap((part) =>
+        part.type === "reasoning" && part.text.trim() ? [part.text] : [],
+      )
+      .join("\n\n");
+    const {
+      process,
+      processDurationMs,
+      toolCalls,
+      ...assistant
+    } = message;
+    const processMessage: EffervaProcessMessage = {
+      id: `${message.id}:process`,
+      role: "reasoning",
+      content: reasoningText || " ",
+      process,
+      processDurationMs,
+      toolCalls,
+    };
+    return [processMessage, assistant as Message];
   });
+}
+
+type AssistantMessage = Extract<Message, { role: "assistant" }>;
+type EffervaProcessMessage = Extract<Message, { role: "reasoning" }> & {
+  process?: AgUiMessage["process"];
+  processDurationMs?: number;
+  toolCalls?: AssistantMessage["toolCalls"];
+};
+
+function timestampMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function formatElapsed(durationMs: number): string {
+  const seconds = Math.max(1, Math.round(durationMs / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  if (hours) return `${hours}时${minutes}分${remainder}秒`;
+  if (minutes) return `${minutes}分${remainder}秒`;
+  return `${remainder}秒`;
+}
+
+type EffervaReasoningMessageProps = ComponentProps<
+  typeof CopilotChatReasoningMessage
+>;
+
+function EffervaReasoningMessage({
+  message,
+  messages = [],
+  isRunning,
+  header: _header,
+  contentView: _contentView,
+  toggle: _toggle,
+  children: _children,
+  ...props
+}: EffervaReasoningMessageProps) {
+  const { agent } = useAgent({
+    agentId: AGENT_ID,
+    updates: [UseAgentUpdate.OnStateChanged],
+  });
+  const processMessage = message as EffervaProcessMessage;
+  const messageIndex = messages.findIndex((item) => item.id === message.id);
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  const streaming = Boolean(isRunning && messageIndex > lastUserIndex);
+  const fallbackStartedAtRef = useRef(Date.now());
+  const state =
+    typeof agent.state === "object" && agent.state
+      ? (agent.state as Record<string, unknown>)
+      : {};
+  const startedAt =
+    timestampMs(state.startedAt) ?? fallbackStartedAtRef.current;
+  const [now, setNow] = useState(Date.now());
+  const [isOpen, setIsOpen] = useState(streaming);
+  const userToggledRef = useRef(false);
+
+  useEffect(() => {
+    if (!streaming) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [streaming]);
+
+  useEffect(() => {
+    if (streaming) {
+      userToggledRef.current = false;
+      setIsOpen(true);
+    } else if (!userToggledRef.current) {
+      setIsOpen(false);
+    }
+  }, [streaming]);
+
+  const durationMs = streaming
+    ? Math.max(0, now - startedAt)
+    : Math.max(0, processMessage.processDurationMs ?? 0);
+  const process =
+    processMessage.process ??
+    (message.content.trim()
+      ? [{ type: "reasoning" as const, text: message.content }]
+      : []);
+  const hasContent = process.length > 0;
+  const label = `${streaming ? "处理中" : "已处理"} ${formatElapsed(durationMs)}`;
+
+  return (
+    <div
+      className="my-1"
+      data-message-id={message.id}
+      {...props}
+    >
+      <CopilotChatReasoningMessage.Header
+        isOpen={isOpen}
+        label={label}
+        hasContent={hasContent}
+        isStreaming={streaming}
+        onClick={
+          hasContent
+            ? () => {
+                userToggledRef.current = true;
+                setIsOpen((current) => !current);
+              }
+            : undefined
+        }
+      />
+      <CopilotChatReasoningMessage.Toggle isOpen={isOpen}>
+        <div className="border-l pl-3">
+          {process.map((part, index) => {
+            if (part.type === "reasoning") {
+              return (
+                <CopilotChatReasoningMessage.Content
+                  key={`${message.id}:reasoning:${index}`}
+                  hasContent={Boolean(part.text.trim())}
+                  isStreaming={streaming && index === process.length - 1}
+                >
+                  {part.text}
+                </CopilotChatReasoningMessage.Content>
+              );
+            }
+            const toolCall = processMessage.toolCalls?.find(
+              (candidate) => candidate.id === part.toolCallId,
+            );
+            if (!toolCall) return null;
+            const toolMessage: AssistantMessage = {
+              id: `${message.id}:tool:${toolCall.id}`,
+              role: "assistant",
+              content: "",
+              toolCalls: [toolCall],
+            };
+            return (
+              <CopilotChatToolCallsView
+                key={`${message.id}:tool:${toolCall.id}`}
+                message={toolMessage}
+                messages={messages}
+              />
+            );
+          })}
+        </div>
+      </CopilotChatReasoningMessage.Toggle>
+    </div>
+  );
 }
 
 type RuntimeContextValue = {
@@ -213,6 +371,7 @@ export function EffervaRuntime({
               ...(typeof state === "object" && state ? state : {}),
               threadId: settledThreadId,
               turnId: null,
+              startedAt: null,
               status: "idle",
             },
           };
@@ -267,6 +426,7 @@ export function EffervaRuntime({
         agent.setState({
           threadId: desiredThreadId,
           turnId: detail.active_turn_id ?? null,
+          startedAt: detail.active_turn_started_at ?? null,
           status: detail.active_turn_id ? "running" : "idle",
           activities: {},
         });
@@ -592,6 +752,10 @@ export function EffervaChat() {
         onSubmitMessage={(value) => void send(value)}
         onStop={stop}
         input={{ toolsMenu, addMenuButton: ComposerAddMenuButton }}
+        messageView={{
+          reasoningMessage:
+            EffervaReasoningMessage as typeof CopilotChatReasoningMessage,
+        }}
         welcomeScreen={agent.messages.length === 0}
       />
       {queued.length > 0 && (

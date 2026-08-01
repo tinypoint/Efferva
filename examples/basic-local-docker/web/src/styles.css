@@ -82,6 +82,38 @@ button:disabled {
   opacity: 0.45;
 }
 
+.efferva-composer-textarea {
+  field-sizing: content;
+  min-height: 3.5rem;
+  max-height: 12rem;
+}
+
+[data-testid="copilot-chat-input"] > div[data-layout] {
+  grid-template-columns: auto minmax(0, 1fr) auto !important;
+  grid-template-rows: auto auto !important;
+  align-items: stretch !important;
+}
+
+[data-testid="copilot-chat-input"] > div[data-layout] > :nth-child(1) {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+[data-testid="copilot-chat-input"] > div[data-layout] > :nth-child(2) {
+  grid-column: 1 / 4;
+  grid-row: 1;
+}
+
+[data-testid="copilot-chat-input"] > div[data-layout] > :nth-child(2) textarea {
+  min-height: 3.5rem;
+  padding-left: 0.75rem;
+}
+
+[data-testid="copilot-chat-input"] > div[data-layout] > :nth-child(3) {
+  grid-column: 3;
+  grid-row: 2;
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }

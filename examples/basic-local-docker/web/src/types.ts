@@ -30,6 +30,7 @@ export type AgUiMessage = Message & {
 export type ThreadDetail = ThreadSummary & {
   messages: AgUiMessage[];
   active_turn_id?: string | null;
+  active_turn_started_at?: string | number | null;
 };
 
 export type ReasoningEffortOption = {

@@ -7,6 +7,7 @@ import posixpath
 import re
 import secrets
 import shlex
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -459,7 +460,11 @@ class CodexProxy:
                 turn_id = str(turn.get("id")) if turn.get("id") else None
                 yield {
                     "method": "efferva/turn-started",
-                    "params": {"threadId": thread_id, "turnId": turn_id},
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "startedAt": turn.get("startedAt") or time.time(),
+                    },
                 }
                 continue
             if "method" in message and "id" in message:

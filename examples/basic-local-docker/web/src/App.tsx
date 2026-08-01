@@ -13,6 +13,30 @@ import { api } from "./api";
 import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
 import type { CreateThreadInput, ThreadSummary } from "./types";
 
+const COMPOSER_SETTINGS_KEY = "efferva:composer-settings";
+
+function readComposerSettings(): {
+  model?: string;
+  reasoningEffort?: string;
+} {
+  try {
+    const saved: unknown = JSON.parse(
+      window.localStorage.getItem(COMPOSER_SETTINGS_KEY) ?? "{}",
+    );
+    if (!saved || typeof saved !== "object") return {};
+    const values = saved as Record<string, unknown>;
+    return {
+      model: typeof values.model === "string" ? values.model : undefined,
+      reasoningEffort:
+        typeof values.reasoningEffort === "string"
+          ? values.reasoningEffort
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function App() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -88,11 +112,29 @@ export function App() {
       }
       return;
     }
-    const defaultModel =
-      models.data.find((item) => item.isDefault) ?? models.data[0];
-    setModel(defaultModel.model);
-    setReasoningEffort(defaultModel.defaultReasoningEffort);
+    const saved = readComposerSettings();
+    const nextModel =
+      models.data.find((item) => item.model === saved.model) ??
+      models.data.find((item) => item.isDefault) ??
+      models.data[0];
+    const savedEffort = nextModel.supportedReasoningEfforts.find(
+      (item) => item.reasoningEffort === saved.reasoningEffort,
+    );
+    setModel(nextModel.model);
+    setReasoningEffort(
+      savedEffort?.reasoningEffort ?? nextModel.defaultReasoningEffort,
+    );
   }, [model, models.data, reasoningEffort]);
+
+  useEffect(() => {
+    if (!model) return;
+    try {
+      window.localStorage.setItem(
+        COMPOSER_SETTINGS_KEY,
+        JSON.stringify({ model, reasoningEffort }),
+      );
+    } catch {}
+  }, [model, reasoningEffort]);
 
   const handleThreadCreated = useCallback(
     (thread: ThreadSummary) => {

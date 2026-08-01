@@ -361,6 +361,7 @@ async def _agui_stream(
                 )
                 continue
             if method == "efferva/turn-started":
+                started_at = params.get("startedAt")
                 yield _sse(
                     seq := seq + 1,
                     {
@@ -385,7 +386,18 @@ async def _agui_stream(
                                 "op": "replace",
                                 "path": "/turnId",
                                 "value": params.get("turnId"),
-                            }
+                            },
+                            *(
+                                [
+                                    {
+                                        "op": "add",
+                                        "path": "/startedAt",
+                                        "value": started_at,
+                                    }
+                                ]
+                                if started_at is not None
+                                else []
+                            ),
                         ],
                     },
                 )
@@ -770,10 +782,25 @@ async def _agui_resume_stream(
                             "params": {
                                 "threadId": thread_id,
                                 "turnId": resumed_turn_id,
+                                "startedAt": resumed_turn.get("startedAt"),
                             },
                         },
                     },
                 )
+                if resumed_turn.get("startedAt") is not None:
+                    yield _sse(
+                        seq := seq + 1,
+                        {
+                            "type": "STATE_DELTA",
+                            "delta": [
+                                {
+                                    "op": "add",
+                                    "path": "/startedAt",
+                                    "value": resumed_turn.get("startedAt"),
+                                }
+                            ],
+                        },
+                    )
                 if params.get("active"):
                     yield _sse(
                         seq := seq + 1,
@@ -1256,7 +1283,17 @@ def create_api_router(
     ) -> dict[str, Any]:
         session = await repository().get_session(principal, session_id, touch=True)
         thread = await codex_proxy().read_thread(session, thread_id)
-        return _thread_detail(thread, session_id)
+        detail = _thread_detail(thread, session_id)
+        active_turn_id = detail.get("active_turn_id")
+        if active_turn_id:
+            active_run = await runs().find_by_turn(
+                session_id,
+                thread_id,
+                str(active_turn_id),
+            )
+            if active_run is not None and active_run.get("started_at") is not None:
+                detail["active_turn_started_at"] = active_run["started_at"].isoformat()
+        return detail
 
     @router.delete("/api/sessions/{session_id}/threads/{thread_id}")
     async def delete_thread(

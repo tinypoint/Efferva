@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "efferva-semantic-alpha"
+version = "0.1.0"
+description = "An AI-native investment semantics showcase powered by Efferva."
+requires-python = ">=3.11"
+dependencies = [
+    "efferva[opensandbox]==0.1.0",
+    "fastapi>=0.116,<1",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/semantic_alpha"]

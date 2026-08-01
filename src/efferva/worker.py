@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import suppress
 from contextvars import ContextVar
@@ -314,6 +315,7 @@ class RunWorker:
             "sessionId": str(command["sessionId"]),
             "threadId": str(command["threadId"]),
             "turnId": command.get("turnId"),
+            "startedAt": previous_state.get("startedAt") or time.time(),
             "changed": asyncio.Event(),
             "finished": False,
             "openMessages": set(previous_state.get("openMessages") or []),
@@ -463,9 +465,13 @@ class RunWorker:
                 "sessionId": command["sessionId"],
                 "threadId": context["threadId"],
                 "clientRunId": agui_run_id,
+                "startedAt": context["startedAt"],
             },
         )
         async for event in events:
+            if event.get("type") == "STATE_SNAPSHOT":
+                snapshot = event.setdefault("snapshot", {})
+                snapshot.setdefault("startedAt", context["startedAt"])
             updates = self._track_event(event, context)
             if updates.get("threadId") and lease_context.get("threadId") is None:
                 thread_id = str(updates["threadId"])
@@ -540,6 +546,11 @@ class RunWorker:
                     {
                         "threadId": context["threadId"],
                         "turnId": context["turnId"],
+                        **(
+                            {"startedAt": params["startedAt"]}
+                            if params.get("startedAt") is not None
+                            else {}
+                        ),
                     }
                 )
             context["changed"].set()

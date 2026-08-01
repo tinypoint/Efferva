@@ -1,16 +1,4 @@
 services:
-  app:
-    environment:
-      PYTHONPATH: /product/efferva-src
-    volumes:
-      - ../../src:/product/efferva-src:ro
-
-  worker:
-    environment:
-      PYTHONPATH: /product/efferva-src
-    volumes:
-      - ../../src:/product/efferva-src:ro
-
   web:
     build:
       context: ./web
@@ -27,7 +15,7 @@ services:
       - ./web:/web
       - web-node-modules:/web/node_modules
     networks:
-      - efferva-local
+      - semantic-alpha-local
 
 volumes:
   web-node-modules:
