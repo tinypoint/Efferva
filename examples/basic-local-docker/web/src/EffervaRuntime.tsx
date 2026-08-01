@@ -17,6 +17,7 @@ import {
 } from "@ag-ui/client";
 import {
   CopilotChatConfigurationProvider,
+  CopilotChatAssistantMessage,
   CopilotChatInput,
   CopilotChatReasoningMessage,
   CopilotChatToolCallsView,
@@ -84,19 +85,14 @@ function restoreMessages(messages: AgUiMessage[]): Message[] {
         part.type === "reasoning" && part.text.trim() ? [part.text] : [],
       )
       .join("\n\n");
-    const {
-      process,
-      processDurationMs,
-      toolCalls,
-      ...assistant
-    } = message;
+    const { process, processDurationMs, ...assistant } = message;
     const processMessage: EffervaProcessMessage = {
       id: `${message.id}:process`,
       role: "reasoning",
       content: reasoningText || " ",
       process,
       processDurationMs,
-      toolCalls,
+      assistantMessageId: message.id,
     };
     return [processMessage, assistant as Message];
   });
@@ -106,7 +102,7 @@ type AssistantMessage = Extract<Message, { role: "assistant" }>;
 type EffervaProcessMessage = Extract<Message, { role: "reasoning" }> & {
   process?: AgUiMessage["process"];
   processDurationMs?: number;
-  toolCalls?: AssistantMessage["toolCalls"];
+  assistantMessageId?: string;
 };
 
 function timestampMs(value: unknown): number | null {
@@ -147,6 +143,11 @@ function EffervaReasoningMessage({
     updates: [UseAgentUpdate.OnStateChanged],
   });
   const processMessage = message as EffervaProcessMessage;
+  const processAssistantMessage = messages.find(
+    (candidate): candidate is AssistantMessage =>
+      candidate.role === "assistant" &&
+      candidate.id === processMessage.assistantMessageId,
+  );
   const messageIndex = messages.findIndex((item) => item.id === message.id);
   let lastUserIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -227,7 +228,7 @@ function EffervaReasoningMessage({
                 </CopilotChatReasoningMessage.Content>
               );
             }
-            const toolCall = processMessage.toolCalls?.find(
+            const toolCall = processAssistantMessage?.toolCalls?.find(
               (candidate) => candidate.id === part.toolCallId,
             );
             if (!toolCall) return null;
@@ -248,6 +249,32 @@ function EffervaReasoningMessage({
         </div>
       </CopilotChatReasoningMessage.Toggle>
     </div>
+  );
+}
+
+function HiddenToolCallsView() {
+  return null;
+}
+
+type EffervaAssistantMessageProps = ComponentProps<
+  typeof CopilotChatAssistantMessage
+>;
+
+function EffervaAssistantMessage(props: EffervaAssistantMessageProps) {
+  const { message, messages = [] } = props;
+  const toolCallsAreInProcess = messages.some(
+    (candidate) =>
+      candidate.role === "reasoning" &&
+      (candidate as EffervaProcessMessage).assistantMessageId === message.id,
+  );
+
+  return (
+    <CopilotChatAssistantMessage
+      {...props}
+      toolCallsView={
+        toolCallsAreInProcess ? HiddenToolCallsView : props.toolCallsView
+      }
+    />
   );
 }
 
@@ -283,6 +310,7 @@ type EffervaRuntimeProps = {
   skills: SkillMetadata[];
   children: ReactNode;
   onThreadCreated: (thread: ThreadSummary) => void;
+  onThreadNameUpdated: (threadId: string, threadName: string) => void;
   onRunSettled: (threadId: string) => void;
   onThreadNotFound: (threadId: string) => void;
 };
@@ -299,6 +327,7 @@ export function EffervaRuntime({
   skills,
   children,
   onThreadCreated,
+  onThreadNameUpdated,
   onRunSettled,
   onThreadNotFound,
 }: EffervaRuntimeProps) {
@@ -306,11 +335,13 @@ export function EffervaRuntime({
   const [error, setError] = useState<string | null>(null);
   const settingsRef = useRef({ model, reasoningEffort });
   const onThreadCreatedRef = useRef(onThreadCreated);
+  const onThreadNameUpdatedRef = useRef(onThreadNameUpdated);
   const onRunSettledRef = useRef(onRunSettled);
   const onThreadNotFoundRef = useRef(onThreadNotFound);
   const createdThreadIdRef = useRef<string | null>(null);
   settingsRef.current = { model, reasoningEffort };
   onThreadCreatedRef.current = onThreadCreated;
+  onThreadNameUpdatedRef.current = onThreadNameUpdated;
   onRunSettledRef.current = onRunSettled;
   onThreadNotFoundRef.current = onThreadNotFound;
 
@@ -350,7 +381,12 @@ export function EffervaRuntime({
         const raw = event.event as
           | {
               method?: string;
-              params?: { thread?: ThreadSummary; turnId?: string };
+              params?: {
+                thread?: ThreadSummary;
+                turnId?: string;
+                threadId?: string;
+                threadName?: string;
+              };
             }
           | undefined;
         if (
@@ -361,6 +397,16 @@ export function EffervaRuntime({
           createdThreadIdRef.current = created.id;
           current.threadId = created.id;
           onThreadCreatedRef.current(created);
+        }
+        if (
+          raw?.method === "thread/name/updated" &&
+          raw.params?.threadId &&
+          raw.params.threadName
+        ) {
+          onThreadNameUpdatedRef.current(
+            raw.params.threadId,
+            raw.params.threadName,
+          );
         }
       },
       async onRunFinalized({ agent: current, state }) {
@@ -758,6 +804,8 @@ export function EffervaChat() {
         onStop={stop}
         input={{ toolsMenu, addMenuButton: ComposerAddMenuButton }}
         messageView={{
+          assistantMessage:
+            EffervaAssistantMessage as typeof CopilotChatAssistantMessage,
           reasoningMessage:
             EffervaReasoningMessage as typeof CopilotChatReasoningMessage,
         }}

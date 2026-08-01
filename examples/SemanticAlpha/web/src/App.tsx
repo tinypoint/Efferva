@@ -18,6 +18,8 @@ type IndustryReport = {
   created_at: string;
   session_id: string | null;
   thread_id: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
   markdown: string;
 };
 
@@ -176,6 +178,8 @@ export function App() {
               <ThreadPanel
                 sessionId={activeReport.session_id}
                 threadId={activeReport.thread_id}
+                model={activeReport.model}
+                reasoningEffort={activeReport.reasoning_effort}
               />
             ) : null}
             {activeReport &&

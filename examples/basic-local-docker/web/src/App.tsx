@@ -211,6 +211,21 @@ export function App() {
     [queryClient, sessionId],
   );
 
+  const handleThreadNameUpdated = useCallback(
+    (updatedThreadId: string, threadName: string) => {
+      queryClient.setQueryData<ThreadSummary[]>(
+        ["threads", sessionId],
+        (current = []) =>
+          current.map((thread) =>
+            thread.id === updatedThreadId
+              ? { ...thread, name: threadName, title: threadName }
+              : thread,
+          ),
+      );
+    },
+    [queryClient, sessionId],
+  );
+
   const handleThreadNotFound = useCallback(
     (missingThreadId: string) => {
       if (threadId !== missingThreadId) return;
@@ -284,6 +299,7 @@ export function App() {
       workspace={selectedThread?.workspace}
       skills={enabledSkills}
       onThreadCreated={handleThreadCreated}
+      onThreadNameUpdated={handleThreadNameUpdated}
       onRunSettled={handleRunSettled}
       onThreadNotFound={handleThreadNotFound}
     >

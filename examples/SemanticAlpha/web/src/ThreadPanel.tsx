@@ -65,6 +65,8 @@ type ThreadMetadata = {
 type ThreadPanelProps = {
   sessionId: string;
   threadId: string;
+  model?: string | null;
+  reasoningEffort?: string | null;
 };
 
 async function requestJson<T>(
@@ -220,7 +222,12 @@ function MessageView({
   );
 }
 
-export function ThreadPanel({ sessionId, threadId }: ThreadPanelProps) {
+export function ThreadPanel({
+  sessionId,
+  threadId,
+  model,
+  reasoningEffort,
+}: ThreadPanelProps) {
   const [thread, setThread] = useState<ThreadDetail | null>(null);
   const [metadata, setMetadata] = useState<ThreadMetadata | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -250,6 +257,7 @@ export function ThreadPanel({ sessionId, threadId }: ThreadPanelProps) {
     ])
       .then(([session, models, settings]) => {
         const selectedModel =
+          models.find((item) => item.model === model) ??
           models.find((item) => item.model === settings?.model) ??
           models.find((item) => item.isDefault) ??
           models[0];
@@ -259,6 +267,7 @@ export function ThreadPanel({ sessionId, threadId }: ThreadPanelProps) {
           model: selectedModel.model,
           modelLabel: selectedModel.displayName,
           reasoningEffort:
+            reasoningEffort ??
             settings?.reasoning_effort ??
             selectedModel.defaultReasoningEffort ??
             "—",
@@ -269,7 +278,7 @@ export function ThreadPanel({ sessionId, threadId }: ThreadPanelProps) {
       });
 
     return () => controller.abort();
-  }, [sessionId, threadId]);
+  }, [model, reasoningEffort, sessionId, threadId]);
 
   const toolResults = useMemo(
     () =>

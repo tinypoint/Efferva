@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import posixpath
 import re
@@ -23,6 +24,32 @@ from websockets.asyncio.client import ClientConnection, connect
 
 from efferva.config import Settings
 from efferva.sandbox import SandboxControlPlane, SandboxEnvironment
+
+
+_LOGGER = logging.getLogger(__name__)
+
+_THREAD_NAME_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 36,
+        }
+    },
+    "required": ["title"],
+    "additionalProperties": False,
+}
+
+_THREAD_NAME_INSTRUCTIONS = """\
+You generate a user-facing title for a coding-agent thread.
+Return only the structured output requested by the response schema.
+Do not answer the user's request, inspect files, call tools, or perform any work.
+The title must describe the user's task, use the user's language, contain at most
+36 characters, and have no quotes, Markdown, or trailing punctuation. Reuse the
+prompt when it is already a concise title; otherwise prefer a precise action or
+question title.
+"""
 
 
 class CodexRpcError(RuntimeError):
@@ -104,6 +131,18 @@ class CodexProxy:
             session,
             "thread/delete",
             {"threadId": thread_id},
+        )
+
+    async def set_thread_name(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        name: str,
+    ) -> None:
+        await self.request(
+            session,
+            "thread/name/set",
+            {"threadId": thread_id, "name": name},
         )
 
     async def list_models(self, session: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -480,20 +519,153 @@ class CodexProxy:
             result = await self._rpc(websocket, "thread/start", thread_params)
             thread = dict(result["thread"])
             thread_id = str(thread["id"])
-            yield {
-                "method": "efferva/thread-created",
-                "params": {"thread": thread},
-            }
-            async for notification in self._start_turn_on_connection(
-                websocket,
-                session,
+            thread_name_task = asyncio.create_task(
+                self._generate_and_set_thread_name(
+                    session,
+                    sandbox,
+                    thread_id,
+                    prompt,
+                    workspace=workspace,
+                    model=model,
+                )
+            )
+            name_notification_seen = False
+            try:
+                yield {
+                    "method": "efferva/thread-created",
+                    "params": {"thread": thread},
+                }
+                async for notification in self._start_turn_on_connection(
+                    websocket,
+                    session,
+                    thread_id,
+                    input_items,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    collaboration_mode=collaboration_mode,
+                ):
+                    if (
+                        notification.get("method") == "thread/name/updated"
+                        and str(
+                            (notification.get("params") or {}).get("threadId")
+                            or ""
+                        )
+                        == thread_id
+                    ):
+                        name_notification_seen = True
+                    if notification.get("method") == "turn/completed":
+                        thread_name = await thread_name_task
+                        if thread_name and not name_notification_seen:
+                            yield {
+                                "method": "thread/name/updated",
+                                "params": {
+                                    "threadId": thread_id,
+                                    "threadName": thread_name,
+                                },
+                            }
+                    yield notification
+            finally:
+                if not thread_name_task.done():
+                    thread_name_task.cancel()
+                    await asyncio.gather(
+                        thread_name_task,
+                        return_exceptions=True,
+                    )
+
+    async def _generate_and_set_thread_name(
+        self,
+        session: Mapping[str, Any],
+        sandbox: SandboxEnvironment,
+        thread_id: str,
+        prompt: str,
+        *,
+        workspace: str,
+        model: str | None,
+    ) -> str | None:
+        fallback = _normalize_thread_name(prompt)
+        generated: str | None = None
+        try:
+            async with asyncio.timeout(30):
+                async with self._connection(sandbox) as websocket:
+                    thread_params = self._thread_params(
+                        model=model,
+                        reasoning_effort="low",
+                    )
+                    thread_params.pop("developerInstructions", None)
+                    thread_params.pop("dynamicTools", None)
+                    thread_params.update(
+                        {
+                            "cwd": workspace,
+                            "sandbox": "read-only",
+                            "baseInstructions": _THREAD_NAME_INSTRUCTIONS,
+                            "ephemeral": True,
+                            "threadSource": "system",
+                        }
+                    )
+                    config = deepcopy(thread_params.get("config") or {})
+                    features = config.setdefault("features", {})
+                    features.update(
+                        {
+                            "hooks": False,
+                            "multi_agent": False,
+                            "multi_agent_v2": False,
+                            "plugins": False,
+                            "tool_suggest": False,
+                        }
+                    )
+                    config["web_search"] = "disabled"
+                    thread_params["config"] = config
+                    result = await self._rpc(
+                        websocket,
+                        "thread/start",
+                        thread_params,
+                    )
+                    metadata_thread_id = str(result["thread"]["id"])
+                    async for notification in self._start_turn_on_connection(
+                        websocket,
+                        session,
+                        metadata_thread_id,
+                        [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Generate a title for this user prompt:\n\n"
+                                    f"{prompt[:2000]}"
+                                ),
+                            }
+                        ],
+                        model=model,
+                        reasoning_effort="low",
+                        output_schema=_THREAD_NAME_OUTPUT_SCHEMA,
+                    ):
+                        if notification.get("method") != "item/completed":
+                            continue
+                        item = (notification.get("params") or {}).get("item") or {}
+                        if item.get("type") == "agentMessage":
+                            generated = _thread_name_from_output(
+                                str(item.get("text") or "")
+                            )
+        except Exception:
+            _LOGGER.warning(
+                "thread title generation failed for %s",
                 thread_id,
-                input_items,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                collaboration_mode=collaboration_mode,
-            ):
-                yield notification
+                exc_info=True,
+            )
+
+        name = generated or fallback
+        if not name:
+            return None
+        try:
+            async with asyncio.timeout(5):
+                await self.set_thread_name(session, thread_id, name)
+        except Exception:
+            _LOGGER.warning(
+                "thread/name/set failed for %s",
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        return name
 
     async def _start_turn_on_connection(
         self,
@@ -505,6 +677,7 @@ class CodexProxy:
         model: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         request_id = await self._request_id()
         params: dict[str, Any] = {
@@ -515,6 +688,8 @@ class CodexProxy:
             params["model"] = model
         if reasoning_effort:
             params["effort"] = reasoning_effort
+        if output_schema is not None:
+            params["outputSchema"] = output_schema
         if collaboration_mode:
             params["collaborationMode"] = await self._collaboration_mode(
                 session,
@@ -1084,6 +1259,32 @@ def _normalize_dynamic_tools(
             }
         )
     return normalized
+
+
+def _thread_name_from_output(output: str) -> str | None:
+    candidate = output
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    else:
+        if isinstance(parsed, Mapping):
+            candidate = str(parsed.get("title") or "")
+    return _normalize_thread_name(candidate)
+
+
+def _normalize_thread_name(value: str) -> str | None:
+    lines = [line.strip() for line in str(value).splitlines() if line.strip()]
+    if not lines:
+        return None
+    name = re.sub(r"^(?:title|标题)\s*[:：]\s*", "", lines[0], flags=re.I)
+    name = name.strip(" \t\r\n`'\"")
+    name = re.sub(r"\s+", " ", name).rstrip(".?!。！？")
+    if not name:
+        return None
+    if len(name) > 36:
+        name = f"{name[:35].rstrip()}…"
+    return name
 
 
 def _default_server_response(

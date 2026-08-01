@@ -1736,10 +1736,14 @@ def create_api_router(
 
 
 def _thread_summary(thread: dict[str, Any], session_id: UUID) -> dict[str, Any]:
+    name = thread.get("name")
+    preview = thread.get("preview")
     return {
         "id": str(thread["id"]),
         "session_id": str(session_id),
-        "title": thread.get("name") or thread.get("preview") or "Untitled thread",
+        "name": name,
+        "preview": preview,
+        "title": name or "Untitled thread",
         "workspace": thread.get("cwd"),
         "status": thread.get("status"),
         "created_at": thread.get("createdAt"),

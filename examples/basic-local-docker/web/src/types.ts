@@ -10,6 +10,8 @@ export type ThreadSummary = {
   id: string;
   session_id: string;
   title: string;
+  name?: string | null;
+  preview?: string | null;
   workspace?: string | null;
   status?: {
     type: "active" | "idle" | "notLoaded" | "systemError";
