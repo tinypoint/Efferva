@@ -33,14 +33,7 @@ ALTER TABLE app_sessions
 ALTER TABLE app_sessions
     ADD COLUMN IF NOT EXISTS default_reasoning_effort text;
 
-CREATE TABLE IF NOT EXISTS thread_execution_settings (
-    session_id uuid NOT NULL REFERENCES app_sessions(id) ON DELETE CASCADE,
-    thread_id text NOT NULL,
-    model text NOT NULL,
-    reasoning_effort text NOT NULL,
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (session_id, thread_id)
-);
+DROP TABLE IF EXISTS thread_execution_settings;
 
 CREATE TABLE IF NOT EXISTS agent_runs (
     id text PRIMARY KEY,

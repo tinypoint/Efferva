@@ -1,13 +1,25 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Menu } from "@base-ui/react/menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Code2,
   LoaderCircle,
   MoreHorizontal,
   Plus,
+  Trash2,
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import { api } from "./api";
 import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
 import type {
@@ -22,6 +34,9 @@ export function App() {
     sessionId?: string;
     threadId?: string;
   }>();
+  const [threadToDelete, setThreadToDelete] = useState<ThreadSummary | null>(
+    null,
+  );
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.listSessions,
@@ -180,11 +195,6 @@ export function App() {
         ["execution-settings", thread.session_id, thread.id],
         settings,
       );
-      void api.updateExecutionSettings(
-        thread.session_id,
-        settings,
-        thread.id,
-      );
     },
     [model, navigate, queryClient, reasoningEffort],
   );
@@ -209,12 +219,12 @@ export function App() {
     [navigate, sessionId, threadId],
   );
 
-  const deleteThread = useCallback(
-    async (deletedThreadId: string) => {
-      if (!sessionId || !window.confirm("Delete this thread permanently?")) {
-        return;
-      }
-      await api.deleteThread(sessionId, deletedThreadId);
+  const deleteThread = useMutation({
+    mutationFn: async (deletedThreadId: string) => {
+      if (!sessionId) throw new Error("Session is unavailable");
+      return api.deleteThread(sessionId, deletedThreadId);
+    },
+    onSuccess: (_, deletedThreadId) => {
       queryClient.setQueryData<ThreadSummary[]>(
         ["threads", sessionId],
         (current = []) =>
@@ -223,12 +233,12 @@ export function App() {
       if (threadId === deletedThreadId) {
         navigate(`/sessions/${sessionId}`);
       }
-      await queryClient.invalidateQueries({
+      setThreadToDelete(null);
+      void queryClient.invalidateQueries({
         queryKey: ["threads", sessionId],
       });
     },
-    [navigate, queryClient, sessionId, threadId],
-  );
+  });
 
   const enabledSkills = useMemo(
     () =>
@@ -317,14 +327,38 @@ export function App() {
                 >
                   {thread.title}
                 </button>
-                <button
-                  type="button"
-                  className="mr-1 rounded p-1 opacity-0 hover:bg-background group-hover:opacity-100"
-                  aria-label={`Delete ${thread.title}`}
-                  onClick={() => void deleteThread(thread.id)}
-                >
-                  <MoreHorizontal className="size-4" />
-                </button>
+                <Menu.Root>
+                  <Menu.Trigger
+                    className="mr-1 rounded p-1 opacity-0 outline-none hover:bg-background focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 data-popup-open:bg-background data-popup-open:opacity-100"
+                    aria-label={`Actions for ${thread.title}`}
+                  >
+                    <MoreHorizontal className="size-4" />
+                  </Menu.Trigger>
+                  <Menu.Portal>
+                    <Menu.Positioner
+                      side="bottom"
+                      align="end"
+                      sideOffset={4}
+                      className="z-50"
+                    >
+                      <Menu.Popup
+                        finalFocus={false}
+                        className="min-w-32 rounded-lg bg-popover p-1 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95"
+                      >
+                        <Menu.Item
+                          className="flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-destructive outline-none data-highlighted:bg-destructive/10"
+                          onClick={() => {
+                            deleteThread.reset();
+                            setThreadToDelete(thread);
+                          }}
+                        >
+                          <Trash2 className="size-4" />
+                          Delete
+                        </Menu.Item>
+                      </Menu.Popup>
+                    </Menu.Positioner>
+                  </Menu.Portal>
+                </Menu.Root>
               </div>
             ))}
           </div>
@@ -332,7 +366,7 @@ export function App() {
         <main className="grid min-h-0 min-w-0 grid-rows-[3.5rem_minmax(0,1fr)]">
           <header className="flex items-center border-b px-5">
             <h1 className="truncate text-sm font-semibold">
-              {selectedThread?.title || "New thread"}
+              {selectedThread?.title ?? (threadId ? "Opening thread…" : "New thread")}
             </h1>
           </header>
           <div className="min-h-0">
@@ -340,6 +374,50 @@ export function App() {
           </div>
         </main>
       </div>
+      <AlertDialog
+        open={threadToDelete !== null}
+        onOpenChange={(open) => {
+          if (open || deleteThread.isPending) return;
+          deleteThread.reset();
+          setThreadToDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete thread?</AlertDialogTitle>
+            <AlertDialogDescription>
+              “{threadToDelete?.title}” will be permanently deleted. This
+              action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteThread.error && (
+            <p className="text-sm text-destructive" role="alert">
+              {deleteThread.error instanceof Error
+                ? deleteThread.error.message
+                : "Failed to delete the thread"}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogClose
+              render={
+                <Button variant="outline" disabled={deleteThread.isPending} />
+              }
+            >
+              Cancel
+            </AlertDialogClose>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={!threadToDelete || deleteThread.isPending}
+              onClick={() => {
+                if (threadToDelete) deleteThread.mutate(threadToDelete.id);
+              }}
+            >
+              {deleteThread.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </EffervaRuntime>
   );
 }

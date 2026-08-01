@@ -24,9 +24,9 @@ from efferva.identity import (
     UnauthenticatedError,
 )
 from efferva.repository import (
-    ExecutionSettingsRepository,
     NotFoundError,
     RunRepository,
+    SessionDefaultsRepository,
     SessionRepository,
 )
 from efferva.runtime import CodexProxy, CodexRpcError, ServerRequestHandler
@@ -39,7 +39,7 @@ class _RuntimeResources:
     proxy: CodexProxy | None = None
     broker: RedisRunBroker | None = None
     runs: RunRepository | None = None
-    execution_settings: ExecutionSettingsRepository | None = None
+    session_defaults: SessionDefaultsRepository | None = None
 
     def require_repository(self) -> SessionRepository:
         if self.repository is None:
@@ -61,10 +61,11 @@ class _RuntimeResources:
             raise RuntimeError("Efferva application has not started")
         return self.runs
 
-    def require_execution_settings(self) -> ExecutionSettingsRepository:
-        if self.execution_settings is None:
+    def require_session_defaults(self) -> SessionDefaultsRepository:
+        if self.session_defaults is None:
             raise RuntimeError("Efferva application has not started")
-        return self.execution_settings
+        return self.session_defaults
+
 
 class Efferva:
     """Product-facing facade for installing Efferva into an authenticated application."""
@@ -128,7 +129,7 @@ class Efferva:
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
                 runs = RunRepository(database)
-                execution_settings = ExecutionSettingsRepository(database)
+                session_defaults = SessionDefaultsRepository(database)
                 sandboxes = create_sandbox_control_plane(
                     settings,
                     self.sandbox,
@@ -147,10 +148,10 @@ class Efferva:
                 resources.proxy = proxy
                 resources.broker = broker
                 resources.runs = runs
-                resources.execution_settings = execution_settings
+                resources.session_defaults = session_defaults
                 yield
             finally:
-                resources.execution_settings = None
+                resources.session_defaults = None
                 resources.runs = None
                 resources.broker = None
                 resources.proxy = None
@@ -172,7 +173,7 @@ class Efferva:
                 codex_proxy=resources.require_proxy,
                 run_broker=resources.require_broker,
                 runs=resources.require_runs,
-                execution_settings=resources.require_execution_settings,
+                session_defaults=resources.require_session_defaults,
             )
         )
 

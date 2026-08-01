@@ -143,7 +143,7 @@ class SessionRepository:
         return row
 
 
-class ExecutionSettingsRepository:
+class SessionDefaultsRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
 
@@ -185,64 +185,6 @@ class ExecutionSettingsRepository:
             )
             await connection.commit()
         return {"model": model, "reasoning_effort": reasoning_effort}
-
-    async def get_thread(
-        self,
-        session_id: UUID,
-        thread_id: str,
-    ) -> dict[str, str | None]:
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                SELECT model, reasoning_effort
-                FROM thread_execution_settings
-                WHERE session_id = %s AND thread_id = %s
-                """,
-                (session_id, thread_id),
-            )
-            row = await cursor.fetchone()
-        if row is not None:
-            return {
-                "model": row["model"],
-                "reasoning_effort": row["reasoning_effort"],
-            }
-        return await self.get_session(session_id)
-
-    async def set_thread(
-        self,
-        session_id: UUID,
-        thread_id: str,
-        *,
-        model: str,
-        reasoning_effort: str,
-    ) -> dict[str, str]:
-        async with self._database.connection() as connection:
-            await connection.execute(
-                """
-                INSERT INTO thread_execution_settings(
-                    session_id, thread_id, model, reasoning_effort
-                )
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (session_id, thread_id) DO UPDATE
-                SET model = EXCLUDED.model,
-                    reasoning_effort = EXCLUDED.reasoning_effort,
-                    updated_at = now()
-                """,
-                (session_id, thread_id, model, reasoning_effort),
-            )
-            await connection.commit()
-        return {"model": model, "reasoning_effort": reasoning_effort}
-
-    async def delete_thread(self, session_id: UUID, thread_id: str) -> None:
-        async with self._database.connection() as connection:
-            await connection.execute(
-                """
-                DELETE FROM thread_execution_settings
-                WHERE session_id = %s AND thread_id = %s
-                """,
-                (session_id, thread_id),
-            )
-            await connection.commit()
 
 
 class RunRepository:

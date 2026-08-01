@@ -222,7 +222,6 @@ function EffervaReasoningMessage({
                 <CopilotChatReasoningMessage.Content
                   key={`${message.id}:reasoning:${index}`}
                   hasContent={Boolean(part.text.trim())}
-                  isStreaming={streaming && index === process.length - 1}
                 >
                   {part.text}
                 </CopilotChatReasoningMessage.Content>
@@ -342,6 +341,8 @@ export function EffervaRuntime({
     });
     return current;
   }, [sessionId]);
+  const desiredThreadId = threadId ?? "new";
+  const switchingThread = agent.threadId !== desiredThreadId;
 
   useEffect(() => {
     const subscription = agent.subscribe({
@@ -476,7 +477,7 @@ export function EffervaRuntime({
   const agents = useMemo(() => ({ [AGENT_ID]: agent }), [agent]);
   const context = useMemo<RuntimeContextValue>(
     () => ({
-      loading,
+      loading: loading || switchingThread,
       error,
       sessionId,
       workspace,
@@ -498,6 +499,7 @@ export function EffervaRuntime({
       reasoningEffort,
       sessionId,
       skills,
+      switchingThread,
       workspace,
     ],
   );
@@ -585,6 +587,7 @@ export function EffervaChat() {
 
   const send = useCallback(
     async (value: string) => {
+      if (runtime.loading) return;
       const prompt = value.trim();
       if (!prompt) return;
       if (agent.isRunning) {
@@ -600,7 +603,7 @@ export function EffervaChat() {
       });
       await copilotkit.runAgent({ agent });
     },
-    [agent, copilotkit],
+    [agent, copilotkit, runtime.loading],
   );
 
   useEffect(() => {
@@ -758,7 +761,7 @@ export function EffervaChat() {
           reasoningMessage:
             EffervaReasoningMessage as typeof CopilotChatReasoningMessage,
         }}
-        welcomeScreen={agent.messages.length === 0}
+        welcomeScreen={!runtime.loading && agent.messages.length === 0}
       />
       {queued.length > 0 && (
         <div className="absolute right-6 bottom-24 left-6 mx-auto max-w-2xl rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-sm">
@@ -799,7 +802,7 @@ export function EffervaChat() {
         </div>
       )}
       {runtime.loading && (
-        <div className="absolute inset-0 grid place-items-center bg-background/75 text-sm text-muted-foreground">
+        <div className="absolute inset-0 z-30 grid cursor-progress place-items-center bg-background/75 text-sm text-muted-foreground">
           Opening thread…
         </div>
       )}

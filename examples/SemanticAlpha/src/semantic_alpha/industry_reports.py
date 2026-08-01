@@ -34,6 +34,8 @@ class IndustryReportSummary(BaseModel):
 class IndustryReport(BaseModel):
     id: UUID
     created_at: datetime
+    session_id: UUID | None
+    thread_id: str | None
     markdown: str
 
 
@@ -139,11 +141,15 @@ def create_industry_reports_router(
         async with database.connection() as connection:
             cursor = await connection.execute(
                 """
-                INSERT INTO industry_research_reports (markdown)
-                VALUES (%s)
+                INSERT INTO industry_research_reports (
+                    session_id,
+                    thread_id,
+                    markdown
+                )
+                VALUES (%s, %s, %s)
                 RETURNING id, created_at
                 """,
-                (markdown,),
+                (session_id, thread_id, markdown),
             )
             saved = await cursor.fetchone()
             await connection.commit()
@@ -167,7 +173,7 @@ def create_industry_reports_router(
         async with database.connection() as connection:
             cursor = await connection.execute(
                 """
-                SELECT id, created_at, markdown
+                SELECT id, created_at, session_id, thread_id, markdown
                 FROM industry_research_reports
                 WHERE id = %s
                 """,

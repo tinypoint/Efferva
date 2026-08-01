@@ -3,6 +3,8 @@ import { ArrowLeft, ChevronLeft, ChevronRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { ThreadPanel } from "./ThreadPanel";
+
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
 type IndustryReportSummary = {
@@ -14,6 +16,8 @@ type IndustryReportSummary = {
 type IndustryReport = {
   id: string;
   created_at: string;
+  session_id: string | null;
+  thread_id: string | null;
   markdown: string;
 };
 
@@ -127,8 +131,8 @@ export function App() {
 
   if (activeSummary) {
     return (
-      <main className="min-h-screen bg-canvas text-ink">
-        <header className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-canvas/95 px-5 py-4 backdrop-blur sm:px-8">
+      <main className="flex h-screen min-h-0 flex-col overflow-hidden bg-canvas text-ink">
+        <header className="z-10 flex shrink-0 items-center justify-between border-b border-line bg-canvas/95 px-5 py-4 backdrop-blur sm:px-8">
           <button
             type="button"
             onClick={closeReport}
@@ -142,25 +146,45 @@ export function App() {
           </span>
         </header>
 
-        <section className="px-4 py-8 sm:px-8 sm:py-12">
-          <article className="mx-auto max-w-[960px] rounded-xl border border-line bg-white px-5 py-8 shadow-sm sm:px-10 sm:py-12">
-            <div className="mb-8 border-b border-line pb-5 text-sm text-muted">
-              {reportDate(activeSummary.created_at)}
-            </div>
+        <section className="report-detail-layout min-h-0 flex-1">
+          <div className="report-document-scroll">
+            <article className="mx-auto max-w-[960px] rounded-xl border border-line bg-white px-5 py-8 shadow-sm sm:px-10 sm:py-12">
+              <div className="mb-8 border-b border-line pb-5 text-sm text-muted">
+                {reportDate(activeSummary.created_at)}
+              </div>
+              {!activeReport && !reportError ? (
+                <p className="text-sm text-muted">正在读取报告…</p>
+              ) : null}
+              {reportError ? (
+                <p className="text-sm text-red-700">{reportError}</p>
+              ) : null}
+              {activeReport ? (
+                <div className="markdown-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {activeReport.markdown}
+                  </ReactMarkdown>
+                </div>
+              ) : null}
+            </article>
+          </div>
+
+          <aside className="report-thread-pane">
             {!activeReport && !reportError ? (
-              <p className="text-sm text-muted">正在读取报告…</p>
+              <div className="thread-panel-state">正在读取来源关系…</div>
             ) : null}
-            {reportError ? (
-              <p className="text-sm text-red-700">{reportError}</p>
+            {activeReport?.session_id && activeReport.thread_id ? (
+              <ThreadPanel
+                sessionId={activeReport.session_id}
+                threadId={activeReport.thread_id}
+              />
             ) : null}
-            {activeReport ? (
-              <div className="markdown-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {activeReport.markdown}
-                </ReactMarkdown>
+            {activeReport &&
+            (!activeReport.session_id || !activeReport.thread_id) ? (
+              <div className="thread-panel-state">
+                这份历史报告没有关联生成线程。
               </div>
             ) : null}
-          </article>
+          </aside>
         </section>
       </main>
     );

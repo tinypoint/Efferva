@@ -22,8 +22,8 @@ from efferva.models import (
 )
 from efferva.repository import (
     AccessMode,
-    ExecutionSettingsRepository,
     RunRepository,
+    SessionDefaultsRepository,
     SessionRepository,
 )
 from efferva.runtime import CodexProxy, CodexRpcError
@@ -270,6 +270,125 @@ def _activity_event(
     return None
 
 
+class _TurnTextProjection:
+    """Project Codex turn text into one live process and one final reply."""
+
+    def __init__(self, run_id: str, *, process_open: bool = False) -> None:
+        self._run_id = run_id
+        self.process_message_id = f"{run_id}:process"
+        self._process_open = process_open
+        self._process_has_content = process_open
+        self._process_items: set[str] = set()
+        self._agent_text: dict[str, str] = {}
+        self._last_agent_id: str | None = None
+
+    def _append_process(self, item_key: str, delta: str) -> list[dict[str, Any]]:
+        if not delta:
+            return []
+        events: list[dict[str, Any]] = []
+        if not self._process_open:
+            self._process_open = True
+            events.append(
+                {
+                    "type": "REASONING_MESSAGE_START",
+                    "messageId": self.process_message_id,
+                    "role": "reasoning",
+                }
+            )
+        if item_key not in self._process_items:
+            self._process_items.add(item_key)
+            if self._process_has_content:
+                events.append(
+                    {
+                        "type": "REASONING_MESSAGE_CONTENT",
+                        "messageId": self.process_message_id,
+                        "delta": "\n\n",
+                    }
+                )
+        events.append(
+            {
+                "type": "REASONING_MESSAGE_CONTENT",
+                "messageId": self.process_message_id,
+                "delta": delta,
+            }
+        )
+        self._process_has_content = True
+        return events
+
+    def append_agent_delta(
+        self,
+        item_id: str,
+        delta: str,
+    ) -> list[dict[str, Any]]:
+        if not delta:
+            return []
+        self._agent_text[item_id] = self._agent_text.get(item_id, "") + delta
+        self._last_agent_id = item_id
+        return self._append_process(f"agent:{item_id}", delta)
+
+    def complete_agent(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        item_id = str(item.get("id") or uuid4())
+        text = str(item.get("text") or "")
+        streamed = self._agent_text.get(item_id, "")
+        events: list[dict[str, Any]] = []
+        if text and not streamed:
+            events = self._append_process(f"agent:{item_id}", text)
+        elif text.startswith(streamed) and len(text) > len(streamed):
+            events = self._append_process(
+                f"agent:{item_id}",
+                text[len(streamed) :],
+            )
+        self._agent_text[item_id] = text or streamed
+        self._last_agent_id = item_id
+        return events
+
+    def seed_agent(self, item: dict[str, Any]) -> None:
+        item_id = str(item.get("id") or uuid4())
+        self._agent_text[item_id] = str(item.get("text") or "")
+        self._last_agent_id = item_id
+
+    def append_reasoning_delta(
+        self,
+        item_id: str,
+        delta: str,
+    ) -> list[dict[str, Any]]:
+        return self._append_process(f"reasoning:{item_id}", delta)
+
+    def close_process(self) -> list[dict[str, Any]]:
+        if not self._process_open:
+            return []
+        self._process_open = False
+        return [
+            {
+                "type": "REASONING_MESSAGE_END",
+                "messageId": self.process_message_id,
+            }
+        ]
+
+    def finish(self) -> list[dict[str, Any]]:
+        events = self.close_process()
+        final_text = (
+            self._agent_text.get(self._last_agent_id, "")
+            if self._last_agent_id is not None
+            else ""
+        )
+        if not final_text:
+            return events
+        message_id = f"{self._run_id}:assistant"
+        events.extend(
+            [
+                {"type": "TEXT_MESSAGE_START", "messageId": message_id},
+                {
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": final_text,
+                },
+                {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+            ]
+        )
+        return events
+
+
 async def _agui_stream(
     proxy: CodexProxy,
     session: dict[str, Any],
@@ -285,9 +404,7 @@ async def _agui_stream(
     inputs: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     seq = 0
-    open_messages: set[str] = set()
-    messages_with_delta: set[str] = set()
-    open_reasoning: set[str] = set()
+    text_projection = _TurnTextProjection(run_id)
     active_thread_id = thread_id
     started_tool_calls: set[str] = set()
     yield _sse(
@@ -411,49 +528,23 @@ async def _agui_stream(
                 continue
             if method == "item/agentMessage/delta":
                 item_id = str(params.get("itemId") or uuid4())
-                message_id = f"{run_id}:{item_id}"
-                if message_id not in open_messages:
-                    open_messages.add(message_id)
-                    yield _sse(
-                        seq := seq + 1,
-                        {"type": "TEXT_MESSAGE_START", "messageId": message_id},
-                    )
                 delta = str(params.get("delta") or "")
-                if delta:
-                    messages_with_delta.add(message_id)
+                for event in text_projection.append_agent_delta(item_id, delta):
                     yield _sse(
                         seq := seq + 1,
-                        {
-                            "type": "TEXT_MESSAGE_CONTENT",
-                            "messageId": message_id,
-                            "delta": delta,
-                        },
+                        event,
                     )
                 continue
             if method in {
                 "item/reasoning/summaryTextDelta",
                 "item/reasoning/textDelta",
             }:
-                reasoning_id = f"{run_id}:reasoning:{params.get('itemId') or uuid4()}"
-                if reasoning_id not in open_reasoning:
-                    open_reasoning.add(reasoning_id)
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "REASONING_MESSAGE_START",
-                            "messageId": reasoning_id,
-                            "role": "reasoning",
-                        },
-                    )
+                item_id = str(params.get("itemId") or uuid4())
                 delta = str(params.get("delta") or "")
-                if delta:
+                for event in text_projection.append_reasoning_delta(item_id, delta):
                     yield _sse(
                         seq := seq + 1,
-                        {
-                            "type": "REASONING_MESSAGE_CONTENT",
-                            "messageId": reasoning_id,
-                            "delta": delta,
-                        },
+                        event,
                     )
                 continue
             if method == "item/started":
@@ -564,60 +655,16 @@ async def _agui_stream(
                     yield _sse(seq := seq + 1, result_event)
                     continue
                 if item.get("type") == "agentMessage":
-                    item_id = str(item.get("id") or uuid4())
-                    message_id = f"{run_id}:{item_id}"
-                    if message_id not in open_messages:
-                        open_messages.add(message_id)
-                        yield _sse(
-                            seq := seq + 1,
-                            {"type": "TEXT_MESSAGE_START", "messageId": message_id},
-                        )
-                    text = str(item.get("text") or "")
-                    if text and message_id not in messages_with_delta:
-                        yield _sse(
-                            seq := seq + 1,
-                            {
-                                "type": "TEXT_MESSAGE_CONTENT",
-                                "messageId": message_id,
-                                "delta": text,
-                            },
-                        )
-                    yield _sse(
-                        seq := seq + 1,
-                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
-                    )
-                    open_messages.discard(message_id)
+                    for event in text_projection.complete_agent(item):
+                        yield _sse(seq := seq + 1, event)
                     continue
                 if item.get("type") == "reasoning":
-                    reasoning_id = f"{run_id}:reasoning:{item.get('id') or uuid4()}"
-                    if reasoning_id in open_reasoning:
-                        yield _sse(
-                            seq := seq + 1,
-                            {
-                                "type": "REASONING_MESSAGE_END",
-                                "messageId": reasoning_id,
-                            },
-                        )
-                        open_reasoning.discard(reasoning_id)
                     continue
             if method == "turn/completed":
                 turn = params.get("turn") or {}
                 status = turn.get("status")
-                for message_id in tuple(open_messages):
-                    yield _sse(
-                        seq := seq + 1,
-                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
-                    )
-                open_messages.clear()
-                for reasoning_id in tuple(open_reasoning):
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "REASONING_MESSAGE_END",
-                            "messageId": reasoning_id,
-                        },
-                    )
-                open_reasoning.clear()
+                for event in text_projection.finish():
+                    yield _sse(seq := seq + 1, event)
                 yield _sse(
                     seq := seq + 1,
                     {
@@ -682,6 +729,8 @@ async def _agui_stream(
                 {"type": "RAW", "event": notification},
             )
     except Exception as error:
+        for event in text_projection.close_process():
+            yield _sse(seq := seq + 1, event)
         yield _sse(
             seq := seq + 1,
             {
@@ -705,9 +754,14 @@ async def _agui_resume_stream(
     started_tool_call_ids: set[str] | None = None,
 ) -> AsyncIterator[str]:
     seq = 0
-    open_messages = set(open_message_ids or ())
-    messages_with_delta = set(open_messages) if continuation else set()
-    open_reasoning = set(open_reasoning_ids or ())
+    legacy_open_messages = set(open_message_ids or ())
+    persisted_open_reasoning = set(open_reasoning_ids or ())
+    process_message_id = f"{run_id}:process"
+    text_projection = _TurnTextProjection(
+        run_id,
+        process_open=process_message_id in persisted_open_reasoning,
+    )
+    legacy_open_reasoning = persisted_open_reasoning - {process_message_id}
     started_tool_calls = set(started_tool_call_ids or ())
     if not continuation:
         yield _sse(
@@ -733,9 +787,13 @@ async def _agui_resume_stream(
             params = notification.get("params") or {}
             if method == "efferva/thread-resumed":
                 resumed_turn = params.get("turn")
-                if continuation and params.get("active"):
+                active = bool(params.get("active"))
+                if continuation and active:
+                    for item in (resumed_turn or {}).get("items") or []:
+                        if item.get("type") == "agentMessage":
+                            text_projection.seed_agent(item)
                     continue
-                if continuation and not params.get("active"):
+                if continuation and not active:
                     resumed_thread = params.get("thread")
                     if resumed_thread:
                         yield _sse(
@@ -769,7 +827,7 @@ async def _agui_resume_stream(
                             )["messages"],
                         },
                     )
-                if not resumed_turn:
+                if not resumed_turn or not active:
                     yield _sse(
                         seq := seq + 1,
                         {
@@ -808,38 +866,40 @@ async def _agui_resume_stream(
                             ],
                         },
                     )
-                if params.get("active"):
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "STEP_STARTED",
-                            "stepName": resumed_turn_id,
-                        },
-                    )
+                yield _sse(
+                    seq := seq + 1,
+                    {
+                        "type": "STEP_STARTED",
+                        "stepName": resumed_turn_id,
+                    },
+                )
                 for item in resumed_turn.get("items") or []:
                     if item.get("type") == "agentMessage":
-                        message_id = f"{run_id}:{item.get('id') or uuid4()}"
-                        yield _sse(
-                            seq := seq + 1,
-                            {
-                                "type": "TEXT_MESSAGE_START",
-                                "messageId": message_id,
-                            },
+                        for event in text_projection.complete_agent(item):
+                            yield _sse(seq := seq + 1, event)
+                        continue
+                    if item.get("type") == "reasoning":
+                        text = "\n\n".join(
+                            str(part)
+                            for part in [
+                                *(item.get("summary") or []),
+                                *(item.get("content") or []),
+                            ]
+                            if str(part).strip()
                         )
-                        text = str(item.get("text") or "")
-                        if text:
-                            yield _sse(
-                                seq := seq + 1,
-                                {
-                                    "type": "TEXT_MESSAGE_CONTENT",
-                                    "messageId": message_id,
-                                    "delta": text,
-                                },
-                            )
-                        yield _sse(
-                            seq := seq + 1,
-                            {"type": "TEXT_MESSAGE_END", "messageId": message_id},
-                        )
+                        for event in text_projection.append_reasoning_delta(
+                            str(item.get("id") or uuid4()),
+                            text,
+                        ):
+                            yield _sse(seq := seq + 1, event)
+                        continue
+                    if item.get("type") == "plan":
+                        text = str(item.get("text") or "").strip()
+                        for event in text_projection.append_reasoning_delta(
+                            str(item.get("id") or uuid4()),
+                            f"计划\n\n{text}" if text else "",
+                        ):
+                            yield _sse(seq := seq + 1, event)
                         continue
                     tool_call = _tool_call(item)
                     if tool_call is None:
@@ -881,16 +941,6 @@ async def _agui_resume_stream(
                                 "role": "tool",
                             },
                         )
-                if not params.get("active"):
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "RUN_FINISHED",
-                            "runId": run_id,
-                            "threadId": thread_id,
-                        },
-                    )
-                    return
                 continue
             if method == "item/started":
                 tool_call = _tool_call(params.get("item") or {})
@@ -916,50 +966,18 @@ async def _agui_resume_stream(
                     continue
             if method == "item/agentMessage/delta":
                 item_id = str(params.get("itemId") or uuid4())
-                message_id = f"{run_id}:{item_id}"
-                if message_id not in open_messages:
-                    open_messages.add(message_id)
-                    yield _sse(
-                        seq := seq + 1,
-                        {"type": "TEXT_MESSAGE_START", "messageId": message_id},
-                    )
                 delta = str(params.get("delta") or "")
-                if delta:
-                    messages_with_delta.add(message_id)
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "TEXT_MESSAGE_CONTENT",
-                            "messageId": message_id,
-                            "delta": delta,
-                        },
-                    )
+                for event in text_projection.append_agent_delta(item_id, delta):
+                    yield _sse(seq := seq + 1, event)
                 continue
             if method in {
                 "item/reasoning/summaryTextDelta",
                 "item/reasoning/textDelta",
             }:
-                reasoning_id = f"{run_id}:reasoning:{params.get('itemId') or uuid4()}"
-                if reasoning_id not in open_reasoning:
-                    open_reasoning.add(reasoning_id)
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "REASONING_MESSAGE_START",
-                            "messageId": reasoning_id,
-                            "role": "reasoning",
-                        },
-                    )
+                item_id = str(params.get("itemId") or uuid4())
                 delta = str(params.get("delta") or "")
-                if delta:
-                    yield _sse(
-                        seq := seq + 1,
-                        {
-                            "type": "REASONING_MESSAGE_CONTENT",
-                            "messageId": reasoning_id,
-                            "delta": delta,
-                        },
-                    )
+                for event in text_projection.append_reasoning_delta(item_id, delta):
+                    yield _sse(seq := seq + 1, event)
                 continue
             if method == "item/completed":
                 item = params.get("item") or {}
@@ -1010,52 +1028,22 @@ async def _agui_resume_stream(
                     yield _sse(seq := seq + 1, result_event)
                     continue
                 if item.get("type") == "agentMessage":
-                    item_id = str(item.get("id") or uuid4())
-                    message_id = f"{run_id}:{item_id}"
-                    if message_id not in open_messages:
-                        open_messages.add(message_id)
-                        yield _sse(
-                            seq := seq + 1,
-                            {"type": "TEXT_MESSAGE_START", "messageId": message_id},
-                        )
-                    text = str(item.get("text") or "")
-                    if text and message_id not in messages_with_delta:
-                        yield _sse(
-                            seq := seq + 1,
-                            {
-                                "type": "TEXT_MESSAGE_CONTENT",
-                                "messageId": message_id,
-                                "delta": text,
-                            },
-                        )
-                    yield _sse(
-                        seq := seq + 1,
-                        {"type": "TEXT_MESSAGE_END", "messageId": message_id},
-                    )
-                    open_messages.discard(message_id)
+                    for event in text_projection.complete_agent(item):
+                        yield _sse(seq := seq + 1, event)
                     continue
                 if item.get("type") == "reasoning":
-                    reasoning_id = f"{run_id}:reasoning:{item.get('id') or uuid4()}"
-                    if reasoning_id in open_reasoning:
-                        yield _sse(
-                            seq := seq + 1,
-                            {
-                                "type": "REASONING_MESSAGE_END",
-                                "messageId": reasoning_id,
-                            },
-                        )
-                        open_reasoning.discard(reasoning_id)
+                    continue
                 continue
             if method == "turn/completed":
                 turn = params.get("turn") or {}
                 status = turn.get("status")
-                for message_id in tuple(open_messages):
+                for message_id in tuple(legacy_open_messages):
                     yield _sse(
                         seq := seq + 1,
                         {"type": "TEXT_MESSAGE_END", "messageId": message_id},
                     )
-                open_messages.clear()
-                for reasoning_id in tuple(open_reasoning):
+                legacy_open_messages.clear()
+                for reasoning_id in tuple(legacy_open_reasoning):
                     yield _sse(
                         seq := seq + 1,
                         {
@@ -1063,7 +1051,9 @@ async def _agui_resume_stream(
                             "messageId": reasoning_id,
                         },
                     )
-                open_reasoning.clear()
+                legacy_open_reasoning.clear()
+                for event in text_projection.finish():
+                    yield _sse(seq := seq + 1, event)
                 yield _sse(
                     seq := seq + 1,
                     {
@@ -1125,6 +1115,21 @@ async def _agui_resume_stream(
                 continue
             yield _sse(seq := seq + 1, {"type": "RAW", "event": notification})
     except Exception as error:
+        for message_id in tuple(legacy_open_messages):
+            yield _sse(
+                seq := seq + 1,
+                {"type": "TEXT_MESSAGE_END", "messageId": message_id},
+            )
+        for reasoning_id in tuple(legacy_open_reasoning):
+            yield _sse(
+                seq := seq + 1,
+                {
+                    "type": "REASONING_MESSAGE_END",
+                    "messageId": reasoning_id,
+                },
+            )
+        for event in text_projection.close_process():
+            yield _sse(seq := seq + 1, event)
         yield _sse(
             seq := seq + 1,
             {
@@ -1142,7 +1147,7 @@ def create_api_router(
     codex_proxy: Callable[[], CodexProxy],
     run_broker: Callable[[], RedisRunBroker],
     runs: Callable[[], RunRepository],
-    execution_settings: Callable[[], ExecutionSettingsRepository],
+    session_defaults: Callable[[], SessionDefaultsRepository],
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
@@ -1263,7 +1268,7 @@ def create_api_router(
         principal: Principal = Depends(resolve_principal),
     ) -> dict[str, str | None]:
         await repository().get_session(principal, session_id)
-        return await execution_settings().get_session(session_id)
+        return await session_defaults().get_session(session_id)
 
     @router.put(
         "/api/sessions/{session_id}/settings",
@@ -1284,7 +1289,7 @@ def create_api_router(
             payload.model,
             payload.reasoning_effort,
         )
-        return await execution_settings().set_session(
+        return await session_defaults().set_session(
             session_id,
             model=payload.model,
             reasoning_effort=payload.reasoning_effort,
@@ -1335,7 +1340,7 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        defaults = await execution_settings().get_session(session_id)
+        defaults = await session_defaults().get_session(session_id)
         model = payload.model or defaults["model"]
         reasoning_effort = (
             payload.reasoning_effort or defaults["reasoning_effort"]
@@ -1349,13 +1354,6 @@ def create_api_router(
             reasoning_effort=reasoning_effort,
             dynamic_tools=payload.tools,
         )
-        if model and reasoning_effort:
-            await execution_settings().set_thread(
-                session_id,
-                str(thread["id"]),
-                model=model,
-                reasoning_effort=reasoning_effort,
-            )
         return _thread_summary(thread, session_id)
 
     @router.get("/api/sessions/{session_id}/threads/{thread_id}")
@@ -1404,8 +1402,8 @@ def create_api_router(
         thread_id: str,
         principal: Principal = Depends(resolve_principal),
     ) -> dict[str, str | None]:
-        await repository().get_session(principal, session_id)
-        return await execution_settings().get_thread(session_id, thread_id)
+        session = await repository().get_session(principal, session_id)
+        return await codex_proxy().get_thread_settings(session, thread_id)
 
     @router.put(
         "/api/sessions/{session_id}/threads/{thread_id}/settings",
@@ -1427,8 +1425,8 @@ def create_api_router(
             payload.model,
             payload.reasoning_effort,
         )
-        return await execution_settings().set_thread(
-            session_id,
+        return await codex_proxy().update_thread_settings(
+            session,
             thread_id,
             model=payload.model,
             reasoning_effort=payload.reasoning_effort,
@@ -1447,7 +1445,6 @@ def create_api_router(
             touch=True,
         )
         await codex_proxy().delete_thread(session, thread_id)
-        await execution_settings().delete_thread(session_id, thread_id)
         return {"deleted": True}
 
     @router.get("/api/sessions/{session_id}/threads/{thread_id}/resume")
@@ -1492,17 +1489,11 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        saved = await execution_settings().get_thread(session_id, thread_id)
-        model = payload.model or saved["model"]
-        reasoning_effort = payload.reasoning_effort or saved["reasoning_effort"]
-        if model:
-            await validate_execution_settings(session, model, reasoning_effort)
-        if model and reasoning_effort:
-            await execution_settings().set_thread(
-                session_id,
-                thread_id,
-                model=model,
-                reasoning_effort=reasoning_effort,
+        if payload.model:
+            await validate_execution_settings(
+                session,
+                payload.model,
+                payload.reasoning_effort,
             )
         run_id = str(uuid4())
         await enqueue(
@@ -1512,8 +1503,8 @@ def create_api_router(
                 "sessionId": str(session["id"]),
                 "threadId": thread_id,
                 "prompt": payload.prompt,
-                "model": model,
-                "reasoningEffort": reasoning_effort,
+                "model": payload.model,
+                "reasoningEffort": payload.reasoning_effort,
             }
         )
         return _brokered_response(run_broker(), run_id)
@@ -1643,34 +1634,18 @@ def create_api_router(
         reasoning_effort = (
             str(forwarded.get("reasoningEffort") or "").strip() or None
         )
-        saved_settings = (
-            await execution_settings().get_session(session_id)
-            if payload.thread_id == "new"
-            else await execution_settings().get_thread(
-                session_id,
-                payload.thread_id,
-            )
-        )
-        model = model or saved_settings["model"]
-        reasoning_effort = (
-            reasoning_effort or saved_settings["reasoning_effort"]
-        )
+        if payload.thread_id == "new":
+            defaults = await session_defaults().get_session(session_id)
+            model = model or defaults["model"]
+            reasoning_effort = reasoning_effort or defaults["reasoning_effort"]
         if model:
             await validate_execution_settings(session, model, reasoning_effort)
-        if model and reasoning_effort:
-            if payload.thread_id == "new":
-                await execution_settings().set_session(
-                    session_id,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                )
-            else:
-                await execution_settings().set_thread(
-                    session_id,
-                    payload.thread_id,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                )
+        if payload.thread_id == "new" and model and reasoning_effort:
+            await session_defaults().set_session(
+                session_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         workspace = str(forwarded.get("workspace") or "").strip() or None
         command, separator, argument = prompt.partition(" ")
         argument = argument.strip() if separator else ""

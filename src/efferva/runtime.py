@@ -126,6 +126,49 @@ class CodexProxy:
             in provider_models
         ]
 
+    async def get_thread_settings(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+    ) -> dict[str, str | None]:
+        result = await self.request(
+            session,
+            "thread/resume",
+            {"threadId": thread_id, "excludeTurns": True},
+        )
+        model = str(result.get("model") or "").strip()
+        if not model:
+            raise CodexRpcError(
+                "thread/resume",
+                {"message": "response did not include the effective model"},
+            )
+        effort = str(result.get("reasoningEffort") or "").strip() or None
+        return {"model": model, "reasoning_effort": effort}
+
+    async def update_thread_settings(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        *,
+        model: str,
+        reasoning_effort: str,
+    ) -> dict[str, str]:
+        await self.request(
+            session,
+            "thread/resume",
+            {"threadId": thread_id, "excludeTurns": True},
+        )
+        await self.request(
+            session,
+            "thread/settings/update",
+            {
+                "threadId": thread_id,
+                "model": model,
+                "effort": reasoning_effort,
+            },
+        )
+        return {"model": model, "reasoning_effort": reasoning_effort}
+
     def _fetch_provider_model_ids(self) -> set[str]:
         base_url = str(self._settings.codex_openai_base_url).rstrip("/")
         headers = {"Accept": "application/json"}
@@ -201,26 +244,25 @@ class CodexProxy:
         await self.request(
             session,
             "thread/resume",
-            {
-                "threadId": thread_id,
-                **self._thread_params(
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                ),
-            },
+            {"threadId": thread_id, "excludeTurns": True},
         )
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "collaborationMode": await self._collaboration_mode(
+                session,
+                "plan",
+                model=model,
+                reasoning_effort=reasoning_effort,
+            ),
+        }
+        if model:
+            params["model"] = model
+        if reasoning_effort:
+            params["effort"] = reasoning_effort
         await self.request(
             session,
             "thread/settings/update",
-            {
-                "threadId": thread_id,
-                "collaborationMode": await self._collaboration_mode(
-                    session,
-                    "plan",
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                ),
-            },
+            params,
         )
 
     async def get_goal(
@@ -392,13 +434,7 @@ class CodexProxy:
             await self._rpc(
                 websocket,
                 "thread/resume",
-                {
-                    "threadId": thread_id,
-                    **self._thread_params(
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                    ),
-                },
+                {"threadId": thread_id, "excludeTurns": True},
             )
             async for notification in self._start_turn_on_connection(
                 websocket,
