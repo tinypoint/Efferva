@@ -1,6 +1,20 @@
 name: efferva-basic-local-docker
 
 services:
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - redis-data:/data
+    networks:
+      - efferva-local
+
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -54,10 +68,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       opensandbox-server:
         condition: service_healthy
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
+      EFFERVA_REDIS_URL: redis://redis:6379/0
       EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
@@ -86,8 +103,50 @@ services:
     networks:
       - efferva-local
 
+  worker:
+    image: efferva-basic-local-docker:local
+    restart: unless-stopped
+    command: ["python", "-m", "basic_local_docker.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opensandbox-server:
+        condition: service_healthy
+    environment:
+      EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
+      EFFERVA_REDIS_URL: redis://redis:6379/0
+      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
+      EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
+      EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
+      EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"
+      EFFERVA_CODEX_RELEASE_CACHE_DIR: /var/cache/efferva/codex
+      EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
+      EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-}
+      EFFERVA_WORKER_CONCURRENCY: ${EFFERVA_WORKER_CONCURRENCY:-16}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - codex-cache:/var/cache/efferva/codex
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; assert b'efferva_worker_ready 1.0' in urllib.request.urlopen('http://localhost:9090/metrics').read()",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+    networks:
+      - efferva-local
+
 volumes:
   postgres-data:
+  redis-data:
   opensandbox-data:
   codex-cache:
 

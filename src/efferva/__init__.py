@@ -7,6 +7,7 @@ from efferva.identity import (
     Principal,
     UnauthenticatedError,
 )
+from efferva.runtime import ServerRequestHandler
 from efferva.sandbox import (
     CommandResult,
     DirectoryEntry,
@@ -18,20 +19,23 @@ from efferva.sandbox import (
     SandboxRuntime,
     SessionVolumeHandle,
 )
+from efferva.worker import serve_worker
 
 __all__ = [
-    "CommandResult",
-    "Efferva",
     "Capability",
-    "IdentityResolver",
+    "CommandResult",
     "DirectoryEntry",
+    "Efferva",
     "FileMetadata",
+    "IdentityResolver",
     "Principal",
     "SandboxCapabilities",
     "SandboxContext",
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
-    "UnauthenticatedError",
+    "ServerRequestHandler",
     "SessionVolumeHandle",
+    "UnauthenticatedError",
+    "serve_worker",
 ]

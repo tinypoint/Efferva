@@ -7,7 +7,7 @@ import posixpath
 import re
 import secrets
 import shlex
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from hashlib import sha256
@@ -28,6 +28,12 @@ class CodexRpcError(RuntimeError):
         super().__init__(f"{method}: {error.get('message', error)}")
 
 
+ServerRequestHandler = Callable[
+    [Mapping[str, Any], str, Mapping[str, Any]],
+    Mapping[str, Any] | Awaitable[Mapping[str, Any]],
+]
+
+
 class CodexProxy:
     """A stateless router to the long-lived Codex app-server inside each Sandbox."""
 
@@ -40,6 +46,7 @@ class CodexProxy:
         developer_instructions: str | None = None,
         codex_config: Mapping[str, Any] | None = None,
         native_memory_enabled: bool = False,
+        server_request_handler: ServerRequestHandler | None = None,
     ) -> None:
         self._binary_bytes = binary.read_bytes()
         self._binary_sha256 = sha256(self._binary_bytes).hexdigest()
@@ -48,15 +55,12 @@ class CodexProxy:
         self._developer_instructions = developer_instructions
         self._codex_config = deepcopy(dict(codex_config or {}))
         self._native_memory_enabled = native_memory_enabled
+        self._server_request_handler = server_request_handler
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._sessions: dict[UUID, SandboxEnvironment] = {}
         self._connection_targets: dict[str, tuple[str, dict[str, str]]] = {}
         self._next_id = 1
         self._id_lock = asyncio.Lock()
-
-    @property
-    def healthy(self) -> bool:
-        return True
 
     async def request(
         self,
@@ -76,7 +80,7 @@ class CodexProxy:
                 "limit": 100,
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
-                "sourceKinds": ["appServer"],
+                "sourceKinds": ["vscode"],
             },
         )
         return list(result.get("data") or [])
@@ -207,13 +211,19 @@ class CodexProxy:
         workspace: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        dynamic_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         workspace = posixpath.normpath(workspace or self._settings.workspace_path)
         if not workspace.startswith("/"):
             raise ValueError("Thread workspace must be an absolute Sandbox path")
         sandbox = await self._ensure_session(session)
-        params = self._thread_params(model=model, reasoning_effort=reasoning_effort)
+        params = self._thread_params(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            dynamic_tools=dynamic_tools,
+        )
         params["cwd"] = workspace
+        params["historyMode"] = "paginated"
         async with self._connection(sandbox) as websocket:
             await self._rpc(
                 websocket,
@@ -244,6 +254,17 @@ class CodexProxy:
                 {"threadId": thread_id, "includeTurns": False},
             )
         return dict(result["thread"])
+
+    async def find_active_turn(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+    ) -> str | None:
+        thread = await self.read_thread(session, thread_id)
+        for turn in reversed(thread.get("turns") or []):
+            if turn.get("status") == "inProgress" and turn.get("id"):
+                return str(turn["id"])
+        return None
 
     async def interrupt_turn(
         self,
@@ -320,6 +341,7 @@ class CodexProxy:
         model: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
+        dynamic_tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         workspace = posixpath.normpath(workspace or self._settings.workspace_path)
         if not workspace.startswith("/"):
@@ -335,8 +357,10 @@ class CodexProxy:
             thread_params = self._thread_params(
                 model=model,
                 reasoning_effort=reasoning_effort,
+                dynamic_tools=dynamic_tools,
             )
             thread_params["cwd"] = workspace
+            thread_params["historyMode"] = "paginated"
             result = await self._rpc(websocket, "thread/start", thread_params)
             thread = dict(result["thread"])
             thread_id = str(thread["id"])
@@ -402,7 +426,7 @@ class CodexProxy:
                 }
                 continue
             if "method" in message and "id" in message:
-                await self._reject_server_request(websocket, message)
+                await self._handle_server_request(websocket, message, session=session)
                 continue
             if "method" not in message:
                 continue
@@ -456,6 +480,7 @@ class CodexProxy:
                         "method": "efferva/thread-resumed",
                         "params": {
                             "threadId": thread_id,
+                            "thread": thread,
                             "turn": resumed_turn,
                             "active": turn_is_active,
                         },
@@ -466,7 +491,7 @@ class CodexProxy:
                         return
                     break
                 if "method" in message and "id" in message:
-                    await self._reject_server_request(websocket, message)
+                    await self._handle_server_request(websocket, message, session=session)
                     continue
                 if "method" in message:
                     pending_notifications.append(message)
@@ -474,7 +499,7 @@ class CodexProxy:
             while True:
                 message = json.loads(await websocket.recv())
                 if "method" in message and "id" in message:
-                    await self._reject_server_request(websocket, message)
+                    await self._handle_server_request(websocket, message, session=session)
                     continue
                 if "method" not in message:
                     continue
@@ -601,7 +626,6 @@ class CodexProxy:
         log_file = posixpath.join(codex_home, "app-server.log")
         start_lock = "/tmp/efferva-app-server-start.lock"
         listen = f"ws://0.0.0.0:{self._settings.codex_appserver_port}"
-        app_server_session_source = "app-server"
         app_server_overrides: dict[str, str] = {}
         if self._settings.codex_openai_base_url:
             app_server_overrides = {
@@ -622,7 +646,6 @@ class CodexProxy:
                 {
                     "binary": self._binary_sha256,
                     "config": app_server_config_args,
-                    "session_source": app_server_session_source,
                 },
                 separators=(",", ":"),
             ).encode()
@@ -673,7 +696,6 @@ class CodexProxy:
             f"cd {shlex.quote(self._settings.workspace_path)} && "
             f"{shlex.quote(sandbox_binary)} app-server "
             f"{app_server_cli_config}"
-            f"--session-source {shlex.quote(app_server_session_source)} "
             f"--listen {shlex.quote(listen)} "
             f"--ws-auth capability-token "
             f"--ws-token-file {shlex.quote(websocket_token_file)} "
@@ -814,22 +836,44 @@ class CodexProxy:
                     raise CodexRpcError(method, message["error"])
                 return dict(message.get("result") or {})
             if "method" in message and "id" in message:
-                await self._reject_server_request(websocket, message)
+                await self._handle_server_request(websocket, message)
 
-    async def _reject_server_request(
+    async def _handle_server_request(
         self,
         websocket: ClientConnection,
         message: Mapping[str, Any],
+        *,
+        session: Mapping[str, Any] | None = None,
     ) -> None:
+        method = str(message["method"])
+        raw_params = message.get("params")
+        params = raw_params if isinstance(raw_params, Mapping) else {}
+        try:
+            if self._server_request_handler is not None:
+                if session is None:
+                    raise RuntimeError(
+                        f"server request {method} has no Efferva Session context"
+                    )
+                response = self._server_request_handler(session, method, params)
+                if isinstance(response, Awaitable):
+                    response = await response
+                payload: dict[str, Any] = {
+                    "id": message["id"],
+                    "result": dict(response),
+                }
+            else:
+                default = _default_server_response(method, params)
+                if default is None:
+                    raise NotImplementedError(f"unsupported server request: {method}")
+                payload = {"id": message["id"], "result": default}
+        except Exception as error:
+            payload = {
+                "id": message["id"],
+                "error": {"code": -32000, "message": str(error)},
+            }
         await websocket.send(
             json.dumps(
-                {
-                    "id": message["id"],
-                    "error": {
-                        "code": -32601,
-                        "message": f"unsupported server request: {message['method']}",
-                    },
-                },
+                payload,
                 separators=(",", ":"),
             )
         )
@@ -845,6 +889,7 @@ class CodexProxy:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        dynamic_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         config = deepcopy(self._codex_config)
         if self._settings.codex_openai_base_url:
@@ -873,7 +918,75 @@ class CodexProxy:
             params["developerInstructions"] = self._developer_instructions
         if config:
             params["config"] = config
+        if dynamic_tools:
+            params["dynamicTools"] = _normalize_dynamic_tools(dynamic_tools)
         return params
+
+
+def _normalize_dynamic_tools(
+    tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw_tool in tools:
+        source = raw_tool.get("function")
+        tool = source if isinstance(source, Mapping) else raw_tool
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            raise ValueError("dynamic tool name is required")
+        input_schema = (
+            tool.get("inputSchema")
+            or tool.get("input_schema")
+            or tool.get("parameters")
+            or {"type": "object", "properties": {}}
+        )
+        normalized.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": str(tool.get("description") or name),
+                "inputSchema": input_schema,
+                "deferLoading": bool(
+                    tool.get("deferLoading") or tool.get("defer_loading")
+                ),
+            }
+        )
+    return normalized
+
+
+def _default_server_response(
+    method: str,
+    params: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if method == "item/tool/call":
+        tool = str(params.get("tool") or "dynamic tool")
+        return {
+            "contentItems": [
+                {
+                    "type": "inputText",
+                    "text": f"No Efferva handler is registered for {tool}.",
+                }
+            ],
+            "success": False,
+        }
+    if method == "item/tool/requestUserInput":
+        questions = params.get("questions") or []
+        return {
+            "answers": {
+                str(question["id"]): {"answers": []}
+                for question in questions
+                if isinstance(question, Mapping) and question.get("id")
+            }
+        }
+    if method in {
+        "item/commandExecution/requestApproval",
+        "item/fileChange/requestApproval",
+    }:
+        return {"decision": "decline"}
+    if method == "mcpServer/elicitation/request":
+        return {"action": "decline", "content": None, "_meta": None}
+    if method == "item/permissions/requestApproval":
+        return {"permissions": {}, "scope": "turn"}
+    return None
 
 
 def _websocket_url(endpoint: str) -> str:

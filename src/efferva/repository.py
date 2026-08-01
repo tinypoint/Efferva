@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -84,7 +85,6 @@ class SessionRepository:
             row = await cursor.fetchone()
             await connection.commit()
         return row
-
     async def list_sessions(
         self,
         principal: Principal,
@@ -141,3 +141,111 @@ class SessionRepository:
         if row is None:
             raise NotFoundError(f"session {session_id} not found")
         return row
+
+
+class RunRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    async def ping(self) -> None:
+        async with self._database.connection() as connection:
+            await connection.execute("SELECT 1")
+
+    async def create(
+        self,
+        run_id: str,
+        session_id: UUID,
+        thread_id: str,
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                INSERT INTO agent_runs(id, session_id, thread_id, command)
+                VALUES (%s, %s, %s, %s::jsonb)
+                RETURNING *
+                """,
+                (run_id, session_id, thread_id, json.dumps(command)),
+            )
+            row = await cursor.fetchone()
+            await connection.commit()
+        return row
+
+    async def get(
+        self,
+        run_id: str,
+        session_id: UUID,
+    ) -> dict[str, Any]:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM agent_runs WHERE id = %s AND session_id = %s",
+                (run_id, session_id),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise NotFoundError(f"run {run_id} not found")
+        return row
+
+    async def find_by_turn(
+        self,
+        session_id: UUID,
+        thread_id: str,
+        turn_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM agent_runs
+                WHERE session_id = %s AND thread_id = %s AND turn_id = %s
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (session_id, thread_id, turn_id),
+            )
+            return await cursor.fetchone()
+
+    async def list_queued(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM agent_runs
+                WHERE status = 'queued'
+                ORDER BY created_at
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return list(await cursor.fetchall())
+
+    async def update(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        worker_id: str | None = None,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        assignments = ["updated_at = now()"]
+        parameters: list[Any] = []
+        for column, value in (
+            ("status", status),
+            ("worker_id", worker_id),
+            ("thread_id", thread_id),
+            ("turn_id", turn_id),
+            ("error", error),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = %s")
+                parameters.append(value)
+        if status == "running":
+            assignments.append("started_at = COALESCE(started_at, now())")
+        if status in {"completed", "failed", "interrupted"}:
+            assignments.append("completed_at = now()")
+        async with self._database.connection() as connection:
+            await connection.execute(
+                f"UPDATE agent_runs SET {', '.join(assignments)} WHERE id = %s",
+                (*parameters, run_id),
+            )
+            await connection.commit()

@@ -35,10 +35,5 @@ class Database:
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtext('efferva:schema-initialization'))"
             )
-            existing = await connection.execute(
-                "SELECT to_regclass('public.app_sessions') AS table_name"
-            )
-            row = await existing.fetchone()
-            if row["table_name"] is None:
-                await connection.execute(schema)
+            await connection.execute(schema)
             await connection.commit()

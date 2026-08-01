@@ -30,6 +30,7 @@ class ThreadCreate(BaseModel):
     workspace: str | None = Field(default=None, min_length=1, max_length=4096)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
+    tools: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
     @field_validator("workspace")
     @classmethod
@@ -42,7 +43,7 @@ class ThreadCreate(BaseModel):
 
 
 class RunCreate(BaseModel):
-    prompt: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=1_000_000)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
 
@@ -61,11 +62,16 @@ class AgUiMessage(BaseModel):
 
 
 class RunAgentInput(BaseModel):
-    thread_id: str = Field(alias="threadId")
-    run_id: str | None = Field(default=None, alias="runId")
+    thread_id: str = Field(alias="threadId", min_length=1, max_length=200)
+    run_id: str | None = Field(
+        default=None,
+        alias="runId",
+        min_length=1,
+        max_length=200,
+    )
     messages: list[AgUiMessage] = Field(default_factory=list)
     state: Any = None
-    tools: list[dict[str, Any]] = Field(default_factory=list)
+    tools: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     context: list[dict[str, Any]] = Field(default_factory=list)
     forwarded_props: Any = Field(default=None, alias="forwardedProps")
 
