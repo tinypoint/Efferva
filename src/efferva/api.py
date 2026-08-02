@@ -489,21 +489,7 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        run_id = await run_broker().find_run(str(session["id"]), thread_id, turn_id)
-        if run_id is None:
-            raise HTTPException(status_code=409, detail="active run is not owned by a Worker")
-        run = await runs().get(run_id, session_id)
-        if run["status"] != "running":
-            raise HTTPException(status_code=409, detail="turn is not running")
-        await run_broker().send_command(
-            run_id,
-            {
-                "kind": "interrupt",
-                "sessionId": str(session["id"]),
-                "threadId": thread_id,
-                "turnId": turn_id,
-            },
-        )
+        await codex_proxy().interrupt_turn(session, thread_id, turn_id)
         return {"interrupted": True}
 
     @router.post(
@@ -522,23 +508,13 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        run_id = await run_broker().find_run(str(session["id"]), thread_id, turn_id)
-        if run_id is None:
-            raise HTTPException(status_code=409, detail="active run is not owned by a Worker")
-        run = await runs().get(run_id, session_id)
-        if run["status"] != "running":
-            raise HTTPException(status_code=409, detail="turn is not running")
-        await run_broker().send_command(
-            run_id,
-            {
-                "kind": "steer",
-                "sessionId": str(session["id"]),
-                "threadId": thread_id,
-                "turnId": turn_id,
-                "prompt": payload.prompt,
-            },
+        steered_turn_id = await codex_proxy().steer_turn(
+            session,
+            thread_id,
+            turn_id,
+            payload.prompt,
         )
-        return {"turnId": turn_id}
+        return {"turnId": steered_turn_id}
 
     @router.post("/api/ag-ui")
     async def run_agui(

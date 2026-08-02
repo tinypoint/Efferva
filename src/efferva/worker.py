@@ -317,7 +317,6 @@ class RunWorker:
             "threadId": str(command["threadId"]),
             "turnId": command.get("turnId"),
             "startedAt": previous_state.get("startedAt") or time.time(),
-            "changed": asyncio.Event(),
             "finished": False,
             "openMessages": set(previous_state.get("openMessages") or []),
             "openReasoning": set(previous_state.get("openReasoning") or []),
@@ -347,7 +346,6 @@ class RunWorker:
             await self._broker.acknowledge_run(dispatch_id)
         finally:
             context["finished"] = True
-            context["changed"].set()
             if command_task is not None:
                 command_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -390,7 +388,6 @@ class RunWorker:
                 resumed_thread_id = recovery_thread_id
                 context["threadId"] = recovery_thread_id
                 context["turnId"] = resumed_turn_id
-                context["changed"].set()
                 recovery_event = {
                     "type": "RAW",
                     "event": {
@@ -555,7 +552,6 @@ class RunWorker:
                         ),
                     }
                 )
-            context["changed"].set()
         if event_type == "RUN_FINISHED":
             result = event.get("result") or {}
             updates["status"] = (
@@ -631,40 +627,19 @@ class RunWorker:
         while not context["finished"]:
             commands = await self._broker.read_commands(run_id, cursor)
             for cursor, command in commands:
-                await self._apply_command(command, context)
+                await self._apply_command(command)
 
     async def _apply_command(
         self,
         command: dict[str, Any],
-        context: dict[str, Any],
     ) -> None:
-        kind = command.get("kind")
-        if kind == "resume_interrupt":
-            for response in command.get("responses") or []:
-                interrupt_id = str(response.get("interruptId") or "")
-                future = self._pending_interrupts.get(interrupt_id)
-                if future is not None and not future.done():
-                    future.set_result(dict(response))
+        if command.get("kind") != "resume_interrupt":
             return
-        while not context.get("turnId") and not context["finished"]:
-            context["changed"].clear()
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(context["changed"].wait(), timeout=1)
-        if context["finished"]:
-            return
-        if kind == "interrupt":
-            await self._proxy.interrupt_turn(
-                {"id": context["sessionId"]},
-                str(context["threadId"]),
-                str(context["turnId"]),
-            )
-        elif kind == "steer":
-            await self._proxy.steer_turn(
-                {"id": context["sessionId"]},
-                str(context["threadId"]),
-                str(context["turnId"]),
-                str(command["prompt"]),
-            )
+        for response in command.get("responses") or []:
+            interrupt_id = str(response.get("interruptId") or "")
+            future = self._pending_interrupts.get(interrupt_id)
+            if future is not None and not future.done():
+                future.set_result(dict(response))
 
     async def _renew_lease(
         self,
