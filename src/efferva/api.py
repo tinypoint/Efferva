@@ -10,7 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from efferva.broker import RedisRunBroker, RunQueueFullError
+from efferva.codex import CodexGateway
 from efferva.codex_projection import project_turn_messages
+from efferva.codex_rpc import CodexRpcError
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
     CodexControlInput,
@@ -25,7 +27,6 @@ from efferva.repository import (
     RunRepository,
     SessionRepository,
 )
-from efferva.runtime import CodexProxy, CodexRpcError
 
 
 def principal_dependency(
@@ -119,7 +120,7 @@ def create_api_router(
     *,
     identity: IdentityResolver,
     repository: Callable[[], SessionRepository],
-    codex_proxy: Callable[[], CodexProxy],
+    codex_gateway: Callable[[], CodexGateway],
     run_broker: Callable[[], RedisRunBroker],
     runs: Callable[[], RunRepository],
 ) -> APIRouter:
@@ -151,7 +152,7 @@ def create_api_router(
         thread_id: str,
     ) -> dict[str, Any]:
         try:
-            return await codex_proxy().read_thread(session, thread_id)
+            return await codex_gateway().read_thread(session, thread_id)
         except CodexRpcError as error:
             message = str(error.error.get("message") or "").lower()
             if "not found" in message or "no rollout found" in message:
@@ -169,7 +170,7 @@ def create_api_router(
         limit: int,
     ) -> tuple[list[dict[str, Any]], str | None]:
         try:
-            page = await codex_proxy().list_thread_turns(
+            page = await codex_gateway().list_thread_turns(
                 session,
                 thread_id,
                 cursor=cursor,
@@ -230,7 +231,7 @@ def create_api_router(
         principal: Principal = Depends(resolve_principal),
     ) -> list[dict[str, Any]]:
         session = await repository().get_session(principal, session_id, touch=True)
-        threads = await codex_proxy().list_threads(session)
+        threads = await codex_gateway().list_threads(session)
         return threads
 
     @router.get("/api/sessions/{session_id}/models")
@@ -239,7 +240,7 @@ def create_api_router(
         principal: Principal = Depends(resolve_principal),
     ) -> list[dict[str, Any]]:
         session = await repository().get_session(principal, session_id, touch=True)
-        return await codex_proxy().list_models(session)
+        return await codex_gateway().list_models(session)
 
     @router.get("/api/sessions/{session_id}/skills")
     async def list_skills(
@@ -253,7 +254,7 @@ def create_api_router(
                 detail="workspace must be an absolute Sandbox path",
             )
         session = await repository().get_session(principal, session_id, touch=True)
-        return await codex_proxy().list_skills(session, workspace=workspace)
+        return await codex_gateway().list_skills(session, workspace=workspace)
 
     @router.get("/api/sessions/{session_id}/files")
     async def search_files(
@@ -268,7 +269,7 @@ def create_api_router(
                 detail="workspace must be an absolute Sandbox path",
             )
         session = await repository().get_session(principal, session_id, touch=True)
-        return await codex_proxy().search_files(
+        return await codex_gateway().search_files(
             session,
             query,
             workspace=workspace,
@@ -286,7 +287,7 @@ def create_api_router(
         if cursor is None:
             _, execution_settings, turn_page = await asyncio.gather(
                 load_thread(session, thread_id),
-                codex_proxy().get_thread_settings(session, thread_id),
+                codex_gateway().get_thread_settings(session, thread_id),
                 load_turn_page(
                     session,
                     thread_id,
@@ -354,7 +355,7 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        await codex_proxy().delete_thread(session, thread_id)
+        await codex_gateway().delete_thread(session, thread_id)
         return {"deleted": True}
 
     @router.get("/api/sessions/{session_id}/threads/{thread_id}/resume")
@@ -401,7 +402,7 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        await codex_proxy().interrupt_turn(session, thread_id, turn_id)
+        await codex_gateway().interrupt_turn(session, thread_id, turn_id)
         return {"interrupted": True}
 
     @router.post(
@@ -420,7 +421,7 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        steered_turn_id = await codex_proxy().steer_turn(
+        steered_turn_id = await codex_gateway().steer_turn(
             session,
             thread_id,
             turn_id,

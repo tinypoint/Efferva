@@ -9,7 +9,10 @@ from fastapi.responses import JSONResponse
 
 from efferva.api import create_api_router
 from efferva.broker import RedisRunBroker
+from efferva.codex import CodexGateway
+from efferva.codex_appserver import CodexAppServerManager
 from efferva.codex_release import prepare_official_codex
+from efferva.codex_rpc import CodexRpcClient, CodexRpcError, ServerRequestHandler
 from efferva.config import (
     Settings,
     get_settings,
@@ -27,7 +30,6 @@ from efferva.repository import (
     RunRepository,
     SessionRepository,
 )
-from efferva.runtime import CodexProxy, CodexRpcError, ServerRequestHandler
 from efferva.sandbox import SandboxProvider
 from efferva.sandbox.manager import create_sandbox_control_plane
 
@@ -35,7 +37,7 @@ from efferva.sandbox.manager import create_sandbox_control_plane
 @dataclass(slots=True)
 class _RuntimeResources:
     repository: SessionRepository | None = None
-    proxy: CodexProxy | None = None
+    gateway: CodexGateway | None = None
     broker: RedisRunBroker | None = None
     runs: RunRepository | None = None
 
@@ -44,10 +46,10 @@ class _RuntimeResources:
             raise RuntimeError("Efferva application has not started")
         return self.repository
 
-    def require_proxy(self) -> CodexProxy:
-        if self.proxy is None:
+    def require_gateway(self) -> CodexGateway:
+        if self.gateway is None:
             raise RuntimeError("Efferva application has not started")
-        return self.proxy
+        return self.gateway
 
     def require_broker(self) -> RedisRunBroker:
         if self.broker is None:
@@ -126,24 +128,31 @@ class Efferva:
                     self.sandbox,
                 )
                 await sandboxes.start()
-                proxy = CodexProxy(
+                app_servers = CodexAppServerManager(
                     codex_release.binary,
                     settings,
                     sandboxes,
+                )
+                rpc = CodexRpcClient(
+                    app_servers,
+                    server_request_handler=self.server_request_handler,
+                )
+                gateway = CodexGateway(
+                    settings,
+                    rpc,
                     developer_instructions=self.developer_instructions,
                     codex_config=codex_config,
                     native_memory_enabled=self.native_memory_enabled,
-                    server_request_handler=self.server_request_handler,
                 )
                 resources.repository = repository
-                resources.proxy = proxy
+                resources.gateway = gateway
                 resources.broker = broker
                 resources.runs = runs
                 yield
             finally:
                 resources.runs = None
                 resources.broker = None
-                resources.proxy = None
+                resources.gateway = None
                 resources.repository = None
                 try:
                     if sandboxes is not None:
@@ -159,7 +168,7 @@ class Efferva:
             create_api_router(
                 identity=self.identity,
                 repository=resources.require_repository,
-                codex_proxy=resources.require_proxy,
+                codex_gateway=resources.require_gateway,
                 run_broker=resources.require_broker,
                 runs=resources.require_runs,
             )

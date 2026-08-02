@@ -16,11 +16,17 @@ from prometheus_client import Gauge, start_http_server
 
 from efferva.agui import resume_agui_turn, stream_agui_turn
 from efferva.broker import RedisRunBroker, RunQueueFullError
+from efferva.codex import CodexGateway
+from efferva.codex_appserver import CodexAppServerManager
 from efferva.codex_release import prepare_official_codex
+from efferva.codex_rpc import (
+    CodexRpcClient,
+    ServerRequestHandler,
+    default_server_response,
+)
 from efferva.config import Settings, get_settings, load_codex_config, merge_codex_config
 from efferva.db import Database
 from efferva.repository import RunRepository
-from efferva.runtime import CodexProxy, ServerRequestHandler, _default_server_response
 from efferva.sandbox import SandboxProvider
 from efferva.sandbox.manager import create_sandbox_control_plane
 
@@ -99,7 +105,7 @@ def _server_response_from_interrupt(
         response.get("payload"), Mapping
     ):
         return dict(response["payload"])
-    default = _default_server_response(method, params)
+    default = default_server_response(method, params)
     if default is None:
         raise RuntimeError(f"interrupt {method} was cancelled without a default")
     return default
@@ -108,14 +114,14 @@ def _server_response_from_interrupt(
 class RunWorker:
     def __init__(
         self,
-        proxy: CodexProxy,
+        gateway: CodexGateway,
         broker: RedisRunBroker,
         runs: RunRepository,
         settings: Settings | None = None,
         server_request_handler: ServerRequestHandler | None = None,
     ) -> None:
         self._settings = settings or get_settings()
-        self._proxy = proxy
+        self._gateway = gateway
         self._broker = broker
         self._runs = runs
         self._worker_id = os.environ.get("HOSTNAME") or f"worker-{uuid4()}"
@@ -136,7 +142,7 @@ class RunWorker:
                 if isinstance(response, Awaitable):
                     response = await response
                 return dict(response)
-            default = _default_server_response(method, params)
+            default = default_server_response(method, params)
             if default is None:
                 raise NotImplementedError(f"unsupported server request: {method}")
             return default
@@ -380,7 +386,7 @@ class RunWorker:
             and not resumed_turn_id
             and recovery_thread_id != "new"
         ):
-            resumed_turn_id = await self._proxy.find_active_turn(
+            resumed_turn_id = await self._gateway.find_active_turn(
                 session,
                 recovery_thread_id,
             )
@@ -420,7 +426,7 @@ class RunWorker:
             events = self._control_events(command)
         elif resumed_thread_id and resumed_turn_id and state.get("status") == "running":
             stream = resume_agui_turn(
-                self._proxy,
+                self._gateway,
                 session,
                 str(resumed_thread_id),
                 str(resumed_turn_id),
@@ -433,7 +439,7 @@ class RunWorker:
             events = (_event_from_sse(chunk) async for chunk in stream)
         elif command.get("kind") == "resume":
             stream = resume_agui_turn(
-                self._proxy,
+                self._gateway,
                 session,
                 str(command["threadId"]),
                 str(command["turnId"]),
@@ -442,7 +448,7 @@ class RunWorker:
             events = (_event_from_sse(chunk) async for chunk in stream)
         else:
             stream = stream_agui_turn(
-                self._proxy,
+                self._gateway,
                 session,
                 str(command["threadId"]),
                 str(command["prompt"]),
@@ -574,7 +580,7 @@ class RunWorker:
         yield {"type": "RUN_STARTED", "runId": run_id, "threadId": thread_id}
         action = str(command["action"])
         if action == "plan.enable":
-            await self._proxy.set_plan_mode(
+            await self._gateway.set_plan_mode(
                 session,
                 thread_id,
                 model=_optional_string(command.get("model")),
@@ -582,24 +588,24 @@ class RunWorker:
             )
             message = "Plan mode enabled."
         elif action == "goal.get":
-            goal = await self._proxy.get_goal(session, thread_id)
+            goal = await self._gateway.get_goal(session, thread_id)
             message = (
                 f"Goal: {goal['objective']} ({goal['status']})"
                 if goal
                 else "No goal is set."
             )
         elif action == "goal.clear":
-            cleared = await self._proxy.clear_goal(session, thread_id)
+            cleared = await self._gateway.clear_goal(session, thread_id)
             message = "Goal cleared." if cleared else "No goal was set."
         elif action == "goal.status":
-            goal = await self._proxy.set_goal(
+            goal = await self._gateway.set_goal(
                 session,
                 thread_id,
                 status=str(command["status"]),
             )
             message = f"Goal {goal['status']}: {goal['objective']}"
         elif action == "goal.set":
-            goal = await self._proxy.set_goal(
+            goal = await self._gateway.set_goal(
                 session,
                 thread_id,
                 objective=str(command["objective"]),
@@ -730,10 +736,15 @@ async def serve_worker(
     sandboxes = create_sandbox_control_plane(settings, sandbox)
     await sandboxes.start()
     try:
-        proxy = CodexProxy(
+        app_servers = CodexAppServerManager(
             release.binary,
             settings,
             sandboxes,
+        )
+        rpc = CodexRpcClient(app_servers)
+        gateway = CodexGateway(
+            settings,
+            rpc,
             developer_instructions=developer_instructions,
             codex_config=merge_codex_config(
                 load_codex_config(settings.codex_config_file),
@@ -743,13 +754,13 @@ async def serve_worker(
         )
         start_http_server(settings.worker_metrics_port)
         worker = RunWorker(
-            proxy,
+            gateway,
             broker,
             RunRepository(database),
             settings,
             server_request_handler=server_request_handler,
         )
-        proxy.set_server_request_handler(worker.handle_server_request)
+        gateway.set_server_request_handler(worker.handle_server_request)
         await worker.run()
     finally:
         WORKER_READY.set(0)

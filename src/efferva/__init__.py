@@ -7,7 +7,7 @@ from efferva.identity import (
     Principal,
     UnauthenticatedError,
 )
-from efferva.runtime import ServerRequestHandler
+from efferva.codex_rpc import ServerRequestHandler
 from efferva.sandbox import (
     CommandResult,
     DirectoryEntry,

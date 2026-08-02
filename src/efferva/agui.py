@@ -5,13 +5,13 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+from efferva.codex import CodexGateway
 from efferva.codex_projection import (
     TurnTextProjection,
     project_activity,
     project_thread_messages,
     project_tool_call,
 )
-from efferva.runtime import CodexProxy
 
 
 def _sse(seq: int, event: dict[str, Any]) -> str:
@@ -19,7 +19,7 @@ def _sse(seq: int, event: dict[str, Any]) -> str:
 
 
 async def stream_agui_turn(
-    proxy: CodexProxy,
+    gateway: CodexGateway,
     session: dict[str, Any],
     thread_id: str,
     prompt: str,
@@ -59,7 +59,7 @@ async def stream_agui_turn(
     )
     try:
         notifications = (
-            proxy.stream_new_turn(
+            gateway.stream_new_turn(
                 session,
                 prompt,
                 workspace=workspace,
@@ -70,7 +70,7 @@ async def stream_agui_turn(
                 extra_inputs=inputs,
             )
             if thread_id == "new"
-            else proxy.stream_turn(
+            else gateway.stream_turn(
                 session,
                 thread_id,
                 prompt,
@@ -368,7 +368,7 @@ async def stream_agui_turn(
 
 
 async def resume_agui_turn(
-    proxy: CodexProxy,
+    gateway: CodexGateway,
     session: dict[str, Any],
     thread_id: str,
     turn_id: str,
@@ -408,7 +408,7 @@ async def resume_agui_turn(
             },
         )
     try:
-        async for notification in proxy.resume_turn(session, thread_id, turn_id):
+        async for notification in gateway.resume_turn(session, thread_id, turn_id):
             method = notification["method"]
             params = notification.get("params") or {}
             if method == "efferva/thread-resumed":
@@ -762,4 +762,3 @@ async def resume_agui_turn(
                 "message": str(error),
             },
         )
-
