@@ -74,7 +74,7 @@ class CodexGateway:
     ) -> None:
         self._rpc.set_server_request_handler(handler)
 
-    async def request(
+    async def _request(
         self,
         session: Mapping[str, Any],
         method: str,
@@ -83,7 +83,7 @@ class CodexGateway:
         return await self._rpc.request(session, method, params)
 
     async def list_threads(self, session: Mapping[str, Any]) -> list[dict[str, Any]]:
-        result = await self.request(
+        result = await self._request(
             session,
             "thread/list",
             {
@@ -100,26 +100,26 @@ class CodexGateway:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> None:
-        await self.request(
+        await self._request(
             session,
             "thread/delete",
             {"threadId": thread_id},
         )
 
-    async def set_thread_name(
+    async def _set_thread_name(
         self,
         session: Mapping[str, Any],
         thread_id: str,
         name: str,
     ) -> None:
-        await self.request(
+        await self._request(
             session,
             "thread/name/set",
             {"threadId": thread_id, "name": name},
         )
 
     async def list_models(self, session: Mapping[str, Any]) -> list[dict[str, Any]]:
-        result = await self.request(
+        result = await self._request(
             session,
             "model/list",
             {"limit": 100, "includeHidden": False},
@@ -143,7 +143,7 @@ class CodexGateway:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> dict[str, str | None]:
-        result = await self.request(
+        result = await self._request(
             session,
             "thread/resume",
             {"threadId": thread_id, "excludeTurns": True},
@@ -190,7 +190,7 @@ class CodexGateway:
         *,
         workspace: str | None = None,
     ) -> list[dict[str, Any]]:
-        result = await self.request(
+        result = await self._request(
             session,
             "skills/list",
             {
@@ -210,7 +210,7 @@ class CodexGateway:
         workspace = posixpath.normpath(workspace or self._settings.workspace_path)
         if not workspace.startswith("/"):
             raise ValueError("File search workspace must be an absolute Sandbox path")
-        result = await self.request(
+        result = await self._request(
             session,
             "fuzzyFileSearch",
             {
@@ -229,7 +229,7 @@ class CodexGateway:
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> None:
-        await self.request(
+        await self._request(
             session,
             "thread/resume",
             {"threadId": thread_id, "excludeTurns": True},
@@ -247,7 +247,7 @@ class CodexGateway:
             params["model"] = model
         if reasoning_effort:
             params["effort"] = reasoning_effort
-        await self.request(
+        await self._request(
             session,
             "thread/settings/update",
             params,
@@ -258,7 +258,7 @@ class CodexGateway:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> dict[str, Any] | None:
-        result = await self.request(
+        result = await self._request(
             session,
             "thread/goal/get",
             {"threadId": thread_id},
@@ -279,7 +279,7 @@ class CodexGateway:
             params["objective"] = objective
         if status is not None:
             params["status"] = status
-        result = await self.request(session, "thread/goal/set", params)
+        result = await self._request(session, "thread/goal/set", params)
         return dict(result["goal"])
 
     async def clear_goal(
@@ -287,7 +287,7 @@ class CodexGateway:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> bool:
-        result = await self.request(
+        result = await self._request(
             session,
             "thread/goal/clear",
             {"threadId": thread_id},
@@ -299,7 +299,7 @@ class CodexGateway:
         session: Mapping[str, Any],
         thread_id: str,
     ) -> dict[str, Any]:
-        result = await self.request(
+        result = await self._request(
             session,
             "thread/read",
             {"threadId": thread_id, "includeTurns": False},
@@ -325,7 +325,7 @@ class CodexGateway:
             params["sortDirection"] = sort_direction
         if items_view is not None:
             params["itemsView"] = items_view
-        return await self.request(session, "thread/turns/list", params)
+        return await self._request(session, "thread/turns/list", params)
 
     async def find_active_turn(
         self,
@@ -356,7 +356,7 @@ class CodexGateway:
         thread_id: str,
         turn_id: str,
     ) -> None:
-        await self.request(
+        await self._request(
             session,
             "turn/interrupt",
             {"threadId": thread_id, "turnId": turn_id},
@@ -369,7 +369,7 @@ class CodexGateway:
         turn_id: str,
         prompt: str,
     ) -> str:
-        result = await self.request(
+        result = await self._request(
             session,
             "turn/steer",
             {
@@ -575,7 +575,7 @@ class CodexGateway:
             return None
         try:
             async with asyncio.timeout(5):
-                await self.set_thread_name(session, thread_id, name)
+                await self._set_thread_name(session, thread_id, name)
         except Exception:
             _LOGGER.warning(
                 "thread/name/set failed for %s",
@@ -761,7 +761,7 @@ class CodexGateway:
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
-        result = await self.request(session, "collaborationMode/list")
+        result = await self._request(session, "collaborationMode/list")
         modes = list(result.get("data") or [])
         selected = next(
             (
