@@ -156,6 +156,13 @@ class EffervaAgent extends HttpAgent {
   private runOverrides?: RunOverrides;
   private controlAgent?: CodexControlAgent;
 
+  constructor(
+    config: HttpAgentConfig,
+    private readonly sessionId: string,
+  ) {
+    super(config);
+  }
+
   setResumeSource(source: ResumeSource) {
     this.resumeSource = source;
   }
@@ -178,12 +185,11 @@ class EffervaAgent extends HttpAgent {
       this.controlAgent = undefined;
       return super.run(input);
     }
-    const sessionId = String(forwarded.sessionId || "");
     const controlAgent = new CodexControlAgent(
       {
         agentId: AGENT_ID,
         threadId: input.threadId,
-        url: `/agent/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(input.threadId)}/controls`,
+        url: `/agent/api/sessions/${encodeURIComponent(this.sessionId)}/threads/${encodeURIComponent(input.threadId)}/controls`,
         headers: this.headers,
         fetch: this.fetch,
       },
@@ -674,11 +680,14 @@ export function EffervaRuntime({
   onThreadNotFoundRef.current = onThreadNotFound;
 
   const agent = useMemo(() => {
-    const current = new EffervaAgent({
-      agentId: AGENT_ID,
-      threadId: threadId ?? "new",
-      url: "/agent/api/ag-ui",
-    });
+    const current = new EffervaAgent(
+      {
+        agentId: AGENT_ID,
+        threadId: threadId ?? "new",
+        url: `/agent/api/sessions/${encodeURIComponent(sessionId)}/ag-ui`,
+      },
+      sessionId,
+    );
     current.use((input, next) => {
       const forwarded =
         typeof input.forwardedProps === "object" && input.forwardedProps
@@ -691,7 +700,6 @@ export function EffervaRuntime({
         threadId: current.threadId,
         forwardedProps: {
           ...forwarded,
-          sessionId,
           ...(settings.model?.trim()
             ? { model: settings.model.trim() }
             : {}),

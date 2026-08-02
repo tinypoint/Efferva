@@ -485,8 +485,9 @@ def create_api_router(
         )
         return _brokered_response(run_broker(), run_id)
 
-    @router.post("/api/ag-ui")
+    @router.post("/api/sessions/{session_id}/ag-ui")
     async def run_agui(
+        session_id: UUID,
         payload: RunAgentInput,
         principal: Principal = Depends(resolve_principal),
     ) -> StreamingResponse:
@@ -495,16 +496,6 @@ def create_api_router(
             if isinstance(payload.forwarded_props, dict)
             else {}
         )
-        raw_session_id = forwarded.get("sessionId")
-        if not raw_session_id:
-            raise HTTPException(
-                status_code=422,
-                detail="forwardedProps.sessionId is required",
-            )
-        try:
-            session_id = UUID(str(raw_session_id))
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail="sessionId must be a UUID") from error
         session = await repository().get_session(
             principal,
             session_id,
