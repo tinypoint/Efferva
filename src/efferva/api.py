@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
@@ -12,11 +13,9 @@ from efferva.broker import RedisRunBroker, RunQueueFullError
 from efferva.codex_projection import project_turn_messages
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
-    ExecutionSettings,
-    ExecutionSettingsUpdate,
     PrincipalView,
     RunAgentInput,
-    RunCreate,
+    PromptInput,
     Session,
     SessionCreate,
     ThreadCreate,
@@ -319,15 +318,11 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        model = payload.model
-        reasoning_effort = payload.reasoning_effort
-        if model:
-            await validate_execution_settings(session, model, reasoning_effort)
         thread = await codex_proxy().start_thread(
             session,
             workspace=payload.workspace,
-            model=model,
-            reasoning_effort=reasoning_effort,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
             dynamic_tools=payload.tools,
         )
         return thread
@@ -377,19 +372,32 @@ def create_api_router(
     ) -> dict[str, Any]:
         session = await repository().get_session(principal, session_id, touch=True)
         if cursor is None:
-            await load_thread(session, thread_id)
-        turns, next_cursor = await load_turn_page(
-            session,
-            thread_id,
-            cursor=cursor,
-            limit=limit,
-        )
+            _, execution_settings, turn_page = await asyncio.gather(
+                load_thread(session, thread_id),
+                codex_proxy().get_thread_settings(session, thread_id),
+                load_turn_page(
+                    session,
+                    thread_id,
+                    cursor=None,
+                    limit=limit,
+                ),
+            )
+            turns, next_cursor = turn_page
+        else:
+            execution_settings = None
+            turns, next_cursor = await load_turn_page(
+                session,
+                thread_id,
+                cursor=cursor,
+                limit=limit,
+            )
         detail: dict[str, Any] = {
             "messages": project_turn_messages(turns),
             "next_cursor": next_cursor,
         }
         if cursor is not None:
             return detail
+        detail.update(execution_settings)
         active_turn = next(
             (
                 turn
@@ -421,45 +429,6 @@ def create_api_router(
                 latest_run.get("error") or "Run failed"
             )
         return detail
-
-    @router.get(
-        "/api/sessions/{session_id}/threads/{thread_id}/settings",
-        response_model=ExecutionSettings,
-    )
-    async def get_thread_execution_settings(
-        session_id: UUID,
-        thread_id: str,
-        principal: Principal = Depends(resolve_principal),
-    ) -> dict[str, str | None]:
-        session = await repository().get_session(principal, session_id)
-        return await codex_proxy().get_thread_settings(session, thread_id)
-
-    @router.put(
-        "/api/sessions/{session_id}/threads/{thread_id}/settings",
-        response_model=ExecutionSettings,
-    )
-    async def update_thread_execution_settings(
-        session_id: UUID,
-        thread_id: str,
-        payload: ExecutionSettingsUpdate,
-        principal: Principal = Depends(resolve_principal),
-    ) -> dict[str, str]:
-        session = await repository().get_session(
-            principal,
-            session_id,
-            mode=AccessMode.WRITE,
-        )
-        await validate_execution_settings(
-            session,
-            payload.model,
-            payload.reasoning_effort,
-        )
-        return await codex_proxy().update_thread_settings(
-            session,
-            thread_id,
-            model=payload.model,
-            reasoning_effort=payload.reasoning_effort,
-        )
 
     @router.delete("/api/sessions/{session_id}/threads/{thread_id}")
     async def delete_thread(
@@ -505,39 +474,6 @@ def create_api_router(
         )
         return _brokered_response(run_broker(), run_id)
 
-    @router.post("/api/sessions/{session_id}/threads/{thread_id}/turns")
-    async def start_turn(
-        session_id: UUID,
-        thread_id: str,
-        payload: RunCreate,
-        principal: Principal = Depends(resolve_principal),
-    ) -> StreamingResponse:
-        session = await repository().get_session(
-            principal,
-            session_id,
-            mode=AccessMode.WRITE,
-            touch=True,
-        )
-        if payload.model:
-            await validate_execution_settings(
-                session,
-                payload.model,
-                payload.reasoning_effort,
-            )
-        run_id = str(uuid4())
-        await enqueue(
-            {
-                "kind": "start",
-                "runId": run_id,
-                "sessionId": str(session["id"]),
-                "threadId": thread_id,
-                "prompt": payload.prompt,
-                "model": payload.model,
-                "reasoningEffort": payload.reasoning_effort,
-            }
-        )
-        return _brokered_response(run_broker(), run_id)
-
     @router.post(
         "/api/sessions/{session_id}/threads/{thread_id}/turns/{turn_id}/interrupt"
     )
@@ -577,7 +513,7 @@ def create_api_router(
         session_id: UUID,
         thread_id: str,
         turn_id: str,
-        payload: RunCreate,
+        payload: PromptInput,
         principal: Principal = Depends(resolve_principal),
     ) -> dict[str, str]:
         session = await repository().get_session(

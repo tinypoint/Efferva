@@ -43,6 +43,9 @@ export function App() {
   );
   const [draftSettings, setDraftSettings] =
     useState<Required<ExecutionSettings> | null>(null);
+  const [executionSettingsByThread, setExecutionSettingsByThread] = useState<
+    Record<string, ExecutionSettings>
+  >({});
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.listSessions,
@@ -57,12 +60,9 @@ export function App() {
     queryFn: () => api.listModels(sessionId!),
     enabled: Boolean(sessionId),
   });
-  const threadSettings = useQuery({
-    queryKey: ["execution-settings", sessionId, threadId],
-    queryFn: () => api.getExecutionSettings(sessionId!, threadId!),
-    enabled: Boolean(sessionId && threadId),
-  });
-  const activeSettings = threadId ? threadSettings.data : draftSettings;
+  const activeSettings = threadId
+    ? executionSettingsByThread[threadId]
+    : draftSettings;
   const selectedModel =
     models.data?.find(
       (item) => item.model === activeSettings?.model,
@@ -108,40 +108,8 @@ export function App() {
     sessions.isLoading,
   ]);
 
-  useEffect(() => {
-    if (!threadId || !selectedModel || !threadSettings.data || !sessionId) {
-      return;
-    }
-    if (
-      threadSettings.data.model !== model ||
-      threadSettings.data.reasoning_effort !== reasoningEffort
-    ) {
-      const normalized: Required<ExecutionSettings> = {
-        model,
-        reasoning_effort: reasoningEffort,
-      };
-      queryClient.setQueryData(
-        ["execution-settings", sessionId, threadId],
-        normalized,
-      );
-      const queryKey = ["execution-settings", sessionId, threadId];
-      void api
-        .updateExecutionSettings(sessionId, threadId, normalized)
-        .catch(() => queryClient.invalidateQueries({ queryKey }));
-    }
-  }, [
-    threadSettings.data,
-    model,
-    queryClient,
-    reasoningEffort,
-    selectedModel,
-    sessionId,
-    threadId,
-  ]);
-
-  const persistExecutionSettings = useCallback(
+  const selectExecutionSettings = useCallback(
     (nextModel: string, nextEffort: string) => {
-      if (!sessionId) return;
       const settings: Required<ExecutionSettings> = {
         model: nextModel,
         reasoning_effort: nextEffort,
@@ -150,13 +118,12 @@ export function App() {
         setDraftSettings(settings);
         return;
       }
-      const queryKey = ["execution-settings", sessionId, threadId];
-      queryClient.setQueryData(queryKey, settings);
-      void api
-        .updateExecutionSettings(sessionId, threadId, settings)
-        .catch(() => queryClient.invalidateQueries({ queryKey }));
+      setExecutionSettingsByThread((current) => ({
+        ...current,
+        [threadId]: settings,
+      }));
     },
-    [queryClient, sessionId, threadId],
+    [threadId],
   );
 
   const handleModelChange = useCallback(
@@ -165,19 +132,19 @@ export function App() {
         (item) => item.model === nextModelId,
       );
       if (!nextModel) return;
-      persistExecutionSettings(
+      selectExecutionSettings(
         nextModel.model,
         nextModel.defaultReasoningEffort,
       );
     },
-    [models.data, persistExecutionSettings],
+    [models.data, selectExecutionSettings],
   );
 
   const handleReasoningEffortChange = useCallback(
     (nextEffort: string) => {
-      persistExecutionSettings(model, nextEffort);
+      selectExecutionSettings(model, nextEffort);
     },
-    [model, persistExecutionSettings],
+    [model, selectExecutionSettings],
   );
 
   const handleThreadCreated = useCallback(
@@ -197,13 +164,23 @@ export function App() {
         model,
         reasoning_effort: reasoningEffort,
       };
-      queryClient.setQueryData(
-        ["execution-settings", sessionId, thread.id],
-        settings,
-      );
+      setExecutionSettingsByThread((current) => ({
+        ...current,
+        [thread.id]: settings,
+      }));
       setDraftSettings(null);
     },
     [model, navigate, queryClient, reasoningEffort, sessionId],
+  );
+
+  const handleExecutionSettingsLoaded = useCallback(
+    (loadedThreadId: string, settings: ExecutionSettings) => {
+      setExecutionSettingsByThread((current) => ({
+        ...current,
+        [loadedThreadId]: settings,
+      }));
+    },
+    [],
   );
 
   const handleRunSettled = useCallback(
@@ -279,9 +256,7 @@ export function App() {
     threads.isLoading ||
     !threads.data ||
     models.isLoading ||
-    !models.data ||
-    (Boolean(threadId) &&
-      (threadSettings.isLoading || !threadSettings.data))
+    !models.data
   ) {
     return (
       <div className="grid h-screen place-items-center bg-background">
@@ -307,6 +282,7 @@ export function App() {
       skills={enabledSkills}
       onThreadCreated={handleThreadCreated}
       onThreadNameUpdated={handleThreadNameUpdated}
+      onExecutionSettingsLoaded={handleExecutionSettingsLoaded}
       onRunSettled={handleRunSettled}
       onThreadNotFound={handleThreadNotFound}
     >

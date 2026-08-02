@@ -42,20 +42,8 @@ class ThreadCreate(BaseModel):
         return posixpath.normpath(value)
 
 
-class RunCreate(BaseModel):
+class PromptInput(BaseModel):
     prompt: str = Field(min_length=1, max_length=1_000_000)
-    model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
-
-
-class ExecutionSettings(BaseModel):
-    model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
-
-
-class ExecutionSettingsUpdate(BaseModel):
-    model: str = Field(min_length=1, max_length=200)
-    reasoning_effort: str = Field(min_length=1, max_length=50)
 
 
 class PrincipalView(BaseModel):

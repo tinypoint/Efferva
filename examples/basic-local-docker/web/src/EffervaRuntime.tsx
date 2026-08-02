@@ -40,6 +40,7 @@ import { api, ApiError } from "./api";
 import type {
   AgUiMessage,
   CreateThreadInput,
+  ExecutionSettings,
   ModelOption,
   SkillMetadata,
   ThreadSummary,
@@ -488,6 +489,10 @@ type EffervaRuntimeProps = {
   children: ReactNode;
   onThreadCreated: (thread: ThreadSummary) => void;
   onThreadNameUpdated: (threadId: string, threadName: string) => void;
+  onExecutionSettingsLoaded: (
+    threadId: string,
+    settings: ExecutionSettings,
+  ) => void;
   onRunSettled: (threadId: string) => void;
   onThreadNotFound: (threadId: string) => void;
 };
@@ -505,6 +510,7 @@ export function EffervaRuntime({
   children,
   onThreadCreated,
   onThreadNameUpdated,
+  onExecutionSettingsLoaded,
   onRunSettled,
   onThreadNotFound,
 }: EffervaRuntimeProps) {
@@ -523,6 +529,7 @@ export function EffervaRuntime({
   const settingsRef = useRef({ model, reasoningEffort });
   const onThreadCreatedRef = useRef(onThreadCreated);
   const onThreadNameUpdatedRef = useRef(onThreadNameUpdated);
+  const onExecutionSettingsLoadedRef = useRef(onExecutionSettingsLoaded);
   const onRunSettledRef = useRef(onRunSettled);
   const onThreadNotFoundRef = useRef(onThreadNotFound);
   const createdThreadIdRef = useRef<string | null>(null);
@@ -530,6 +537,7 @@ export function EffervaRuntime({
   settingsRef.current = { model, reasoningEffort };
   onThreadCreatedRef.current = onThreadCreated;
   onThreadNameUpdatedRef.current = onThreadNameUpdated;
+  onExecutionSettingsLoadedRef.current = onExecutionSettingsLoaded;
   onRunSettledRef.current = onRunSettled;
   onThreadNotFoundRef.current = onThreadNotFound;
 
@@ -743,6 +751,10 @@ export function EffervaRuntime({
           ) {
             return;
           }
+          onExecutionSettingsLoadedRef.current(settledThreadId, {
+            model: detail.model,
+            reasoning_effort: detail.reasoning_effort,
+          });
           const refreshedMessages = restoreMessages(detail.messages);
           setHistoryMessages((current) =>
             mergeHistoryMessages(current, refreshedMessages),
@@ -834,6 +846,10 @@ export function EffervaRuntime({
           { signal: controller.signal },
         );
         if (!isCurrentNavigation()) return;
+        onExecutionSettingsLoadedRef.current(desiredThreadId, {
+          model: detail.model,
+          reasoning_effort: detail.reasoning_effort,
+        });
         const restoredMessages = restoreMessages(detail.messages);
         agent.threadId = desiredThreadId;
         agent.setMessages(restoredMessages);

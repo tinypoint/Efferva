@@ -31,6 +31,8 @@ export type AgUiMessage = Message & {
 export type ThreadHistoryPage = {
   messages: AgUiMessage[];
   next_cursor?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
   active_turn_id?: string | null;
   active_turn_started_at?: string | number | null;
   last_run_error?: string | null;

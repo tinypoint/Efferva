@@ -185,30 +185,6 @@ class CodexProxy:
         effort = str(result.get("reasoningEffort") or "").strip() or None
         return {"model": model, "reasoning_effort": effort}
 
-    async def update_thread_settings(
-        self,
-        session: Mapping[str, Any],
-        thread_id: str,
-        *,
-        model: str,
-        reasoning_effort: str,
-    ) -> dict[str, str]:
-        await self.request(
-            session,
-            "thread/resume",
-            {"threadId": thread_id, "excludeTurns": True},
-        )
-        await self.request(
-            session,
-            "thread/settings/update",
-            {
-                "threadId": thread_id,
-                "model": model,
-                "effort": reasoning_effort,
-            },
-        )
-        return {"model": model, "reasoning_effort": reasoning_effort}
-
     def _fetch_provider_model_ids(self) -> set[str]:
         base_url = str(self._settings.codex_openai_base_url).rstrip("/")
         headers = {"Accept": "application/json"}
