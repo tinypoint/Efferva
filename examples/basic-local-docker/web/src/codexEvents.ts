@@ -29,16 +29,19 @@ export class CodexEvents {
   private currentSequence = 0;
   private readonly activeTurns = new Map<string, CodexEvent[]>();
   private readonly subscriptions = new Set<CodexEventSubscription>();
-  private readonly unsubscribeNotification: () => void;
+  private unsubscribeNotification?: () => void;
 
-  constructor(client: CodexClient) {
-    this.unsubscribeNotification = client.onNotification((notification) => {
-      this.publish(notification);
-    });
-  }
+  constructor(private readonly client: CodexClient) {}
 
   get sequence(): number {
     return this.currentSequence;
+  }
+
+  open(): void {
+    if (this.unsubscribeNotification) return;
+    this.unsubscribeNotification = this.client.onNotification((notification) => {
+      this.publish(notification);
+    });
   }
 
   subscribe(
@@ -56,11 +59,14 @@ export class CodexEvents {
       }
     }
     this.subscriptions.add(subscription);
-    return () => this.subscriptions.delete(subscription);
+    return () => {
+      this.subscriptions.delete(subscription);
+    };
   }
 
   close(): void {
-    this.unsubscribeNotification();
+    this.unsubscribeNotification?.();
+    this.unsubscribeNotification = undefined;
     this.subscriptions.clear();
     this.activeTurns.clear();
   }
@@ -89,6 +95,10 @@ export class CodexEvents {
   private deliver(subscription: CodexEventSubscription, event: CodexEvent): void {
     if (event.sequence <= subscription.after) return;
     if (subscription.threadId && subscription.threadId !== event.threadId) return;
-    subscription.handler(event);
+    try {
+      subscription.handler(event);
+    } catch (cause) {
+      console.error("Codex event subscriber failed", cause);
+    }
   }
 }

@@ -559,17 +559,17 @@ export class CodexAgent extends AbstractAgent {
     const unsubscribeNotification = this.events.subscribe(({ notification }) => {
       const params = asObject(notification.params);
       if (turnId && params.turnId && String(params.turnId) !== turnId) return;
+      if (notification.method === "turn/completed") {
+        settled = true;
+        this.activeTurn = undefined;
+        resolveCompletion();
+      }
       this.projectNotification(
         notification,
         projection,
         startedTools,
         subscriber,
         (nativeTurnId, startedAt) => finishStepStart(nativeTurnId, startedAt),
-        () => {
-          settled = true;
-          this.activeTurn = undefined;
-          resolveCompletion();
-        },
         runId,
         threadId,
         mirrorUserMessages,
@@ -614,7 +614,6 @@ export class CodexAgent extends AbstractAgent {
     startedTools: Set<string>,
     subscriber: Subscriber<BaseEvent>,
     onStarted: (turnId: string, startedAt?: number | null) => void,
-    onSettled: () => void,
     runId: string,
     threadId: string,
     mirrorUserMessages: boolean,
@@ -759,7 +758,6 @@ export class CodexAgent extends AbstractAgent {
           }),
         );
       }
-      onSettled();
       return;
     }
     subscriber.next(event({ type: "RAW", event: notification }));

@@ -61,9 +61,12 @@ export function App() {
     [codex],
   );
   useEffect(
-    () => () => {
-      codexEvents?.close();
-      codex?.close();
+    () => {
+      codexEvents?.open();
+      return () => {
+        codexEvents?.close();
+        codex?.close();
+      };
     },
     [codex, codexEvents],
   );
