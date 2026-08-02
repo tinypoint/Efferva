@@ -9,13 +9,20 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         "@": new URL("./src", import.meta.url).pathname,
+        "@efferva/codex-client": new URL(
+          "../../../packages/codex-client/src/index.ts",
+          import.meta.url,
+        ).pathname,
       },
     },
     server: {
       host: "0.0.0.0",
       port: 5173,
       proxy: {
-        "/agent": env.EFFERVA_API_PROXY_TARGET ?? "http://localhost:8080",
+        "/agent": {
+          target: env.EFFERVA_API_PROXY_TARGET ?? "http://localhost:8080",
+          ws: true,
+        },
       },
     },
   };

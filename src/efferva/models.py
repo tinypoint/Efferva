@@ -61,14 +61,8 @@ class RunAgentInput(BaseModel):
 
 
 class CodexControlInput(BaseModel):
-    run_id: str | None = Field(
-        default=None,
-        alias="runId",
-        min_length=1,
-        max_length=200,
-    )
     action: Literal[
-        "plan.enable",
+        "plan.toggle",
         "goal.get",
         "goal.clear",
         "goal.status",
@@ -76,12 +70,3 @@ class CodexControlInput(BaseModel):
     ]
     status: Literal["active", "paused"] | None = None
     objective: str | None = Field(default=None, min_length=1, max_length=1_000_000)
-    model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: str | None = Field(
-        default=None,
-        alias="reasoningEffort",
-        min_length=1,
-        max_length=50,
-    )
-
-    model_config = {"populate_by_name": True}

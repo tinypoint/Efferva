@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { api } from "./api";
 import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
 import type {
+  CollaborationMode,
   ExecutionSettings,
   ThreadSummary,
 } from "./types";
@@ -77,6 +78,8 @@ export function App() {
     )?.reasoningEffort ??
     selectedModel?.defaultReasoningEffort ??
     "low";
+  const collaborationMode: CollaborationMode =
+    activeSettings?.collaboration_mode === "plan" ? "plan" : "default";
   const selectedThread = threads.data?.find((item) => item.id === threadId);
   const skills = useQuery({
     queryKey: ["skills", sessionId, selectedThread?.cwd],
@@ -110,17 +113,22 @@ export function App() {
 
   const selectExecutionSettings = useCallback(
     (nextModel: string, nextEffort: string) => {
-      const settings: Required<ExecutionSettings> = {
-        model: nextModel,
-        reasoning_effort: nextEffort,
-      };
       if (!threadId) {
-        setDraftSettings(settings);
+        setDraftSettings((current) => ({
+          model: nextModel,
+          reasoning_effort: nextEffort,
+          collaboration_mode: current?.collaboration_mode ?? "default",
+        }));
         return;
       }
       setExecutionSettingsByThread((current) => ({
         ...current,
-        [threadId]: settings,
+        [threadId]: {
+          model: nextModel,
+          reasoning_effort: nextEffort,
+          collaboration_mode:
+            current[threadId]?.collaboration_mode ?? "default",
+        },
       }));
     },
     [threadId],
@@ -163,6 +171,7 @@ export function App() {
       const settings: Required<ExecutionSettings> = {
         model,
         reasoning_effort: reasoningEffort,
+        collaboration_mode: "default",
       };
       setExecutionSettingsByThread((current) => ({
         ...current,
@@ -177,10 +186,28 @@ export function App() {
     (loadedThreadId: string, settings: ExecutionSettings) => {
       setExecutionSettingsByThread((current) => ({
         ...current,
-        [loadedThreadId]: settings,
+        [loadedThreadId]: {
+          ...settings,
+          collaboration_mode: settings.collaboration_mode ?? "default",
+        },
       }));
     },
     [],
+  );
+
+  const handleCollaborationModeChange = useCallback(
+    (updatedThreadId: string, nextMode: CollaborationMode) => {
+      setExecutionSettingsByThread((current) => ({
+        ...current,
+        [updatedThreadId]: {
+          model: current[updatedThreadId]?.model ?? model,
+          reasoning_effort:
+            current[updatedThreadId]?.reasoning_effort ?? reasoningEffort,
+          collaboration_mode: nextMode,
+        },
+      }));
+    },
+    [model, reasoningEffort],
   );
 
   const handleRunSettled = useCallback(
@@ -275,9 +302,11 @@ export function App() {
       threadId={threadId}
       model={model}
       reasoningEffort={reasoningEffort}
+      collaborationMode={collaborationMode}
       models={models.data}
       onModelChange={handleModelChange}
       onReasoningEffortChange={handleReasoningEffortChange}
+      onCollaborationModeChange={handleCollaborationModeChange}
       workspace={selectedThread?.cwd}
       skills={enabledSkills}
       onThreadCreated={handleThreadCreated}

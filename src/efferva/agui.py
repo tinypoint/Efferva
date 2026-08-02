@@ -27,7 +27,6 @@ async def stream_agui_turn(
     run_id: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    collaboration_mode: str | None = None,
     workspace: str | None = None,
     tools: list[dict[str, Any]] | None = None,
     inputs: list[dict[str, Any]] | None = None,
@@ -65,7 +64,6 @@ async def stream_agui_turn(
                 workspace=workspace,
                 model=model,
                 reasoning_effort=reasoning_effort,
-                collaboration_mode=collaboration_mode,
                 dynamic_tools=tools,
                 extra_inputs=inputs,
             )
@@ -76,7 +74,6 @@ async def stream_agui_turn(
                 prompt,
                 model=model,
                 reasoning_effort=reasoning_effort,
-                collaboration_mode=collaboration_mode,
                 extra_inputs=inputs,
             )
         )

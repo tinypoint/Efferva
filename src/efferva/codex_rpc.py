@@ -116,6 +116,18 @@ class CodexRpcClient:
         self,
         session: Mapping[str, Any],
     ) -> AsyncIterator[CodexConnection]:
+        async with self.raw_connection(session) as websocket:
+            connection = CodexConnection(self, websocket, session)
+            await self._initialize(connection)
+            yield connection
+
+    @asynccontextmanager
+    async def raw_connection(
+        self,
+        session: Mapping[str, Any],
+    ) -> AsyncIterator[ClientConnection]:
+        """Open the authenticated transport without interpreting Codex messages."""
+
         url, headers = await self._app_servers.connection_target(session)
         last_error: Exception | None = None
         for attempt in range(8):
@@ -126,7 +138,7 @@ class CodexRpcClient:
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,
-                    max_size=16 * 1024 * 1024,
+                    max_size=128 * 1024 * 1024,
                 )
                 break
             except Exception as error:
@@ -139,9 +151,7 @@ class CodexRpcClient:
         else:
             raise RuntimeError(str(last_error))
         try:
-            connection = CodexConnection(self, websocket, session)
-            await self._initialize(connection)
-            yield connection
+            yield websocket
         finally:
             await websocket.close()
 

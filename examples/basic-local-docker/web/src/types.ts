@@ -33,6 +33,7 @@ export type ThreadHistoryPage = {
   next_cursor?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
+  collaboration_mode?: CollaborationMode | null;
   active_turn_id?: string | null;
   active_turn_started_at?: string | number | null;
   last_run_error?: string | null;
@@ -56,6 +57,22 @@ export type ModelOption = {
 export type ExecutionSettings = {
   model?: string | null;
   reasoning_effort?: string | null;
+  collaboration_mode?: CollaborationMode | null;
+};
+
+export type CollaborationMode = "default" | "plan";
+
+export type CodexControl =
+  | { action: "plan.toggle" }
+  | { action: "goal.get" }
+  | { action: "goal.clear" }
+  | { action: "goal.status"; status: "active" | "paused" }
+  | { action: "goal.set"; objective: string };
+
+export type CodexControlResult = {
+  action: CodexControl["action"];
+  message: string;
+  collaboration_mode?: CollaborationMode | null;
 };
 
 export type SkillMetadata = {

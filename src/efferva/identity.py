@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from starlette.requests import Request
+from starlette.requests import HTTPConnection
 
 # These values are persisted by migration 002. Keep them stable across the
 # public AgentFrame -> Efferva rename so existing databases remain readable.
@@ -49,7 +49,7 @@ class Principal:
 
 
 class IdentityResolver(Protocol):
-    def __call__(self, request: Request) -> Awaitable[Principal]: ...
+    def __call__(self, connection: HTTPConnection) -> Awaitable[Principal]: ...
 
 
 class UnauthenticatedError(PermissionError):

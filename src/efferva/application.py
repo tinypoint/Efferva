@@ -13,6 +13,7 @@ from efferva.codex import CodexGateway
 from efferva.codex_appserver import CodexAppServerManager
 from efferva.codex_release import prepare_official_codex
 from efferva.codex_rpc import CodexRpcClient, CodexRpcError, ServerRequestHandler
+from efferva.codex_tunnel import RedisCodexTunnel
 from efferva.config import (
     Settings,
     get_settings,
@@ -38,6 +39,7 @@ from efferva.sandbox.manager import create_sandbox_control_plane
 class _RuntimeResources:
     repository: SessionRepository | None = None
     gateway: CodexGateway | None = None
+    tunnel: RedisCodexTunnel | None = None
     broker: RedisRunBroker | None = None
     runs: RunRepository | None = None
 
@@ -50,6 +52,11 @@ class _RuntimeResources:
         if self.gateway is None:
             raise RuntimeError("Efferva application has not started")
         return self.gateway
+
+    def require_tunnel(self) -> RedisCodexTunnel:
+        if self.tunnel is None:
+            raise RuntimeError("Efferva application has not started")
+        return self.tunnel
 
     def require_broker(self) -> RedisRunBroker:
         if self.broker is None:
@@ -112,9 +119,17 @@ class Efferva:
                 event_max_bytes=settings.redis_event_max_bytes,
                 command_max_bytes=settings.redis_command_max_bytes,
             )
+            tunnel = RedisCodexTunnel(
+                settings.redis_url,
+                prefix=settings.redis_prefix,
+                ttl_seconds=settings.redis_run_ttl_seconds,
+                lease_seconds=settings.worker_lease_seconds,
+                dispatch_queue_capacity=settings.redis_dispatch_queue_capacity,
+            )
             sandboxes = None
             await database.open()
             await broker.open()
+            await tunnel.open()
             try:
                 await database.initialize(schema)
                 repository = SessionRepository(
@@ -146,12 +161,14 @@ class Efferva:
                 )
                 resources.repository = repository
                 resources.gateway = gateway
+                resources.tunnel = tunnel
                 resources.broker = broker
                 resources.runs = runs
                 yield
             finally:
                 resources.runs = None
                 resources.broker = None
+                resources.tunnel = None
                 resources.gateway = None
                 resources.repository = None
                 try:
@@ -159,9 +176,12 @@ class Efferva:
                         await sandboxes.close()
                 finally:
                     try:
-                        await broker.close()
+                        await tunnel.close()
                     finally:
-                        await database.close()
+                        try:
+                            await broker.close()
+                        finally:
+                            await database.close()
 
         router = APIRouter(lifespan=lifespan)
         router.include_router(
@@ -169,6 +189,7 @@ class Efferva:
                 identity=self.identity,
                 repository=resources.require_repository,
                 codex_gateway=resources.require_gateway,
+                codex_tunnel=resources.require_tunnel,
                 run_broker=resources.require_broker,
                 runs=resources.require_runs,
             )

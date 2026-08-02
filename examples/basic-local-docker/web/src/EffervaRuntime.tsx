@@ -12,13 +12,7 @@ import {
   type ReactNode,
   type UIEvent,
 } from "react";
-import {
-  HttpAgent,
-  type BaseEvent,
-  type HttpAgentConfig,
-  type Message,
-  type RunAgentInput,
-} from "@ag-ui/client";
+import { type Message } from "@ag-ui/client";
 import {
   CopilotChatConfigurationProvider,
   CopilotChatAssistantMessage,
@@ -35,11 +29,14 @@ import {
   type CopilotChatInputProps,
   type ToolsMenuItem,
 } from "@copilotkit/react-core/v2";
-import { from, type Observable } from "rxjs";
 
 import { api, ApiError } from "./api";
+import { CodexAgent, type CodexRunConfig } from "./CodexAgent";
 import type {
   AgUiMessage,
+  CodexControl,
+  CodexControlResult,
+  CollaborationMode,
   ExecutionSettings,
   ModelOption,
   SkillMetadata,
@@ -53,171 +50,32 @@ const AGENT_UPDATES = [
   UseAgentUpdate.OnRunStatusChanged,
 ];
 
-type ResumeSource = {
-  sessionId: string;
-  threadId: string;
-  turnId: string;
-  signal: AbortSignal;
-};
-
-type CodexControl =
-  | { action: "plan.enable" }
-  | { action: "goal.get" }
-  | { action: "goal.clear" }
-  | { action: "goal.status"; status: "active" | "paused" }
-  | { action: "goal.set"; objective: string };
-
-type RunOverrides = {
-  collaborationMode?: "plan";
-  control?: CodexControl;
-};
-
-type ComposerSubmission = {
-  prompt: string;
-  overrides?: RunOverrides;
-};
-
-function submissionFromPrompt(prompt: string): ComposerSubmission {
+function controlFromPrompt(prompt: string): CodexControl | null {
   const command = prompt.match(/^\/(plan|goal)(?:\s+([\s\S]*))?$/u);
-  if (!command) return { prompt };
+  if (!command) return null;
   const name = command[1];
   const argument = (command[2] ?? "").trim();
   if (name === "plan") {
-    return argument
-      ? { prompt: argument, overrides: { collaborationMode: "plan" } }
-      : { prompt, overrides: { control: { action: "plan.enable" } } };
+    return argument ? null : { action: "plan.toggle" };
   }
   if (!argument) {
-    return { prompt, overrides: { control: { action: "goal.get" } } };
+    return { action: "goal.get" };
   }
   if (argument === "clear") {
-    return { prompt, overrides: { control: { action: "goal.clear" } } };
+    return { action: "goal.clear" };
   }
   if (argument === "pause") {
-    return {
-      prompt,
-      overrides: {
-        control: { action: "goal.status", status: "paused" },
-      },
-    };
+    return { action: "goal.status", status: "paused" };
   }
   if (argument === "resume") {
-    return {
-      prompt,
-      overrides: {
-        control: { action: "goal.status", status: "active" },
-      },
-    };
+    return { action: "goal.status", status: "active" };
   }
   return {
-    prompt,
-    overrides: {
-      control: {
-        action: "goal.set",
-        objective: argument.startsWith("edit ")
-          ? argument.slice("edit ".length).trim()
-          : argument,
-      },
-    },
+    action: "goal.set",
+    objective: argument.startsWith("edit ")
+      ? argument.slice("edit ".length).trim()
+      : argument,
   };
-}
-
-class CodexControlAgent extends HttpAgent {
-  constructor(
-    config: HttpAgentConfig,
-    private readonly control: CodexControl,
-  ) {
-    super(config);
-  }
-
-  protected override requestInit(input: RunAgentInput): RequestInit {
-    const forwarded =
-      typeof input.forwardedProps === "object" && input.forwardedProps
-        ? input.forwardedProps as Record<string, unknown>
-        : {};
-    return {
-      ...super.requestInit(input),
-      body: JSON.stringify({
-        runId: input.runId,
-        ...this.control,
-        ...(typeof forwarded.model === "string"
-          ? { model: forwarded.model }
-          : {}),
-        ...(typeof forwarded.reasoningEffort === "string"
-          ? { reasoningEffort: forwarded.reasoningEffort }
-          : {}),
-      }),
-    };
-  }
-}
-
-class EffervaAgent extends HttpAgent {
-  private resumeSource?: ResumeSource;
-  private runOverrides?: RunOverrides;
-  private controlAgent?: CodexControlAgent;
-
-  constructor(
-    config: HttpAgentConfig,
-    private readonly sessionId: string,
-  ) {
-    super(config);
-  }
-
-  setResumeSource(source: ResumeSource) {
-    this.resumeSource = source;
-  }
-
-  setRunOverrides(overrides?: RunOverrides) {
-    this.runOverrides = overrides;
-  }
-
-  getRunOverrides() {
-    return this.runOverrides;
-  }
-
-  override run(input: RunAgentInput): Observable<BaseEvent> {
-    const forwarded =
-      typeof input.forwardedProps === "object" && input.forwardedProps
-        ? input.forwardedProps as Record<string, unknown>
-        : {};
-    const control = forwarded.control as CodexControl | undefined;
-    if (!control) {
-      this.controlAgent = undefined;
-      return super.run(input);
-    }
-    const controlAgent = new CodexControlAgent(
-      {
-        agentId: AGENT_ID,
-        threadId: input.threadId,
-        url: `/agent/api/sessions/${encodeURIComponent(this.sessionId)}/threads/${encodeURIComponent(input.threadId)}/controls`,
-        headers: this.headers,
-        fetch: this.fetch,
-      },
-      control,
-    );
-    this.controlAgent = controlAgent;
-    return controlAgent.run(input);
-  }
-
-  override abortRun() {
-    this.controlAgent?.abortRun();
-    this.controlAgent = undefined;
-    super.abortRun();
-  }
-
-  protected override connect(_input: RunAgentInput): Observable<BaseEvent> {
-    const source = this.resumeSource;
-    this.resumeSource = undefined;
-    if (!source) return from([]);
-    return from(
-      api.resumeThread(
-        source.sessionId,
-        source.threadId,
-        source.turnId,
-        source.signal,
-      ),
-    ) as Observable<BaseEvent>;
-  }
 }
 
 function restoreMessages(messages: AgUiMessage[]): Message[] {
@@ -604,10 +462,12 @@ type RuntimeContextValue = {
   models: ModelOption[];
   model: string;
   reasoningEffort: string;
+  collaborationMode: CollaborationMode;
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (
     effort: string,
   ) => void;
+  runControl: (control: CodexControl) => Promise<CodexControlResult | null>;
 };
 
 const RuntimeContext = createContext<RuntimeContextValue | null>(null);
@@ -617,10 +477,15 @@ type EffervaRuntimeProps = {
   threadId?: string;
   model?: string;
   reasoningEffort: string;
+  collaborationMode: CollaborationMode;
   models: ModelOption[];
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (
     effort: string,
+  ) => void;
+  onCollaborationModeChange: (
+    threadId: string,
+    mode: CollaborationMode,
   ) => void;
   workspace?: string | null;
   skills: SkillMetadata[];
@@ -640,9 +505,11 @@ export function EffervaRuntime({
   threadId,
   model,
   reasoningEffort,
+  collaborationMode,
   models,
   onModelChange,
   onReasoningEffortChange,
+  onCollaborationModeChange,
   workspace,
   skills,
   children,
@@ -664,7 +531,13 @@ export function EffervaRuntime({
   const olderHistoryRequestRef = useRef<AbortController | null>(null);
   const navigationEpochRef = useRef(0);
   const desiredThreadIdRef = useRef(desiredThreadId);
-  const settingsRef = useRef({ model, reasoningEffort });
+  const settingsRef = useRef<CodexRunConfig>({
+    model,
+    reasoningEffort,
+    workspace,
+    skills,
+    collaborationMode,
+  });
   const onThreadCreatedRef = useRef(onThreadCreated);
   const onThreadNameUpdatedRef = useRef(onThreadNameUpdated);
   const onExecutionSettingsLoadedRef = useRef(onExecutionSettingsLoaded);
@@ -672,7 +545,13 @@ export function EffervaRuntime({
   const onThreadNotFoundRef = useRef(onThreadNotFound);
   const createdThreadIdRef = useRef<string | null>(null);
   desiredThreadIdRef.current = desiredThreadId;
-  settingsRef.current = { model, reasoningEffort };
+  settingsRef.current = {
+    model,
+    reasoningEffort,
+    workspace,
+    skills,
+    collaborationMode,
+  };
   onThreadCreatedRef.current = onThreadCreated;
   onThreadNameUpdatedRef.current = onThreadNameUpdated;
   onExecutionSettingsLoadedRef.current = onExecutionSettingsLoaded;
@@ -680,36 +559,10 @@ export function EffervaRuntime({
   onThreadNotFoundRef.current = onThreadNotFound;
 
   const agent = useMemo(() => {
-    const current = new EffervaAgent(
-      {
-        agentId: AGENT_ID,
-        threadId: threadId ?? "new",
-        url: `/agent/api/sessions/${encodeURIComponent(sessionId)}/ag-ui`,
-      },
-      sessionId,
-    );
-    current.use((input, next) => {
-      const forwarded =
-        typeof input.forwardedProps === "object" && input.forwardedProps
-          ? input.forwardedProps
-          : {};
-      const settings = settingsRef.current;
-      const overrides = current.getRunOverrides();
-      return next.run({
-        ...input,
-        threadId: current.threadId,
-        forwardedProps: {
-          ...forwarded,
-          ...(settings.model?.trim()
-            ? { model: settings.model.trim() }
-            : {}),
-          reasoningEffort: settings.reasoningEffort,
-          ...overrides,
-        },
-      });
-    });
-    return current;
+    return new CodexAgent(sessionId, () => settingsRef.current);
   }, [sessionId]);
+
+  useEffect(() => () => agent.client.close(), [agent]);
 
   const loadOlderHistory = useCallback(async (): Promise<boolean> => {
     const cursor = historyCursor;
@@ -770,6 +623,117 @@ export function EffervaRuntime({
       }
     }
   }, [historyCursor, sessionId]);
+
+  const runControl = useCallback(
+    async (control: CodexControl): Promise<CodexControlResult | null> => {
+      const currentThreadId = desiredThreadIdRef.current;
+      if (currentThreadId === "new") {
+        setError("Send a message before using thread controls.");
+        return null;
+      }
+      if (agent.isRunning) {
+        setError("Wait for the active turn to finish before changing thread state.");
+        return null;
+      }
+      try {
+        let result: CodexControlResult;
+        if (control.action === "plan.toggle") {
+          const target =
+            settingsRef.current.collaborationMode === "plan"
+              ? "default"
+              : "plan";
+          const response = await agent.client.request<{
+            data: Array<{
+              name: string;
+              mode?: string | null;
+              model?: string | null;
+              reasoning_effort?: string | null;
+            }>;
+          }>("collaborationMode/list", {});
+          const preset = response.data.find(
+            (item) =>
+              item.name.toLocaleLowerCase() === target ||
+              item.mode?.toLocaleLowerCase() === target,
+          );
+          if (!preset) throw new Error(`Codex does not provide ${target} mode`);
+          const selectedModel =
+            settingsRef.current.model || preset.model || undefined;
+          if (!selectedModel) throw new Error(`${target} mode has no model`);
+          await agent.client.request("thread/settings/update", {
+            threadId: currentThreadId,
+            collaborationMode: {
+              mode: target,
+              settings: {
+                model: selectedModel,
+                reasoning_effort:
+                  settingsRef.current.reasoningEffort ||
+                  preset.reasoning_effort ||
+                  null,
+                developer_instructions: null,
+              },
+            },
+          });
+          result = {
+            action: control.action,
+            message:
+              target === "plan"
+                ? "Plan mode enabled."
+                : "Plan mode disabled.",
+            collaboration_mode: target,
+          };
+        } else if (control.action === "goal.get") {
+          const response = await agent.client.request<{
+            goal: { objective: string; status: string } | null;
+          }>("thread/goal/get", { threadId: currentThreadId });
+          result = {
+            action: control.action,
+            message: response.goal
+              ? `Goal: ${response.goal.objective} (${response.goal.status})`
+              : "No goal is set.",
+          };
+        } else if (control.action === "goal.clear") {
+          const response = await agent.client.request<{ cleared: boolean }>(
+            "thread/goal/clear",
+            { threadId: currentThreadId },
+          );
+          result = {
+            action: control.action,
+            message: response.cleared ? "Goal cleared." : "No goal was set.",
+          };
+        } else {
+          const response = await agent.client.request<{
+            goal: { objective: string; status: string };
+          }>("thread/goal/set", {
+            threadId: currentThreadId,
+            ...(control.action === "goal.set"
+              ? { objective: control.objective, status: "active" }
+              : { status: control.status }),
+          });
+          result = {
+            action: control.action,
+            message:
+              control.action === "goal.set"
+                ? `Goal set: ${response.goal.objective}`
+                : `Goal ${response.goal.status}: ${response.goal.objective}`,
+          };
+        }
+        setError(null);
+        if (result.collaboration_mode) {
+          onCollaborationModeChange(
+            currentThreadId,
+            result.collaboration_mode,
+          );
+        }
+        return result;
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Thread control failed",
+        );
+        return null;
+      }
+    },
+    [agent, onCollaborationModeChange],
+  );
 
   useEffect(() => {
     let activeRunId: string | null = null;
@@ -896,6 +860,7 @@ export function EffervaRuntime({
           onExecutionSettingsLoadedRef.current(settledThreadId, {
             model: detail.model,
             reasoning_effort: detail.reasoning_effort,
+            collaboration_mode: detail.collaboration_mode,
           });
           const refreshedMessages = restoreMessages(detail.messages);
           setHistoryMessages((current) =>
@@ -991,6 +956,7 @@ export function EffervaRuntime({
         onExecutionSettingsLoadedRef.current(desiredThreadId, {
           model: detail.model,
           reasoning_effort: detail.reasoning_effort,
+          collaboration_mode: detail.collaboration_mode,
         });
         const restoredMessages = restoreMessages(detail.messages);
         agent.threadId = desiredThreadId;
@@ -1009,10 +975,8 @@ export function EffervaRuntime({
         setOpenedThreadId(desiredThreadId);
         if (detail.active_turn_id) {
           agent.setResumeSource({
-            sessionId,
             threadId: desiredThreadId,
             turnId: detail.active_turn_id,
-            signal: controller.signal,
           });
           void agent.connectAgent().catch((cause: unknown) => {
             if (isCurrentNavigation()) {
@@ -1066,8 +1030,10 @@ export function EffervaRuntime({
       models,
       model: model ?? "",
       reasoningEffort,
+      collaborationMode,
       onModelChange,
       onReasoningEffortChange,
+      runControl,
     }),
     [
       error,
@@ -1076,11 +1042,13 @@ export function EffervaRuntime({
       historyRevision,
       loadOlderHistory,
       loadingOlderHistory,
+      collaborationMode,
       model,
       models,
       onModelChange,
       onReasoningEffortChange,
       reasoningEffort,
+      runControl,
       sessionId,
       skills,
       openingThread,
@@ -1154,6 +1122,11 @@ function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
           </option>
         ))}
       </select>
+      {runtime.collaborationMode === "plan" && (
+        <span className="h-8 rounded-md bg-muted px-2 text-xs font-medium leading-8">
+          Plan
+        </span>
+      )}
     </div>
   );
 }
@@ -1389,20 +1362,30 @@ export function EffervaChat() {
         return;
       }
       setInput("");
-      const submission = submissionFromPrompt(prompt);
-      agent.setRunOverrides(submission.overrides);
+      const control = controlFromPrompt(prompt);
+      if (control) {
+        const result = await runtime.runControl(control);
+        if (!result || control.action === "plan.toggle") return;
+        agent.addMessage({
+          id: crypto.randomUUID(),
+          role: "user",
+          content: prompt,
+        });
+        agent.addMessage({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: result.message,
+        });
+        return;
+      }
       agent.addMessage({
         id: crypto.randomUUID(),
         role: "user",
-        content: submission.prompt,
+        content: prompt,
       });
-      try {
-        await copilotkit.runAgent({ agent });
-      } finally {
-        agent.setRunOverrides();
-      }
+      await copilotkit.runAgent({ agent });
     },
-    [agent, copilotkit, runtime.loading],
+    [agent, copilotkit, runtime.loading, runtime.runControl],
   );
 
   useEffect(() => {
@@ -1479,7 +1462,7 @@ export function EffervaChat() {
     }
     if (trigger.char === "/") {
       return [
-        { value: "plan", label: "/plan", description: "Enter Plan mode" },
+        { value: "plan", label: "/plan", description: "Toggle Plan mode" },
         { value: "goal", label: "/goal", description: "Manage the thread goal" },
       ].filter((item) => item.value.includes(query));
     }
@@ -1522,28 +1505,15 @@ export function EffervaChat() {
   );
 
   const stop = useCallback(() => {
-    const state =
-      typeof agent.state === "object" && agent.state
-        ? (agent.state as Record<string, unknown>)
-        : {};
-    const activeThreadId = String(state.threadId ?? agent.threadId ?? "");
-    const turnId = String(state.turnId ?? "");
-    if (activeThreadId && activeThreadId !== "new" && turnId) {
-      void api.interruptTurn(runtime.sessionId, activeThreadId, turnId);
-    }
-    agent.abortRun();
-  }, [agent, runtime.sessionId]);
+    void (agent as CodexAgent).interrupt();
+  }, [agent]);
 
   const steer = useCallback(() => {
     const prompt = input.trim();
     if (!prompt) return;
-    const state = agent.state as Record<string, unknown>;
-    const activeThreadId = String(state.threadId ?? agent.threadId ?? "");
-    const turnId = String(state.turnId ?? "");
-    if (!activeThreadId || !turnId) return;
     setInput("");
-    void api.steerTurn(runtime.sessionId, activeThreadId, turnId, prompt);
-  }, [agent, input, runtime.sessionId]);
+    void (agent as CodexAgent).steer(prompt);
+  }, [agent, input]);
 
   return (
     <div className="relative h-full min-h-0">

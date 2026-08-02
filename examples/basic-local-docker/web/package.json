@@ -9,6 +9,7 @@
     "check": "tsc -b"
   },
   "dependencies": {
+    "@efferva/codex-client": "file:../../../packages/codex-client",
     "@ag-ui/client": "^0.0.57",
     "@base-ui/react": "^1.6.0",
     "@copilotkit/react-core": "^1.64.2",

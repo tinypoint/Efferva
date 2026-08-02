@@ -155,7 +155,19 @@ class CodexGateway:
                 {"message": "response did not include the effective model"},
             )
         effort = str(result.get("reasoningEffort") or "").strip() or None
-        return {"model": model, "reasoning_effort": effort}
+        thread = result.get("thread")
+        extra = thread.get("extra") if isinstance(thread, Mapping) else None
+        collaboration_mode = (
+            str(extra.get("collaborationMode", {}).get("mode") or "").strip()
+            if isinstance(extra, Mapping)
+            and isinstance(extra.get("collaborationMode"), Mapping)
+            else ""
+        )
+        return {
+            "model": model,
+            "reasoning_effort": effort,
+            "collaboration_mode": collaboration_mode or None,
+        }
 
     def _fetch_provider_model_ids(self) -> set[str]:
         base_url = str(self._settings.codex_openai_base_url).rstrip("/")
@@ -221,37 +233,66 @@ class CodexGateway:
         )
         return list(result.get("files") or [])
 
-    async def set_plan_mode(
+    async def toggle_plan_mode(
         self,
         session: Mapping[str, Any],
         thread_id: str,
-        *,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-    ) -> None:
-        await self._request(
-            session,
-            "thread/resume",
-            {"threadId": thread_id, "excludeTurns": True},
-        )
-        params: dict[str, Any] = {
+    ) -> str:
+        settings = await self.get_thread_settings(session, thread_id)
+        current = str(settings["collaboration_mode"] or "default").casefold()
+        target = "default" if current == "plan" else "plan"
+        params = {
             "threadId": thread_id,
             "collaborationMode": await self._collaboration_mode(
                 session,
-                "plan",
-                model=model,
-                reasoning_effort=reasoning_effort,
+                target,
+                model=settings["model"],
+                reasoning_effort=settings["reasoning_effort"],
             ),
         }
-        if model:
-            params["model"] = model
-        if reasoning_effort:
-            params["effort"] = reasoning_effort
-        await self._request(
-            session,
-            "thread/settings/update",
-            params,
-        )
+        async with self._rpc.connection(session) as connection:
+            request_id = await connection.start_request(
+                "thread/settings/update",
+                params,
+            )
+            acknowledged = False
+            applied = False
+            try:
+                async with asyncio.timeout(10):
+                    while not (acknowledged and applied):
+                        message = await connection.receive()
+                        if "method" in message and "id" in message:
+                            await connection.handle_server_request(message)
+                            continue
+                        if message.get("id") == request_id:
+                            if "error" in message:
+                                raise CodexRpcError(
+                                    "thread/settings/update",
+                                    dict(message["error"]),
+                                )
+                            acknowledged = True
+                            continue
+                        if message.get("method") != "thread/settings/updated":
+                            continue
+                        notification = message.get("params")
+                        if not isinstance(notification, Mapping):
+                            continue
+                        if str(notification.get("threadId") or "") != thread_id:
+                            continue
+                        thread_settings = notification.get("threadSettings")
+                        if not isinstance(thread_settings, Mapping):
+                            continue
+                        mode = thread_settings.get("collaborationMode")
+                        applied = (
+                            isinstance(mode, Mapping)
+                            and str(mode.get("mode") or "").casefold() == target
+                        )
+            except TimeoutError as error:
+                raise CodexRpcError(
+                    "thread/settings/update",
+                    {"message": "collaboration mode update was not applied"},
+                ) from error
+        return target
 
     async def get_goal(
         self,
@@ -389,7 +430,6 @@ class CodexGateway:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
-        collaboration_mode: str | None = None,
         extra_inputs: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         input_items = await self._input_items(session, prompt, extra_inputs)
@@ -400,12 +440,10 @@ class CodexGateway:
             )
             async for notification in self._start_turn_on_connection(
                 connection,
-                session,
                 thread_id,
                 input_items,
                 model=model,
                 reasoning_effort=reasoning_effort,
-                collaboration_mode=collaboration_mode,
             ):
                 yield notification
 
@@ -417,7 +455,6 @@ class CodexGateway:
         workspace: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
-        collaboration_mode: str | None = None,
         dynamic_tools: list[dict[str, Any]] | None = None,
         extra_inputs: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -457,12 +494,10 @@ class CodexGateway:
                 }
                 async for notification in self._start_turn_on_connection(
                     connection,
-                    session,
                     thread_id,
                     input_items,
                     model=model,
                     reasoning_effort=reasoning_effort,
-                    collaboration_mode=collaboration_mode,
                 ):
                     if (
                         notification.get("method") == "thread/name/updated"
@@ -541,7 +576,6 @@ class CodexGateway:
                     metadata_thread_id = str(result["thread"]["id"])
                     async for notification in self._start_turn_on_connection(
                         connection,
-                        session,
                         metadata_thread_id,
                         [
                             {
@@ -588,13 +622,11 @@ class CodexGateway:
     async def _start_turn_on_connection(
         self,
         connection: CodexConnection,
-        session: Mapping[str, Any],
         thread_id: str,
         input_items: list[dict[str, Any]],
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
-        collaboration_mode: str | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         params: dict[str, Any] = {
@@ -607,13 +639,6 @@ class CodexGateway:
             params["effort"] = reasoning_effort
         if output_schema is not None:
             params["outputSchema"] = output_schema
-        if collaboration_mode:
-            params["collaborationMode"] = await self._collaboration_mode(
-                session,
-                collaboration_mode,
-                model=model,
-                reasoning_effort=reasoning_effort,
-            )
         request_id = await connection.start_request("turn/start", params)
         turn_id: str | None = None
         while True:
@@ -774,12 +799,14 @@ class CodexGateway:
         )
         if selected is None:
             raise ValueError(f"Codex collaboration mode is unavailable: {name}")
-        selected_model = selected.get("model") or model or self._settings.codex_model
+        selected_model = model or selected.get("model") or self._settings.codex_model
         if not selected_model:
             raise ValueError(f"Codex collaboration mode {name} has no model")
-        selected_effort = selected.get("reasoning_effort")
-        if selected_effort is None:
-            selected_effort = reasoning_effort
+        selected_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else selected.get("reasoning_effort")
+        )
         return {
             "mode": selected.get("mode") or name.casefold(),
             "settings": {

@@ -3,17 +3,29 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from efferva.broker import RedisRunBroker, RunQueueFullError
 from efferva.codex import CodexGateway
 from efferva.codex_projection import project_turn_messages
 from efferva.codex_rpc import CodexRpcError
-from efferva.identity import IdentityResolver, Principal
+from efferva.codex_tunnel import (
+    CodexTunnelBackpressureError,
+    CodexTunnelQueueFullError,
+    RedisCodexTunnel,
+)
+from efferva.identity import (
+    ForbiddenError,
+    IdentityResolver,
+    Principal,
+    UnauthenticatedError,
+)
 from efferva.models import (
     CodexControlInput,
     PrincipalView,
@@ -24,6 +36,7 @@ from efferva.models import (
 )
 from efferva.repository import (
     AccessMode,
+    NotFoundError,
     RunRepository,
     SessionRepository,
 )
@@ -121,6 +134,7 @@ def create_api_router(
     identity: IdentityResolver,
     repository: Callable[[], SessionRepository],
     codex_gateway: Callable[[], CodexGateway],
+    codex_tunnel: Callable[[], RedisCodexTunnel],
     run_broker: Callable[[], RedisRunBroker],
     runs: Callable[[], RunRepository],
 ) -> APIRouter:
@@ -191,7 +205,139 @@ def create_api_router(
     async def healthz() -> dict[str, str]:
         await repository().ping()
         await run_broker().ping()
+        await codex_tunnel().ping()
         return {"status": "ok"}
+
+    @router.websocket("/api/sessions/{session_id}/codex")
+    async def codex_websocket(
+        websocket: WebSocket,
+        session_id: UUID,
+    ) -> None:
+        try:
+            principal = await identity(websocket)
+            if not isinstance(principal, Principal):
+                raise TypeError("IdentityResolver must return efferva.Principal")
+            await repository().get_session(
+                principal,
+                session_id,
+                mode=AccessMode.WRITE,
+                touch=True,
+            )
+        except UnauthenticatedError:
+            await websocket.close(code=4401)
+            return
+        except ForbiddenError:
+            await websocket.close(code=4403)
+            return
+        except NotFoundError:
+            await websocket.close(code=4404)
+            return
+
+        connection_id = str(uuid4())
+        tunnel = codex_tunnel()
+        try:
+            await tunnel.open_connection(connection_id, str(session_id))
+        except CodexTunnelQueueFullError:
+            await websocket.close(code=1013, reason="Codex workers are busy")
+            return
+        await websocket.accept()
+
+        async def client_heartbeat() -> None:
+            while True:
+                await asyncio.sleep(tunnel.heartbeat_interval_seconds)
+                if not await tunnel.touch_client(connection_id):
+                    return
+
+        async def client_to_worker() -> None:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                payload = message.get("text")
+                if payload is None:
+                    await websocket.close(
+                        code=1003,
+                        reason="Codex JSON-RPC requires text frames",
+                    )
+                    return
+                await tunnel.send_frame(
+                    connection_id,
+                    "client",
+                    payload=payload,
+                )
+
+        async def worker_to_client() -> None:
+            cursor = "0-0"
+            while True:
+                frames = await tunnel.read_frames(
+                    connection_id,
+                    "server",
+                    after=cursor,
+                )
+                if not frames:
+                    state = await tunnel.get_state(connection_id)
+                    if state.get("status") in {"closed", "failed"}:
+                        await websocket.close(
+                            code=1011 if state.get("status") == "failed" else 1000,
+                            reason=(
+                                "Codex connection failed"
+                                if state.get("status") == "failed"
+                                else "Codex connection closed"
+                            ),
+                        )
+                        return
+                    continue
+                for frame_id, kind, payload in frames:
+                    cursor = frame_id
+                    if kind == "close":
+                        await tunnel.acknowledge_frame(
+                            connection_id,
+                            "server",
+                            frame_id,
+                        )
+                        state = await tunnel.get_state(connection_id)
+                        await websocket.close(
+                            code=1011 if state.get("status") == "failed" else 1000,
+                            reason=(
+                                "Codex connection failed"
+                                if state.get("status") == "failed"
+                                else "Codex connection closed"
+                            ),
+                        )
+                        return
+                    await websocket.send_text(payload)
+                    await tunnel.acknowledge_frame(
+                        connection_id,
+                        "server",
+                        frame_id,
+                    )
+
+        tasks = {
+            asyncio.create_task(client_heartbeat()),
+            asyncio.create_task(client_to_worker()),
+            asyncio.create_task(worker_to_client()),
+        }
+        try:
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+        except (CodexTunnelBackpressureError, ValueError, WebSocketDisconnect):
+            pass
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            with suppress(CodexTunnelBackpressureError):
+                await tunnel.disconnect_client(connection_id)
+            if websocket.client_state == WebSocketState.CONNECTED:
+                with suppress(RuntimeError):
+                    await websocket.close()
 
     @router.get("/api/meta", include_in_schema=False)
     async def metadata(
@@ -325,22 +471,12 @@ def create_api_router(
             else None
         )
         detail["active_turn_id"] = active_turn_id
-        if active_turn_id:
-            active_run = await runs().find_by_turn(
-                session_id,
-                thread_id,
-                str(active_turn_id),
-            )
-            if active_run is not None and active_run.get("started_at") is not None:
-                detail["active_turn_started_at"] = active_run["started_at"].isoformat()
-        latest_run = await runs().find_latest_for_thread(session_id, thread_id)
-        if (
-            latest_run is not None
-            and latest_run.get("status") == "failed"
-        ):
-            detail["last_run_error"] = str(
-                latest_run.get("error") or "Run failed"
-            )
+        if active_turn is not None and active_turn.get("startedAt") is not None:
+            detail["active_turn_started_at"] = active_turn["startedAt"]
+        latest_turn = turns[-1] if turns else None
+        if latest_turn is not None and latest_turn.get("status") == "failed":
+            error = latest_turn.get("error") or {}
+            detail["last_run_error"] = str(error.get("message") or "Turn failed")
         return detail
 
     @router.delete("/api/sessions/{session_id}/threads/{thread_id}")
@@ -437,7 +573,7 @@ def create_api_router(
         thread_id: str,
         payload: CodexControlInput,
         principal: Principal = Depends(resolve_principal),
-    ) -> StreamingResponse:
+    ) -> dict[str, Any]:
         if thread_id == "new":
             raise HTTPException(
                 status_code=409,
@@ -449,21 +585,50 @@ def create_api_router(
             mode=AccessMode.WRITE,
             touch=True,
         )
-        control: dict[str, Any] = {}
-        if payload.action == "plan.enable":
-            control.update(
-                {
-                    "model": payload.model,
-                    "reasoningEffort": payload.reasoning_effort,
-                }
+        latest_run = await runs().find_latest_for_thread(session_id, thread_id)
+        if latest_run is not None and latest_run["status"] in {
+            "queued",
+            "running",
+            "waiting_input",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="this thread has an active run",
             )
+
+        collaboration_mode: str | None = None
+        if payload.action == "plan.toggle":
+            collaboration_mode = await codex_gateway().toggle_plan_mode(
+                session,
+                thread_id,
+            )
+            message = (
+                "Plan mode enabled."
+                if collaboration_mode == "plan"
+                else "Plan mode disabled."
+            )
+        elif payload.action == "goal.get":
+            goal = await codex_gateway().get_goal(session, thread_id)
+            message = (
+                f"Goal: {goal['objective']} ({goal['status']})"
+                if goal
+                else "No goal is set."
+            )
+        elif payload.action == "goal.clear":
+            cleared = await codex_gateway().clear_goal(session, thread_id)
+            message = "Goal cleared." if cleared else "No goal was set."
         elif payload.action == "goal.status":
             if payload.status is None:
                 raise HTTPException(
                     status_code=422,
                     detail="goal.status requires status",
                 )
-            control["status"] = payload.status
+            goal = await codex_gateway().set_goal(
+                session,
+                thread_id,
+                status=payload.status,
+            )
+            message = f"Goal {goal['status']}: {goal['objective']}"
         elif payload.action == "goal.set":
             objective = (payload.objective or "").strip()
             if not objective:
@@ -471,20 +636,21 @@ def create_api_router(
                     status_code=422,
                     detail="goal.set requires an objective",
                 )
-            control["objective"] = objective
-        run_id = str(uuid4())
-        await enqueue(
-            {
-                "kind": "control",
-                "action": payload.action,
-                "runId": run_id,
-                "clientRunId": payload.run_id or run_id,
-                "sessionId": str(session["id"]),
-                "threadId": thread_id,
-                **control,
-            }
-        )
-        return _brokered_response(run_broker(), run_id)
+            goal = await codex_gateway().set_goal(
+                session,
+                thread_id,
+                objective=objective,
+                status="active",
+            )
+            message = f"Goal set: {goal['objective']}"
+        else:
+            raise HTTPException(status_code=422, detail="unsupported control action")
+
+        return {
+            "action": payload.action,
+            "message": message,
+            "collaboration_mode": collaboration_mode,
+        }
 
     @router.post("/api/sessions/{session_id}/ag-ui")
     async def run_agui(
@@ -537,14 +703,6 @@ def create_api_router(
             str(forwarded.get("reasoningEffort") or "").strip() or None
         )
         workspace = str(forwarded.get("workspace") or "").strip() or None
-        collaboration_mode = (
-            str(forwarded.get("collaborationMode") or "").strip() or None
-        )
-        if collaboration_mode not in {None, "plan"}:
-            raise HTTPException(
-                status_code=422,
-                detail="unsupported collaborationMode",
-            )
         await enqueue(
             {
                 "kind": "start",
@@ -555,7 +713,6 @@ def create_api_router(
                 "prompt": prompt,
                 "model": model,
                 "reasoningEffort": reasoning_effort,
-                "collaborationMode": collaboration_mode,
                 "workspace": workspace,
                 "tools": payload.tools,
                 "inputs": _media_inputs_from_agui(payload),

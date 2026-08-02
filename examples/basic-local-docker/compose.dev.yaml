@@ -13,8 +13,8 @@ services:
 
   web:
     build:
-      context: ./web
-      dockerfile: Dockerfile.dev
+      context: ../..
+      dockerfile: examples/basic-local-docker/web/Dockerfile.dev
     restart: unless-stopped
     environment:
       EFFERVA_API_PROXY_TARGET: http://app:8080
@@ -25,6 +25,7 @@ services:
       - "${EFFERVA_WEB_PORT:-5173}:5173"
     volumes:
       - ./web:/web
+      - ../../packages/codex-client:/packages/codex-client:ro
       - web-node-modules:/web/node_modules
     networks:
       - efferva-local

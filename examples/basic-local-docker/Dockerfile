@@ -1,6 +1,7 @@
 FROM node:22-alpine AS web
 
 WORKDIR /web
+COPY packages/codex-client /packages/codex-client
 COPY examples/basic-local-docker/web/package.json \
      examples/basic-local-docker/web/package-lock.json ./
 RUN npm ci

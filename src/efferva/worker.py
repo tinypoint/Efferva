@@ -24,6 +24,10 @@ from efferva.codex_rpc import (
     ServerRequestHandler,
     default_server_response,
 )
+from efferva.codex_tunnel import (
+    CodexTunnelBackpressureError,
+    RedisCodexTunnel,
+)
 from efferva.config import Settings, get_settings, load_codex_config, merge_codex_config
 from efferva.db import Database
 from efferva.repository import RunRepository
@@ -41,6 +45,14 @@ RUN_CAPACITY = Gauge(
 WORKER_READY = Gauge(
     "efferva_worker_ready",
     "Whether this worker has initialized all required dependencies",
+)
+ACTIVE_CODEX_CONNECTIONS = Gauge(
+    "efferva_worker_active_codex_connections",
+    "Active native Codex connections held by this worker",
+)
+CODEX_CONNECTION_CAPACITY = Gauge(
+    "efferva_worker_codex_connection_capacity",
+    "Maximum native Codex connections accepted by this worker",
 )
 
 _CURRENT_RUN_ID: ContextVar[str | None] = ContextVar(
@@ -111,12 +123,14 @@ def _server_response_from_interrupt(
     return default
 
 
-class RunWorker:
+class EffervaWorker:
     def __init__(
         self,
         gateway: CodexGateway,
         broker: RedisRunBroker,
         runs: RunRepository,
+        rpc: CodexRpcClient,
+        tunnel: RedisCodexTunnel,
         settings: Settings | None = None,
         server_request_handler: ServerRequestHandler | None = None,
     ) -> None:
@@ -124,9 +138,12 @@ class RunWorker:
         self._gateway = gateway
         self._broker = broker
         self._runs = runs
+        self._rpc = rpc
+        self._tunnel = tunnel
         self._worker_id = os.environ.get("HOSTNAME") or f"worker-{uuid4()}"
         self._server_request_handler = server_request_handler
         self._active: dict[str, asyncio.Task[None]] = {}
+        self._connections: dict[str, asyncio.Task[None]] = {}
         self._pending_interrupts: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._stopping = asyncio.Event()
 
@@ -190,8 +207,10 @@ class RunWorker:
 
     async def run(self) -> None:
         RUN_CAPACITY.set(self._settings.worker_concurrency)
+        CODEX_CONNECTION_CAPACITY.set(self._settings.worker_concurrency)
         await self._runs.ping()
         await self._broker.ping()
+        await self._tunnel.ping()
         await self._reconcile_queued_runs()
         WORKER_READY.set(1)
         loop = asyncio.get_running_loop()
@@ -200,19 +219,69 @@ class RunWorker:
             with suppress(NotImplementedError):
                 loop.add_signal_handler(name, self._stopping.set)
 
+        connection_dispatch = asyncio.create_task(
+            self._accept_codex_connections(),
+            name="efferva-codex-connections",
+        )
+        try:
+            while not self._stopping.is_set():
+                if connection_dispatch.done():
+                    connection_dispatch.result()
+                if loop.time() >= next_health_check:
+                    await self._runs.ping()
+                    await self._broker.ping()
+                    await self._tunnel.ping()
+                    await self._reconcile_queued_runs()
+                    next_health_check = loop.time() + 5
+                self._remove_finished()
+                capacity = self._settings.worker_concurrency - len(self._active)
+                if capacity <= 0:
+                    await self._wait_for_capacity()
+                    continue
+
+                claimed = await self._broker.reclaim_stale_runs(
+                    self._worker_id,
+                    min_idle_ms=self._settings.worker_claim_idle_seconds * 1000,
+                    count=capacity,
+                )
+                capacity -= len(claimed)
+                if capacity > 0:
+                    claimed.extend(
+                        await self._broker.claim_new_runs(
+                            self._worker_id,
+                            count=capacity,
+                        )
+                    )
+                for dispatch_id, command in claimed:
+                    run_id = str(command.get("runId") or "")
+                    if not run_id:
+                        await self._broker.acknowledge_run(dispatch_id)
+                        continue
+                    if run_id in self._active:
+                        continue
+                    task = asyncio.create_task(
+                        self._execute(dispatch_id, command),
+                        name=f"efferva-run:{run_id}",
+                    )
+                    self._active[run_id] = task
+                    ACTIVE_RUNS.set(len(self._active))
+        finally:
+            self._stopping.set()
+            connection_dispatch.cancel()
+            with suppress(asyncio.CancelledError):
+                await connection_dispatch
+            await self._drain()
+            await self._drain_codex_connections()
+
+    async def _accept_codex_connections(self) -> None:
         while not self._stopping.is_set():
-            if loop.time() >= next_health_check:
-                await self._runs.ping()
-                await self._broker.ping()
-                await self._reconcile_queued_runs()
-                next_health_check = loop.time() + 5
-            self._remove_finished()
-            capacity = self._settings.worker_concurrency - len(self._active)
+            self._remove_finished_codex_connections()
+            capacity = self._settings.worker_concurrency - len(self._connections)
             if capacity <= 0:
-                await self._wait_for_capacity()
+                await self._wait_for_codex_connection_capacity()
                 continue
 
-            claimed = await self._broker.reclaim_stale_runs(
+            claimed = await self._tunnel.reclaim_stale_connections(
                 self._worker_id,
                 min_idle_ms=self._settings.worker_claim_idle_seconds * 1000,
                 count=capacity,
@@ -220,26 +289,223 @@ class RunWorker:
             capacity -= len(claimed)
             if capacity > 0:
                 claimed.extend(
-                    await self._broker.claim_new_runs(
+                    await self._tunnel.claim_new_connections(
                         self._worker_id,
                         count=capacity,
                     )
                 )
             for dispatch_id, command in claimed:
-                run_id = str(command.get("runId") or "")
-                if not run_id:
-                    await self._broker.acknowledge_run(dispatch_id)
+                connection_id = str(command.get("connectionId") or "")
+                session_id = str(command.get("sessionId") or "")
+                if not connection_id or not session_id:
+                    await self._tunnel.acknowledge_connection(dispatch_id)
                     continue
-                if run_id in self._active:
+                if connection_id in self._connections:
                     continue
                 task = asyncio.create_task(
-                    self._execute(dispatch_id, command),
-                    name=f"efferva-run:{run_id}",
+                    self._serve_codex_connection(dispatch_id, command),
+                    name=f"efferva-codex:{connection_id}",
                 )
-                self._active[run_id] = task
-                ACTIVE_RUNS.set(len(self._active))
+                self._connections[connection_id] = task
+                ACTIVE_CODEX_CONNECTIONS.set(len(self._connections))
 
-        await self._drain()
+    async def _serve_codex_connection(
+        self,
+        dispatch_id: str,
+        command: dict[str, Any],
+    ) -> None:
+        connection_id = str(command["connectionId"])
+        session_id = str(command["sessionId"])
+        acquired = await self._tunnel.acquire_connection_lease(
+            connection_id,
+            self._worker_id,
+        )
+        if not acquired:
+            return
+
+        owner = asyncio.current_task()
+        lease_task = asyncio.create_task(
+            self._renew_codex_connection_lease(
+                connection_id,
+                dispatch_id,
+                owner,
+            )
+        )
+        try:
+            state = await self._tunnel.get_state(connection_id)
+            if state.get("status") in {"closed", "failed"}:
+                await self._tunnel.acknowledge_connection(dispatch_id)
+                return
+            if state.get("status") == "ready":
+                await self._finish_codex_connection(
+                    connection_id,
+                    dispatch_id,
+                    status="failed",
+                    error="the worker holding this Codex connection was lost",
+                )
+                return
+            if not await self._tunnel.client_is_connected(connection_id):
+                await self._finish_codex_connection(
+                    connection_id,
+                    dispatch_id,
+                    status="closed",
+                )
+                return
+
+            await self._tunnel.set_state(
+                connection_id,
+                {"status": "connecting", "workerId": self._worker_id},
+            )
+            async with self._rpc.raw_connection({"id": session_id}) as upstream:
+                if not await self._tunnel.client_is_connected(connection_id):
+                    await self._finish_codex_connection(
+                        connection_id,
+                        dispatch_id,
+                        status="closed",
+                    )
+                    return
+                await self._tunnel.set_state(
+                    connection_id,
+                    {"status": "ready", "workerId": self._worker_id},
+                )
+                tasks = {
+                    asyncio.create_task(
+                        self._codex_client_to_server(connection_id, upstream)
+                    ),
+                    asyncio.create_task(
+                        self._codex_server_to_client(connection_id, upstream)
+                    ),
+                    asyncio.create_task(self._watch_codex_client(connection_id)),
+                }
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
+            await self._finish_codex_connection(
+                connection_id,
+                dispatch_id,
+                status="closed",
+            )
+        except asyncio.CancelledError:
+            await self._finish_codex_connection(
+                connection_id,
+                dispatch_id,
+                status="failed",
+                error="the worker closed this Codex connection",
+            )
+            raise
+        except Exception as error:
+            await self._finish_codex_connection(
+                connection_id,
+                dispatch_id,
+                status="failed",
+                error=str(error),
+            )
+        finally:
+            lease_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await lease_task
+            await self._tunnel.release_connection_lease(
+                connection_id,
+                self._worker_id,
+            )
+
+    async def _codex_client_to_server(
+        self,
+        connection_id: str,
+        upstream: Any,
+    ) -> None:
+        cursor = "0-0"
+        while True:
+            frames = await self._tunnel.read_frames(
+                connection_id,
+                "client",
+                after=cursor,
+            )
+            for frame_id, kind, payload in frames:
+                cursor = frame_id
+                if kind == "close":
+                    await self._tunnel.acknowledge_frame(
+                        connection_id,
+                        "client",
+                        frame_id,
+                    )
+                    return
+                await upstream.send(payload)
+                await self._tunnel.acknowledge_frame(
+                    connection_id,
+                    "client",
+                    frame_id,
+                )
+
+    async def _codex_server_to_client(
+        self,
+        connection_id: str,
+        upstream: Any,
+    ) -> None:
+        async for payload in upstream:
+            if not isinstance(payload, str):
+                raise TypeError("Codex JSON-RPC requires text frames")
+            await self._tunnel.send_frame(
+                connection_id,
+                "server",
+                payload=payload,
+            )
+
+    async def _watch_codex_client(self, connection_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._tunnel.heartbeat_interval_seconds)
+            if not await self._tunnel.client_is_connected(connection_id):
+                return
+
+    async def _renew_codex_connection_lease(
+        self,
+        connection_id: str,
+        dispatch_id: str,
+        owner: asyncio.Task[Any] | None,
+    ) -> None:
+        while True:
+            await asyncio.sleep(self._tunnel.heartbeat_interval_seconds)
+            try:
+                await self._tunnel.touch_connection_claim(
+                    self._worker_id,
+                    dispatch_id,
+                )
+                renewed = await self._tunnel.renew_connection_lease(
+                    connection_id,
+                    self._worker_id,
+                )
+            except Exception:
+                renewed = False
+            if not renewed:
+                if owner is not None:
+                    owner.cancel()
+                return
+
+    async def _finish_codex_connection(
+        self,
+        connection_id: str,
+        dispatch_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        values: dict[str, Any] = {"status": status}
+        if error:
+            values["error"] = error
+        await self._tunnel.set_state(connection_id, values)
+        with suppress(CodexTunnelBackpressureError):
+            await self._tunnel.send_frame(
+                connection_id,
+                "server",
+                kind="close",
+            )
+        await self._tunnel.acknowledge_connection(dispatch_id)
 
     async def _reconcile_queued_runs(self) -> None:
         for run in await self._runs.list_queued():
@@ -375,6 +641,9 @@ class RunWorker:
         lease_context: dict[str, str | None],
     ) -> None:
         run_id = str(command["runId"])
+        kind = str(command.get("kind") or "")
+        if kind not in {"start", "resume"}:
+            raise ValueError(f"unknown Run kind: {kind or '<missing>'}")
         agui_run_id = str(command.get("clientRunId") or run_id)
         session = {"id": command["sessionId"]}
         state = await self._broker.get_run_state(run_id)
@@ -422,9 +691,7 @@ class RunWorker:
                     turn_id=resumed_turn_id,
                 )
         events: AsyncIterator[dict[str, Any]]
-        if command.get("kind") == "control":
-            events = self._control_events(command)
-        elif resumed_thread_id and resumed_turn_id and state.get("status") == "running":
+        if resumed_thread_id and resumed_turn_id and state.get("status") == "running":
             stream = resume_agui_turn(
                 self._gateway,
                 session,
@@ -437,7 +704,7 @@ class RunWorker:
                 started_tool_call_ids=set(state.get("openToolCalls") or []),
             )
             events = (_event_from_sse(chunk) async for chunk in stream)
-        elif command.get("kind") == "resume":
+        elif kind == "resume":
             stream = resume_agui_turn(
                 self._gateway,
                 session,
@@ -446,7 +713,7 @@ class RunWorker:
                 run_id=agui_run_id,
             )
             events = (_event_from_sse(chunk) async for chunk in stream)
-        else:
+        elif kind == "start":
             stream = stream_agui_turn(
                 self._gateway,
                 session,
@@ -455,7 +722,6 @@ class RunWorker:
                 run_id=agui_run_id,
                 model=_optional_string(command.get("model")),
                 reasoning_effort=_optional_string(command.get("reasoningEffort")),
-                collaboration_mode=_optional_string(command.get("collaborationMode")),
                 workspace=_optional_string(command.get("workspace")),
                 tools=list(command.get("tools") or []),
                 inputs=list(command.get("inputs") or []),
@@ -570,60 +836,6 @@ class RunWorker:
             updates["error"] = str(event.get("message") or "run failed")
         return updates
 
-    async def _control_events(
-        self,
-        command: dict[str, Any],
-    ) -> AsyncIterator[dict[str, Any]]:
-        run_id = str(command.get("clientRunId") or command["runId"])
-        thread_id = str(command["threadId"])
-        session = {"id": command["sessionId"]}
-        yield {"type": "RUN_STARTED", "runId": run_id, "threadId": thread_id}
-        action = str(command["action"])
-        if action == "plan.enable":
-            await self._gateway.set_plan_mode(
-                session,
-                thread_id,
-                model=_optional_string(command.get("model")),
-                reasoning_effort=_optional_string(command.get("reasoningEffort")),
-            )
-            message = "Plan mode enabled."
-        elif action == "goal.get":
-            goal = await self._gateway.get_goal(session, thread_id)
-            message = (
-                f"Goal: {goal['objective']} ({goal['status']})"
-                if goal
-                else "No goal is set."
-            )
-        elif action == "goal.clear":
-            cleared = await self._gateway.clear_goal(session, thread_id)
-            message = "Goal cleared." if cleared else "No goal was set."
-        elif action == "goal.status":
-            goal = await self._gateway.set_goal(
-                session,
-                thread_id,
-                status=str(command["status"]),
-            )
-            message = f"Goal {goal['status']}: {goal['objective']}"
-        elif action == "goal.set":
-            goal = await self._gateway.set_goal(
-                session,
-                thread_id,
-                objective=str(command["objective"]),
-                status="active",
-            )
-            message = f"Goal set: {goal['objective']}"
-        else:
-            raise ValueError(f"unknown control action: {action}")
-        message_id = f"{run_id}:control"
-        yield {"type": "TEXT_MESSAGE_START", "messageId": message_id}
-        yield {
-            "type": "TEXT_MESSAGE_CONTENT",
-            "messageId": message_id,
-            "delta": message,
-        }
-        yield {"type": "TEXT_MESSAGE_END", "messageId": message_id}
-        yield {"type": "RUN_FINISHED", "runId": run_id, "threadId": thread_id}
-
     async def _consume_commands(
         self,
         run_id: str,
@@ -688,16 +900,50 @@ class RunWorker:
         }
         ACTIVE_RUNS.set(len(self._active))
 
+    def _remove_finished_codex_connections(self) -> None:
+        for task in self._connections.values():
+            if task.done() and not task.cancelled():
+                with suppress(Exception):
+                    task.result()
+        self._connections = {
+            connection_id: task
+            for connection_id, task in self._connections.items()
+            if not task.done()
+        }
+        ACTIVE_CODEX_CONNECTIONS.set(len(self._connections))
+
     async def _wait_for_capacity(self) -> None:
         if not self._active:
             return
         await asyncio.wait(self._active.values(), return_when=asyncio.FIRST_COMPLETED)
+
+    async def _wait_for_codex_connection_capacity(self) -> None:
+        if not self._connections:
+            return
+        await asyncio.wait(
+            self._connections.values(),
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
     async def _drain(self) -> None:
         if not self._active:
             return
         done, pending = await asyncio.wait(
             self._active.values(),
+            timeout=self._settings.worker_shutdown_grace_seconds,
+        )
+        del done
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _drain_codex_connections(self) -> None:
+        if not self._connections:
+            return
+        done, pending = await asyncio.wait(
+            self._connections.values(),
             timeout=self._settings.worker_shutdown_grace_seconds,
         )
         del done
@@ -728,10 +974,18 @@ async def serve_worker(
         event_max_bytes=settings.redis_event_max_bytes,
         command_max_bytes=settings.redis_command_max_bytes,
     )
+    tunnel = RedisCodexTunnel(
+        settings.redis_url,
+        prefix=settings.redis_prefix,
+        ttl_seconds=settings.redis_run_ttl_seconds,
+        lease_seconds=settings.worker_lease_seconds,
+        dispatch_queue_capacity=settings.redis_dispatch_queue_capacity,
+    )
     database = Database(settings.database_url)
     await database.open()
     await database.initialize(files("efferva").joinpath("schema.sql").read_text())
     await broker.open()
+    await tunnel.open()
     release = await prepare_official_codex(settings)
     sandboxes = create_sandbox_control_plane(settings, sandbox)
     await sandboxes.start()
@@ -753,10 +1007,12 @@ async def serve_worker(
             native_memory_enabled=native_memory_enabled,
         )
         start_http_server(settings.worker_metrics_port)
-        worker = RunWorker(
+        worker = EffervaWorker(
             gateway,
             broker,
             RunRepository(database),
+            rpc,
+            tunnel,
             settings,
             server_request_handler=server_request_handler,
         )
@@ -765,6 +1021,7 @@ async def serve_worker(
     finally:
         WORKER_READY.set(0)
         await sandboxes.close()
+        await tunnel.close()
         await broker.close()
         await database.close()
 
