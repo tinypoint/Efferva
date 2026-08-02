@@ -8,17 +8,16 @@ export type Session = {
 
 export type ThreadSummary = {
   id: string;
-  session_id: string;
-  title: string;
+  sessionId: string;
   name?: string | null;
   preview?: string | null;
-  workspace?: string | null;
+  cwd?: string | null;
   status?: {
     type: "active" | "idle" | "notLoaded" | "systemError";
     activeFlags?: string[];
   } | null;
-  created_at?: string | null;
-  updated_at?: string | null;
+  createdAt?: number | null;
+  updatedAt?: number | null;
 };
 
 export type AgUiMessage = Message & {
@@ -29,8 +28,9 @@ export type AgUiMessage = Message & {
   processDurationMs?: number;
 };
 
-export type ThreadDetail = ThreadSummary & {
+export type ThreadHistoryPage = {
   messages: AgUiMessage[];
+  next_cursor?: string | null;
   active_turn_id?: string | null;
   active_turn_started_at?: string | number | null;
   last_run_error?: string | null;

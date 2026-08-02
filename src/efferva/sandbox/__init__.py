@@ -1,14 +1,9 @@
-from efferva.sandbox.manager import (
-    SandboxControlPlane,
-    create_sandbox_control_plane,
-)
 from efferva.sandbox.protocol import (
     CommandResult,
     DirectoryEntry,
     FileMetadata,
     SandboxCapabilities,
     SandboxContext,
-    SandboxEnvironment,
     SandboxHandle,
     SandboxProvider,
     SandboxRuntime,
@@ -21,11 +16,8 @@ __all__ = [
     "FileMetadata",
     "SandboxCapabilities",
     "SandboxContext",
-    "SandboxControlPlane",
-    "SandboxEnvironment",
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
     "SessionVolumeHandle",
-    "create_sandbox_control_plane",
 ]

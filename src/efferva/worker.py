@@ -14,14 +14,15 @@ from uuid import uuid4
 
 from prometheus_client import Gauge, start_http_server
 
-from efferva.api import _agui_resume_stream, _agui_stream
+from efferva.agui import resume_agui_turn, stream_agui_turn
 from efferva.broker import RedisRunBroker, RunQueueFullError
 from efferva.codex_release import prepare_official_codex
 from efferva.config import Settings, get_settings, load_codex_config, merge_codex_config
 from efferva.db import Database
 from efferva.repository import RunRepository
 from efferva.runtime import CodexProxy, ServerRequestHandler, _default_server_response
-from efferva.sandbox import SandboxProvider, create_sandbox_control_plane
+from efferva.sandbox import SandboxProvider
+from efferva.sandbox.manager import create_sandbox_control_plane
 
 ACTIVE_RUNS = Gauge(
     "efferva_worker_active_runs",
@@ -421,7 +422,7 @@ class RunWorker:
         if command.get("kind") == "control":
             events = self._control_events(command)
         elif resumed_thread_id and resumed_turn_id and state.get("status") == "running":
-            stream = _agui_resume_stream(
+            stream = resume_agui_turn(
                 self._proxy,
                 session,
                 str(resumed_thread_id),
@@ -434,7 +435,7 @@ class RunWorker:
             )
             events = (_event_from_sse(chunk) async for chunk in stream)
         elif command.get("kind") == "resume":
-            stream = _agui_resume_stream(
+            stream = resume_agui_turn(
                 self._proxy,
                 session,
                 str(command["threadId"]),
@@ -443,7 +444,7 @@ class RunWorker:
             )
             events = (_event_from_sse(chunk) async for chunk in stream)
         else:
-            stream = _agui_stream(
+            stream = stream_agui_turn(
                 self._proxy,
                 session,
                 str(command["threadId"]),

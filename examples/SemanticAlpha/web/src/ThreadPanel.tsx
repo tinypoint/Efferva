@@ -67,6 +67,7 @@ type ThreadPanelProps = {
   threadId: string;
   model?: string | null;
   reasoningEffort?: string | null;
+  live?: boolean;
 };
 
 async function requestJson<T>(
@@ -227,6 +228,7 @@ export function ThreadPanel({
   threadId,
   model,
   reasoningEffort,
+  live = false,
 }: ThreadPanelProps) {
   const [thread, setThread] = useState<ThreadDetail | null>(null);
   const [metadata, setMetadata] = useState<ThreadMetadata | null>(null);
@@ -240,12 +242,20 @@ export function ThreadPanel({
 
     const sessionPath = `/agent/api/sessions/${encodeURIComponent(sessionId)}`;
     const threadPath = `${sessionPath}/threads/${encodeURIComponent(threadId)}`;
-    void requestJson<ThreadDetail>(threadPath, controller.signal)
-      .then(setThread)
-      .catch((cause: unknown) => {
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setError(cause instanceof Error ? cause.message : "线程读取失败");
-      });
+    const threadAgUiPath = `${threadPath}/ag-ui`;
+    const loadThread = () => {
+      void requestJson<ThreadDetail>(threadAgUiPath, controller.signal)
+        .then((nextThread) => {
+          setThread(nextThread);
+          setError(null);
+        })
+        .catch((cause: unknown) => {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          setError(cause instanceof Error ? cause.message : "线程读取失败");
+        });
+    };
+    loadThread();
+    const refreshTimer = live ? window.setInterval(loadThread, 3000) : null;
 
     void Promise.all([
       requestJson<SessionDetail>(sessionPath, controller.signal),
@@ -277,8 +287,11 @@ export function ThreadPanel({
         if (cause instanceof DOMException && cause.name === "AbortError") return;
       });
 
-    return () => controller.abort();
-  }, [model, reasoningEffort, sessionId, threadId]);
+    return () => {
+      if (refreshTimer !== null) window.clearInterval(refreshTimer);
+      controller.abort();
+    };
+  }, [live, model, reasoningEffort, sessionId, threadId]);
 
   const toolResults = useMemo(
     () =>

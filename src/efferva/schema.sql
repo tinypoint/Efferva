@@ -27,12 +27,6 @@ CREATE INDEX IF NOT EXISTS app_sessions_tenant_updated_idx
 CREATE INDEX IF NOT EXISTS app_sessions_last_active_idx
     ON app_sessions(last_active_at);
 
-ALTER TABLE app_sessions
-    ADD COLUMN IF NOT EXISTS default_model text;
-
-ALTER TABLE app_sessions
-    ADD COLUMN IF NOT EXISTS default_reasoning_effort text;
-
 DROP TABLE IF EXISTS thread_execution_settings;
 
 CREATE TABLE IF NOT EXISTS agent_runs (

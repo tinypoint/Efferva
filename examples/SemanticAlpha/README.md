@@ -2,24 +2,26 @@
 
 Semantic Alpha 是一个基于 Efferva 的 AI 投资语义示例。服务端沿用本地 Docker
 example 的 FastAPI、Efferva、PostgreSQL、Redis 与 OpenSandbox 运行链路，Web UI
-以投资月历作为产业调查入口。
+以投资月历作为研究报告入口。
 
 每个 Agent Session 会自动获得
 [AI Berkshire](https://github.com/xbtlin/ai-berkshire) 的 21 个 Codex skills，
 以及这些 skills 直接依赖的财务验算工具。资源固定在上游提交
 `0310788cdabb0d724ac9f67e3dbd3e9e4a13d06a`，不依赖宿主机的 Codex 配置。
 
-产业调查以不可变 Markdown 快照保存在 `industry_research_reports` 表中；修改内容时
-新增一行，保留原始调查记录。每行同时保存生成报告的 `session_id` 与 `thread_id`，
-用于回看来源线程。
+核心关系只有三层：`ReportTask → ReportRun → Report`。`report_tasks` 保存定时频率、
+完整 Prompt、输出文件名、模型、推理深度、报告类型、主题和所属用户；每次到点后，
+调度器把这些字段快照到 `report_runs`，再创建 Efferva Session 与 Thread。成功生成的
+Markdown 作为不可变快照写入 `reports`，运行记录同时保留耗时和完整线程轨迹。
 
-调用 `POST /api/industry-reports` 并传入 `{"industry": "AI基建"}`，服务会依次创建
-Efferva Session 与 Thread、调用 `$industry-research` 生成 Markdown，并在生成完成后
-将全文写入 `industry_research_reports`。
+系统没有手动报告入口。任务通过 `POST /api/report-tasks` 创建或通过
+`PATCH /api/report-tasks/{task_id}` 修改；`GET /api/report-runs` 返回当前用户的所有
+定时运行，`GET /api/report-runs/{run_id}` 同时返回运行元数据和生成后的 Markdown。
 
-Web 首页按 `created_at` 把报告放到日历对应日期；日历标题从 Markdown 的首个一级
-标题动态提取。点击报告后进入左右分栏详情页：左侧按 GitHub Flavored Markdown
-渲染报告，右侧展示生成该报告的原始请求、推理过程和工具调用结果。
+Web 首页是同一批 `ReportRun` 的两种视图：FullCalendar 月历和 TanStack Table，
+由筛选器右侧的图标组切换。月历始终按 `scheduled_for` 归属日期，不使用报告入库时间；
+筛选维度是“报告类型 + 主题”。两种视图都进入同一个左右分栏详情页：左侧渲染
+Markdown，右侧展示原始 Session、Thread、模型、推理深度、请求、推理和工具轨迹。
 
 ## 启动
 

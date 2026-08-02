@@ -143,50 +143,6 @@ class SessionRepository:
         return row
 
 
-class SessionDefaultsRepository:
-    def __init__(self, database: Database) -> None:
-        self._database = database
-
-    async def get_session(self, session_id: UUID) -> dict[str, str | None]:
-        async with self._database.connection() as connection:
-            cursor = await connection.execute(
-                """
-                SELECT default_model, default_reasoning_effort
-                FROM app_sessions
-                WHERE id = %s
-                """,
-                (session_id,),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            raise NotFoundError(f"session {session_id} not found")
-        return {
-            "model": row["default_model"],
-            "reasoning_effort": row["default_reasoning_effort"],
-        }
-
-    async def set_session(
-        self,
-        session_id: UUID,
-        *,
-        model: str,
-        reasoning_effort: str,
-    ) -> dict[str, str]:
-        async with self._database.connection() as connection:
-            await connection.execute(
-                """
-                UPDATE app_sessions
-                SET default_model = %s,
-                    default_reasoning_effort = %s,
-                    updated_at = now()
-                WHERE id = %s
-                """,
-                (model, reasoning_effort, session_id),
-            )
-            await connection.commit()
-        return {"model": model, "reasoning_effort": reasoning_effort}
-
-
 class RunRepository:
     def __init__(self, database: Database) -> None:
         self._database = database

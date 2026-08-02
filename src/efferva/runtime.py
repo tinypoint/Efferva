@@ -23,7 +23,8 @@ from uuid import UUID, uuid4
 from websockets.asyncio.client import ClientConnection, connect
 
 from efferva.config import Settings
-from efferva.sandbox import SandboxControlPlane, SandboxEnvironment
+from efferva.sandbox.manager import SandboxControlPlane
+from efferva.sandbox.protocol import SandboxEnvironment
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -385,42 +386,48 @@ class CodexProxy:
             "thread/read",
             {"threadId": thread_id, "includeTurns": False},
         )
-        thread = dict(result["thread"])
-        turns: list[dict[str, Any]] = []
-        cursor: str | None = None
-        seen_cursors: set[str] = set()
-        while True:
-            params: dict[str, Any] = {
-                "threadId": thread_id,
-                "limit": 100,
-                "sortDirection": "asc",
-                "itemsView": "full",
-            }
-            if cursor is not None:
-                params["cursor"] = cursor
-            try:
-                page = await self.request(session, "thread/turns/list", params)
-            except CodexRpcError as error:
-                message = str(error.error.get("message", ""))
-                if "is not materialized yet" not in message:
-                    raise
-                break
-            turns.extend(dict(turn) for turn in page.get("data") or [])
-            next_cursor = page.get("nextCursor")
-            if not isinstance(next_cursor, str) or next_cursor in seen_cursors:
-                break
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
-        thread["turns"] = turns
-        return thread
+        return dict(result["thread"])
+
+    async def list_thread_turns(
+        self,
+        session: Mapping[str, Any],
+        thread_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        sort_direction: str | None = None,
+        items_view: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if limit is not None:
+            params["limit"] = limit
+        if sort_direction is not None:
+            params["sortDirection"] = sort_direction
+        if items_view is not None:
+            params["itemsView"] = items_view
+        return await self.request(session, "thread/turns/list", params)
 
     async def find_active_turn(
         self,
         session: Mapping[str, Any],
         thread_id: str,
     ) -> str | None:
-        thread = await self.read_thread(session, thread_id)
-        for turn in reversed(thread.get("turns") or []):
+        try:
+            page = await self.list_thread_turns(
+                session,
+                thread_id,
+                limit=1,
+                sort_direction="desc",
+                items_view="notLoaded",
+            )
+        except CodexRpcError as error:
+            message = str(error.error.get("message") or "")
+            if "is not materialized yet" in message:
+                return None
+            raise
+        for turn in page.get("data") or []:
             if turn.get("status") == "inProgress" and turn.get("id"):
                 return str(turn["id"])
         return None

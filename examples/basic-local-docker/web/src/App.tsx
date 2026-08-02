@@ -27,6 +27,10 @@ import type {
   ThreadSummary,
 } from "./types";
 
+function threadTitle(thread: ThreadSummary): string {
+  return thread.name?.trim() || "Untitled thread";
+}
+
 export function App() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -72,9 +76,9 @@ export function App() {
     "low";
   const selectedThread = threads.data?.find((item) => item.id === threadId);
   const skills = useQuery({
-    queryKey: ["skills", sessionId, selectedThread?.workspace],
+    queryKey: ["skills", sessionId, selectedThread?.cwd],
     queryFn: () =>
-      api.listSkills(sessionId!, selectedThread?.workspace ?? undefined),
+      api.listSkills(sessionId!, selectedThread?.cwd ?? undefined),
     enabled: Boolean(sessionId),
   });
   const createDefaultSession = useMutation({
@@ -177,14 +181,15 @@ export function App() {
 
   const handleThreadCreated = useCallback(
     (thread: ThreadSummary) => {
+      if (!sessionId) return;
       queryClient.setQueryData<ThreadSummary[]>(
-        ["threads", thread.session_id],
+        ["threads", sessionId],
         (current = []) => [
           thread,
           ...current.filter((item) => item.id !== thread.id),
         ],
       );
-      navigate(`/sessions/${thread.session_id}/threads/${thread.id}`, {
+      navigate(`/sessions/${sessionId}/threads/${thread.id}`, {
         replace: true,
       });
       const settings: Required<ExecutionSettings> = {
@@ -192,11 +197,11 @@ export function App() {
         reasoning_effort: reasoningEffort,
       };
       queryClient.setQueryData(
-        ["execution-settings", thread.session_id, thread.id],
+        ["execution-settings", sessionId, thread.id],
         settings,
       );
     },
-    [model, navigate, queryClient, reasoningEffort],
+    [model, navigate, queryClient, reasoningEffort, sessionId],
   );
 
   const handleRunSettled = useCallback(
@@ -218,7 +223,7 @@ export function App() {
         (current = []) =>
           current.map((thread) =>
             thread.id === updatedThreadId
-              ? { ...thread, name: threadName, title: threadName }
+              ? { ...thread, name: threadName }
               : thread,
           ),
       );
@@ -296,7 +301,7 @@ export function App() {
       models={models.data}
       onModelChange={handleModelChange}
       onReasoningEffortChange={handleReasoningEffortChange}
-      workspace={selectedThread?.workspace}
+      workspace={selectedThread?.cwd}
       skills={enabledSkills}
       onThreadCreated={handleThreadCreated}
       onThreadNameUpdated={handleThreadNameUpdated}
@@ -341,12 +346,12 @@ export function App() {
                     navigate(`/sessions/${sessionId}/threads/${thread.id}`)
                   }
                 >
-                  {thread.title}
+                  {threadTitle(thread)}
                 </button>
                 <Menu.Root>
                   <Menu.Trigger
                     className="mr-1 rounded p-1 opacity-0 outline-none hover:bg-background focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 data-popup-open:bg-background data-popup-open:opacity-100"
-                    aria-label={`Actions for ${thread.title}`}
+                    aria-label={`Actions for ${threadTitle(thread)}`}
                   >
                     <MoreHorizontal className="size-4" />
                   </Menu.Trigger>
@@ -382,7 +387,11 @@ export function App() {
         <main className="grid min-h-0 min-w-0 grid-rows-[3.5rem_minmax(0,1fr)]">
           <header className="flex items-center border-b px-5">
             <h1 className="truncate text-sm font-semibold">
-              {selectedThread?.title ?? (threadId ? "Opening thread…" : "New thread")}
+              {selectedThread
+                ? threadTitle(selectedThread)
+                : threadId
+                  ? "Opening thread…"
+                  : "New thread"}
             </h1>
           </header>
           <div className="min-h-0">
@@ -402,7 +411,7 @@ export function App() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete thread?</AlertDialogTitle>
             <AlertDialogDescription>
-              “{threadToDelete?.title}” will be permanently deleted. This
+              “{threadToDelete ? threadTitle(threadToDelete) : ""}” will be permanently deleted. This
               action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>

@@ -5,7 +5,7 @@ import type {
   ModelOption,
   Session,
   SkillListEntry,
-  ThreadDetail,
+  ThreadHistoryPage,
   ThreadSummary,
 } from "./types";
 
@@ -126,8 +126,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  readThread: (sessionId: string, threadId: string) =>
-    request<ThreadDetail>(`/sessions/${sessionId}/threads/${threadId}`),
+  loadThreadHistoryPage: (
+    sessionId: string,
+    threadId: string,
+    options?: { cursor?: string; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    const encodedParams = params.toString();
+    const query = encodedParams ? `?${encodedParams}` : "";
+    return request<ThreadHistoryPage>(
+      `/sessions/${sessionId}/threads/${threadId}/ag-ui${query}`,
+      { signal: options?.signal },
+    );
+  },
   deleteThread: (sessionId: string, threadId: string) =>
     request<{ deleted: boolean }>(
       `/sessions/${sessionId}/threads/${threadId}`,

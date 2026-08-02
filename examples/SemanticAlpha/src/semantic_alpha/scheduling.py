@@ -13,11 +13,12 @@ from pydantic import BaseModel, Field
 
 from efferva import SandboxProvider
 from efferva.db import Database
-from semantic_alpha.industry_reports import (
+from semantic_alpha.reports import (
     REPORT_MODEL,
     REPORT_REASONING_EFFORT,
-    execute_industry_report,
+    execute_report,
     mark_interrupted_runs_failed,
+    normalize_report_filename,
     notify_run_changed,
 )
 
@@ -25,8 +26,12 @@ from semantic_alpha.industry_reports import (
 logger = logging.getLogger(__name__)
 
 
-class IndustryScheduleCreate(BaseModel):
-    industry: str = Field(min_length=1, max_length=80)
+class ReportTaskCreate(BaseModel):
+    report_type: str = Field(min_length=1, max_length=120)
+    subject: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=240)
+    filename: str = Field(min_length=1, max_length=240)
+    prompt: str = Field(min_length=1, max_length=40_000)
     cron_expression: str = Field(min_length=1, max_length=100)
     timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=80)
     model: str = Field(default=REPORT_MODEL, min_length=1, max_length=120)
@@ -38,8 +43,12 @@ class IndustryScheduleCreate(BaseModel):
     enabled: bool = True
 
 
-class IndustryScheduleUpdate(BaseModel):
-    industry: str | None = Field(default=None, min_length=1, max_length=80)
+class ReportTaskUpdate(BaseModel):
+    report_type: str | None = Field(default=None, min_length=1, max_length=120)
+    subject: str | None = Field(default=None, min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    filename: str | None = Field(default=None, min_length=1, max_length=240)
+    prompt: str | None = Field(default=None, min_length=1, max_length=40_000)
     cron_expression: str | None = Field(default=None, min_length=1, max_length=100)
     timezone: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = Field(default=None, min_length=1, max_length=120)
@@ -47,11 +56,16 @@ class IndustryScheduleUpdate(BaseModel):
     enabled: bool | None = None
 
 
-class IndustrySchedule(BaseModel):
+class ReportTask(BaseModel):
     id: UUID
     created_at: datetime
     updated_at: datetime
-    industry: str
+    owner_user_id: str
+    report_type: str
+    subject: str
+    title: str
+    filename: str
+    prompt: str
     cron_expression: str
     timezone: str
     model: str
@@ -64,47 +78,70 @@ class IndustrySchedule(BaseModel):
 @dataclass(frozen=True, slots=True)
 class _ScheduledRun:
     id: UUID
-    industry: str
+    owner_user_id: str
+    report_type: str
+    subject: str
+    title: str
+    filename: str
+    prompt: str
     model: str
     reasoning_effort: str
 
 
-def create_industry_schedules_router() -> APIRouter:
-    router = APIRouter(prefix="/api/industry-report-schedules")
+_TASK_COLUMNS = """
+    id,
+    created_at,
+    updated_at,
+    owner_user_id,
+    report_type,
+    subject,
+    title,
+    filename,
+    prompt,
+    cron_expression,
+    timezone,
+    model,
+    reasoning_effort,
+    enabled,
+    next_run_at,
+    last_run_at
+"""
 
-    @router.get("", response_model=list[IndustrySchedule])
-    async def list_schedules(request: Request) -> list[dict[str, object]]:
+
+def create_report_tasks_router() -> APIRouter:
+    router = APIRouter(prefix="/api/report-tasks")
+
+    @router.get("", response_model=list[ReportTask])
+    async def list_tasks(request: Request) -> list[dict[str, object]]:
         database = _database(request)
+        owner_user_id = _owner_user_id(request)
         async with database.connection() as connection:
             cursor = await connection.execute(
-                """
-                SELECT
-                    id,
-                    created_at,
-                    updated_at,
-                    industry,
-                    cron_expression,
-                    timezone,
-                    model,
-                    reasoning_effort,
-                    enabled,
-                    next_run_at,
-                    last_run_at
-                FROM industry_research_schedules
-                ORDER BY created_at DESC
-                """
+                f"""
+                SELECT {_TASK_COLUMNS}
+                FROM report_tasks
+                WHERE owner_user_id = %s
+                ORDER BY report_type, subject, created_at
+                """,
+                (owner_user_id,),
             )
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
-    @router.post("", response_model=IndustrySchedule, status_code=201)
-    async def create_schedule(
-        payload: IndustryScheduleCreate,
+    @router.post("", response_model=ReportTask, status_code=201)
+    async def create_task(
+        payload: ReportTaskCreate,
         request: Request,
     ) -> dict[str, object]:
-        industry = payload.industry.strip()
+        report_type = _required(payload.report_type, "report_type")
+        subject = _required(payload.subject, "subject")
+        title = _required(payload.title, "title")
+        filename = normalize_report_filename(payload.filename)
+        prompt = _required(payload.prompt, "prompt")
         cron_expression = payload.cron_expression.strip()
         timezone = payload.timezone.strip()
+        model = payload.model.strip()
+        reasoning_effort = payload.reasoning_effort.strip()
         _validate_schedule(cron_expression, timezone)
         next_run_at = (
             _next_occurrence(cron_expression, timezone, datetime.now(UTC))
@@ -113,11 +150,17 @@ def create_industry_schedules_router() -> APIRouter:
         )
 
         database = _database(request)
+        owner_user_id = _owner_user_id(request)
         async with database.connection() as connection:
             cursor = await connection.execute(
-                """
-                INSERT INTO industry_research_schedules (
-                    industry,
+                f"""
+                INSERT INTO report_tasks (
+                    owner_user_id,
+                    report_type,
+                    subject,
+                    title,
+                    filename,
+                    prompt,
                     cron_expression,
                     timezone,
                     model,
@@ -125,26 +168,20 @@ def create_industry_schedules_router() -> APIRouter:
                     enabled,
                     next_run_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING
-                    id,
-                    created_at,
-                    updated_at,
-                    industry,
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING {_TASK_COLUMNS}
+                """,
+                (
+                    owner_user_id,
+                    report_type,
+                    subject,
+                    title,
+                    filename,
+                    prompt,
                     cron_expression,
                     timezone,
                     model,
                     reasoning_effort,
-                    enabled,
-                    next_run_at,
-                    last_run_at
-                """,
-                (
-                    industry,
-                    cron_expression,
-                    timezone,
-                    payload.model.strip(),
-                    payload.reasoning_effort.strip(),
                     payload.enabled,
                     next_run_at,
                 ),
@@ -152,37 +189,51 @@ def create_industry_schedules_router() -> APIRouter:
             row = await cursor.fetchone()
             await connection.commit()
         if row is None:
-            raise RuntimeError("industry schedule insert returned no row")
+            raise RuntimeError("report task insert returned no row")
         return dict(row)
 
-    @router.patch("/{schedule_id}", response_model=IndustrySchedule)
-    async def update_schedule(
-        schedule_id: UUID,
-        payload: IndustryScheduleUpdate,
+    @router.patch("/{task_id}", response_model=ReportTask)
+    async def update_task(
+        task_id: UUID,
+        payload: ReportTaskUpdate,
         request: Request,
     ) -> dict[str, object]:
         database = _database(request)
+        owner_user_id = _owner_user_id(request)
         async with database.connection() as connection:
             cursor = await connection.execute(
                 """
                 SELECT
-                    industry,
+                    report_type,
+                    subject,
+                    title,
+                    filename,
+                    prompt,
                     cron_expression,
                     timezone,
                     model,
                     reasoning_effort,
                     enabled
-                FROM industry_research_schedules
-                WHERE id = %s
+                FROM report_tasks
+                WHERE id = %s AND owner_user_id = %s
                 FOR UPDATE
                 """,
-                (schedule_id,),
+                (task_id, owner_user_id),
             )
             current = await cursor.fetchone()
             if current is None:
-                raise HTTPException(status_code=404, detail="定时任务不存在")
+                raise HTTPException(status_code=404, detail="报告任务不存在")
 
-            industry = (payload.industry or current["industry"]).strip()
+            report_type = _required(
+                payload.report_type or current["report_type"],
+                "report_type",
+            )
+            subject = _required(payload.subject or current["subject"], "subject")
+            title = _required(payload.title or current["title"], "title")
+            filename = normalize_report_filename(
+                payload.filename or current["filename"]
+            )
+            prompt = _required(payload.prompt or current["prompt"], "prompt")
             cron_expression = (
                 payload.cron_expression or current["cron_expression"]
             ).strip()
@@ -204,10 +255,14 @@ def create_industry_schedules_router() -> APIRouter:
             )
 
             cursor = await connection.execute(
-                """
-                UPDATE industry_research_schedules
+                f"""
+                UPDATE report_tasks
                 SET
-                    industry = %s,
+                    report_type = %s,
+                    subject = %s,
+                    title = %s,
+                    filename = %s,
+                    prompt = %s,
                     cron_expression = %s,
                     timezone = %s,
                     model = %s,
@@ -215,41 +270,35 @@ def create_industry_schedules_router() -> APIRouter:
                     enabled = %s,
                     next_run_at = %s,
                     updated_at = now()
-                WHERE id = %s
-                RETURNING
-                    id,
-                    created_at,
-                    updated_at,
-                    industry,
-                    cron_expression,
-                    timezone,
-                    model,
-                    reasoning_effort,
-                    enabled,
-                    next_run_at,
-                    last_run_at
+                WHERE id = %s AND owner_user_id = %s
+                RETURNING {_TASK_COLUMNS}
                 """,
                 (
-                    industry,
+                    report_type,
+                    subject,
+                    title,
+                    filename,
+                    prompt,
                     cron_expression,
                     timezone,
                     model,
                     reasoning_effort,
                     enabled,
                     next_run_at,
-                    schedule_id,
+                    task_id,
+                    owner_user_id,
                 ),
             )
             row = await cursor.fetchone()
             await connection.commit()
         if row is None:
-            raise RuntimeError("industry schedule update returned no row")
+            raise RuntimeError("report task update returned no row")
         return dict(row)
 
     return router
 
 
-class IndustryResearchScheduler:
+class ReportScheduler:
     def __init__(
         self,
         *,
@@ -268,7 +317,7 @@ class IndustryResearchScheduler:
         await mark_interrupted_runs_failed(self._database)
         self._loop_task = asyncio.create_task(
             self._run_loop(),
-            name="semantic-alpha-industry-scheduler",
+            name="semantic-alpha-report-scheduler",
         )
 
     async def stop(self) -> None:
@@ -294,14 +343,14 @@ class IndustryResearchScheduler:
                 for run in runs:
                     task = asyncio.create_task(
                         self._execute(run),
-                        name=f"industry-research-run-{run.id}",
+                        name=f"report-run-{run.id}",
                     )
                     self._run_tasks.add(task)
                     task.add_done_callback(self._run_tasks.discard)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("failed to claim scheduled industry research runs")
+                logger.exception("failed to claim scheduled report runs")
 
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=5)
@@ -310,19 +359,24 @@ class IndustryResearchScheduler:
 
     async def _execute(self, run: _ScheduledRun) -> None:
         try:
-            await execute_industry_report(
+            await execute_report(
                 app=self._app,
                 sandbox=self._sandbox,
                 database=self._database,
                 run_id=run.id,
-                industry=run.industry,
+                owner_user_id=run.owner_user_id,
+                report_type=run.report_type,
+                subject=run.subject,
+                title=run.title,
+                filename=run.filename,
+                prompt=run.prompt,
                 model=run.model,
                 reasoning_effort=run.reasoning_effort,
             )
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("scheduled industry research run %s failed", run.id)
+            logger.exception("scheduled report run %s failed", run.id)
 
 
 async def _claim_due_runs(database: Database) -> list[_ScheduledRun]:
@@ -333,13 +387,18 @@ async def _claim_due_runs(database: Database) -> list[_ScheduledRun]:
             """
             SELECT
                 id,
-                industry,
+                owner_user_id,
+                report_type,
+                subject,
+                title,
+                filename,
+                prompt,
                 cron_expression,
                 timezone,
                 model,
                 reasoning_effort,
                 next_run_at
-            FROM industry_research_schedules
+            FROM report_tasks
             WHERE enabled AND next_run_at <= %s
             ORDER BY next_run_at
             FOR UPDATE SKIP LOCKED
@@ -347,60 +406,77 @@ async def _claim_due_runs(database: Database) -> list[_ScheduledRun]:
             """,
             (now,),
         )
-        schedules = await cursor.fetchall()
-        for schedule in schedules:
+        tasks = await cursor.fetchall()
+        for task in tasks:
             run_id = uuid4()
-            scheduled_for = schedule["next_run_at"]
+            scheduled_for = task["next_run_at"]
             cursor = await connection.execute(
                 """
-                INSERT INTO industry_research_runs (
+                INSERT INTO report_runs (
                     id,
-                    schedule_id,
+                    task_id,
                     scheduled_for,
-                    trigger,
-                    industry,
+                    owner_user_id,
+                    report_type,
+                    subject,
+                    title,
+                    filename,
+                    prompt,
                     status,
                     stage,
                     model,
                     reasoning_effort
                 )
-                VALUES (%s, %s, %s, 'scheduled', %s, 'queued', 'queued', %s, %s)
-                ON CONFLICT (schedule_id, scheduled_for) DO NOTHING
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'queued', 'queued', %s, %s
+                )
+                ON CONFLICT (task_id, scheduled_for) DO NOTHING
                 RETURNING id
                 """,
                 (
                     run_id,
-                    schedule["id"],
+                    task["id"],
                     scheduled_for,
-                    schedule["industry"],
-                    schedule["model"],
-                    schedule["reasoning_effort"],
+                    task["owner_user_id"],
+                    task["report_type"],
+                    task["subject"],
+                    task["title"],
+                    task["filename"],
+                    task["prompt"],
+                    task["model"],
+                    task["reasoning_effort"],
                 ),
             )
             inserted = await cursor.fetchone()
             await connection.execute(
                 """
-                UPDATE industry_research_schedules
+                UPDATE report_tasks
                 SET last_run_at = %s, next_run_at = %s, updated_at = now()
                 WHERE id = %s
                 """,
                 (
                     scheduled_for,
                     _next_occurrence(
-                        schedule["cron_expression"],
-                        schedule["timezone"],
+                        task["cron_expression"],
+                        task["timezone"],
                         now,
                     ),
-                    schedule["id"],
+                    task["id"],
                 ),
             )
             if inserted is not None:
                 claimed.append(
                     _ScheduledRun(
                         id=run_id,
-                        industry=schedule["industry"],
-                        model=schedule["model"],
-                        reasoning_effort=schedule["reasoning_effort"],
+                        owner_user_id=task["owner_user_id"],
+                        report_type=task["report_type"],
+                        subject=task["subject"],
+                        title=task["title"],
+                        filename=task["filename"],
+                        prompt=task["prompt"],
+                        model=task["model"],
+                        reasoning_effort=task["reasoning_effort"],
                     )
                 )
         await connection.commit()
@@ -418,6 +494,13 @@ def _validate_schedule(cron_expression: str, timezone: str) -> None:
         raise HTTPException(status_code=422, detail="时区不存在") from error
 
 
+def _required(value: str, field: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{field} 不能为空")
+    return normalized
+
+
 def _next_occurrence(
     cron_expression: str,
     timezone: str,
@@ -430,7 +513,14 @@ def _next_occurrence(
 
 
 def _database(request: Request) -> Database:
-    database = getattr(request.app.state, "industry_report_database", None)
+    database = getattr(request.app.state, "report_database", None)
     if not isinstance(database, Database):
         raise RuntimeError("Semantic Alpha database is not ready")
     return database
+
+
+def _owner_user_id(request: Request) -> str:
+    owner_user_id = getattr(request.app.state, "report_owner_user_id", None)
+    if not isinstance(owner_user_id, str) or not owner_user_id:
+        raise RuntimeError("Semantic Alpha report owner is not ready")
+    return owner_user_id

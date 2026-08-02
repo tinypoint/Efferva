@@ -10,11 +10,14 @@
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
+    "@fullcalendar/react": "^7.0.2",
+    "@tanstack/react-table": "^8.21.3",
     "lucide-react": "^1.28.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "temporal-polyfill": "^1.0.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

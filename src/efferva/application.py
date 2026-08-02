@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, FastAPI
+from fastapi.responses import JSONResponse
 
-from efferva.api import create_api_router, principal_dependency
+from efferva.api import create_api_router
 from efferva.broker import RedisRunBroker
 from efferva.codex_release import prepare_official_codex
 from efferva.config import (
@@ -20,17 +20,16 @@ from efferva.db import Database
 from efferva.identity import (
     ForbiddenError,
     IdentityResolver,
-    Principal,
     UnauthenticatedError,
 )
 from efferva.repository import (
     NotFoundError,
     RunRepository,
-    SessionDefaultsRepository,
     SessionRepository,
 )
 from efferva.runtime import CodexProxy, CodexRpcError, ServerRequestHandler
-from efferva.sandbox import SandboxProvider, create_sandbox_control_plane
+from efferva.sandbox import SandboxProvider
+from efferva.sandbox.manager import create_sandbox_control_plane
 
 
 @dataclass(slots=True)
@@ -39,7 +38,6 @@ class _RuntimeResources:
     proxy: CodexProxy | None = None
     broker: RedisRunBroker | None = None
     runs: RunRepository | None = None
-    session_defaults: SessionDefaultsRepository | None = None
 
     def require_repository(self) -> SessionRepository:
         if self.repository is None:
@@ -60,12 +58,6 @@ class _RuntimeResources:
         if self.runs is None:
             raise RuntimeError("Efferva application has not started")
         return self.runs
-
-    def require_session_defaults(self) -> SessionDefaultsRepository:
-        if self.session_defaults is None:
-            raise RuntimeError("Efferva application has not started")
-        return self.session_defaults
-
 
 class Efferva:
     """Product-facing facade for installing Efferva into an authenticated application."""
@@ -129,7 +121,6 @@ class Efferva:
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
                 runs = RunRepository(database)
-                session_defaults = SessionDefaultsRepository(database)
                 sandboxes = create_sandbox_control_plane(
                     settings,
                     self.sandbox,
@@ -148,10 +139,8 @@ class Efferva:
                 resources.proxy = proxy
                 resources.broker = broker
                 resources.runs = runs
-                resources.session_defaults = session_defaults
                 yield
             finally:
-                resources.session_defaults = None
                 resources.runs = None
                 resources.broker = None
                 resources.proxy = None
@@ -173,24 +162,8 @@ class Efferva:
                 codex_proxy=resources.require_proxy,
                 run_broker=resources.require_broker,
                 runs=resources.require_runs,
-                session_defaults=resources.require_session_defaults,
             )
         )
-
-        static_dir = files("efferva").joinpath("static")
-        require_principal = principal_dependency(self.identity)
-
-        @router.get("/", include_in_schema=False)
-        async def index(
-            _: Principal = Depends(require_principal),
-        ) -> FileResponse:
-            return FileResponse(str(static_dir.joinpath("index.html")))
-
-        @router.get("/static/{asset_name}", include_in_schema=False)
-        async def static_asset(asset_name: str) -> FileResponse:
-            if asset_name not in {"app.js", "style.css"}:
-                raise HTTPException(status_code=404, detail="asset not found")
-            return FileResponse(str(static_dir.joinpath(asset_name)))
 
         app.include_router(router, prefix=normalized_prefix)
         self._install_exception_handlers(app)

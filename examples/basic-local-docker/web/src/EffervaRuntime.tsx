@@ -1,13 +1,16 @@
 import {
   createContext,
+  forwardRef,
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ComponentProps,
   type ReactNode,
+  type UIEvent,
 } from "react";
 import {
   HttpAgent,
@@ -19,6 +22,7 @@ import {
   CopilotChatConfigurationProvider,
   CopilotChatAssistantMessage,
   CopilotChatInput,
+  CopilotChatMessageView,
   CopilotChatReasoningMessage,
   CopilotChatToolCallsView,
   CopilotChatView,
@@ -26,6 +30,8 @@ import {
   UseAgentUpdate,
   useAgent,
   useCopilotKit,
+  useDefaultRenderTool,
+  type CopilotChatInputProps,
   type ToolsMenuItem,
 } from "@copilotkit/react-core/v2";
 import { from, type Observable } from "rxjs";
@@ -92,18 +98,79 @@ function restoreMessages(messages: AgUiMessage[]): Message[] {
       content: reasoningText || " ",
       process,
       processDurationMs,
-      assistantMessageId: message.id,
     };
     return [processMessage, assistant as Message];
   });
+}
+
+function mergeHistoryMessages(
+  current: Message[],
+  incoming: Message[],
+): Message[] {
+  const incomingById = new Map(incoming.map((message) => [message.id, message]));
+  const currentIds = new Set(current.map((message) => message.id));
+  return [
+    ...current.map((message) => incomingById.get(message.id) ?? message),
+    ...incoming.filter((message) => !currentIds.has(message.id)),
+  ];
+}
+
+function prependHistoryMessages(
+  current: Message[],
+  older: Message[],
+): Message[] {
+  const olderById = new Map(older.map((message) => [message.id, message]));
+  const currentIds = new Set(current.map((message) => message.id));
+  return [
+    ...older.filter((message) => !currentIds.has(message.id)),
+    ...current.map((message) => olderById.get(message.id) ?? message),
+  ];
+}
+
+function mergeVisibleMessages(
+  history: Message[],
+  live: Message[],
+): Message[] {
+  const liveById = new Map(live.map((message) => [message.id, message]));
+  const historyIds = new Set(history.map((message) => message.id));
+  return [
+    ...history.map((message) => liveById.get(message.id) ?? message),
+    ...live.filter((message) => !historyIds.has(message.id)),
+  ];
+}
+
+function findChatScrollElement(root: HTMLElement): HTMLElement | null {
+  const content = root.querySelector<HTMLElement>(
+    '[data-testid="copilot-scroll-content"]',
+  );
+  let element = content?.parentElement ?? null;
+  while (element && element !== root) {
+    const overflowY = getComputedStyle(element).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") return element;
+    element = element.parentElement;
+  }
+  return null;
 }
 
 type AssistantMessage = Extract<Message, { role: "assistant" }>;
 type EffervaProcessMessage = Extract<Message, { role: "reasoning" }> & {
   process?: AgUiMessage["process"];
   processDurationMs?: number;
-  assistantMessageId?: string;
+  processTextOffset?: number;
 };
+type ToolCall = NonNullable<AssistantMessage["toolCalls"]>[number];
+
+type ProcessRenderContextValue = {
+  messageId: string;
+  messages: Message[];
+  process: NonNullable<AgUiMessage["process"]>;
+  streaming: boolean;
+  toolCalls: Map<string, ToolCall>;
+};
+
+const ProcessRenderContext = createContext<ProcessRenderContextValue | null>(
+  null,
+);
 
 function timestampMs(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -128,10 +195,53 @@ type EffervaReasoningMessageProps = ComponentProps<
   typeof CopilotChatReasoningMessage
 >;
 
+function EffervaProcessContent() {
+  const value = useContext(ProcessRenderContext);
+  if (!value) return null;
+
+  let lastReasoningIndex = -1;
+  for (let index = value.process.length - 1; index >= 0; index -= 1) {
+    if (value.process[index]?.type === "reasoning") {
+      lastReasoningIndex = index;
+      break;
+    }
+  }
+
+  return value.process.map((part, index) => {
+    if (part.type === "reasoning") {
+      return (
+        <CopilotChatReasoningMessage.Content
+          key={`${value.messageId}:reasoning:${index}`}
+          hasContent={Boolean(part.text.trim())}
+          isStreaming={value.streaming && index === lastReasoningIndex}
+        >
+          {part.text}
+        </CopilotChatReasoningMessage.Content>
+      );
+    }
+
+    const toolCall = value.toolCalls.get(part.toolCallId);
+    if (!toolCall) return null;
+    const toolMessage: AssistantMessage = {
+      id: `${value.messageId}:tool:${toolCall.id}`,
+      role: "assistant",
+      content: "",
+      toolCalls: [toolCall],
+    };
+    return (
+      <CopilotChatToolCallsView
+        key={`${value.messageId}:tool:${toolCall.id}`}
+        message={toolMessage}
+        messages={value.messages}
+      />
+    );
+  });
+}
+
 function EffervaReasoningMessage({
   message,
-  messages = [],
-  isRunning,
+  messages,
+  isRunning: _isRunning,
   header: _header,
   contentView: _contentView,
   toggle: _toggle,
@@ -140,23 +250,27 @@ function EffervaReasoningMessage({
 }: EffervaReasoningMessageProps) {
   const { agent } = useAgent({
     agentId: AGENT_ID,
-    updates: [UseAgentUpdate.OnStateChanged],
+    updates: AGENT_UPDATES,
   });
-  const processMessage = message as EffervaProcessMessage;
-  const processAssistantMessage = messages.find(
-    (candidate): candidate is AssistantMessage =>
-      candidate.role === "assistant" &&
-      candidate.id === processMessage.assistantMessageId,
+  const currentMessages = [...agent.messages] as Message[];
+  const visibleMessages = messages ? [...messages] : currentMessages;
+  const currentMessage =
+    currentMessages.find((candidate) => candidate.id === message.id) ??
+    message;
+  const processMessage = currentMessage as EffervaProcessMessage;
+  const messageIndex = currentMessages.findIndex(
+    (item) => item.id === message.id,
   );
-  const messageIndex = messages.findIndex((item) => item.id === message.id);
   let lastUserIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "user") {
+  for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
+    if (currentMessages[index]?.role === "user") {
       lastUserIndex = index;
       break;
     }
   }
-  const streaming = Boolean(isRunning && messageIndex > lastUserIndex);
+  const streaming = Boolean(
+    agent.isRunning && messageIndex > lastUserIndex,
+  );
   const fallbackStartedAtRef = useRef(Date.now());
   const state =
     typeof agent.state === "object" && agent.state
@@ -165,8 +279,6 @@ function EffervaReasoningMessage({
   const startedAt =
     timestampMs(state.startedAt) ?? fallbackStartedAtRef.current;
   const [now, setNow] = useState(Date.now());
-  const [isOpen, setIsOpen] = useState(streaming);
-  const userToggledRef = useRef(false);
 
   useEffect(() => {
     if (!streaming) return;
@@ -175,80 +287,62 @@ function EffervaReasoningMessage({
     return () => window.clearInterval(timer);
   }, [streaming]);
 
-  useEffect(() => {
-    if (streaming) {
-      userToggledRef.current = false;
-      setIsOpen(true);
-    } else if (!userToggledRef.current) {
-      setIsOpen(false);
-    }
-  }, [streaming]);
-
   const durationMs = streaming
     ? Math.max(0, now - startedAt)
     : Math.max(0, processMessage.processDurationMs ?? 0);
-  const process =
-    processMessage.process ??
-    (message.content.trim()
-      ? [{ type: "reasoning" as const, text: message.content }]
-      : []);
+  const process = [...(processMessage.process ?? [])];
+  if (processMessage.processTextOffset !== undefined) {
+    const trailingText = processMessage.content.slice(
+      processMessage.processTextOffset,
+    );
+    if (trailingText.trim()) {
+      process.push({ type: "reasoning", text: trailingText });
+    }
+  } else if (process.length === 0 && processMessage.content.trim()) {
+    process.push({ type: "reasoning", text: processMessage.content });
+  }
   const hasContent = process.length > 0;
   const label = `${streaming ? "处理中" : "已处理"} ${formatElapsed(durationMs)}`;
+  const toolCalls = new Map(
+    visibleMessages
+      .filter(
+        (candidate): candidate is AssistantMessage =>
+          candidate.role === "assistant",
+      )
+      .flatMap((candidate) => candidate.toolCalls ?? [])
+      .map((toolCall) => [toolCall.id, toolCall] as const),
+  );
+  const sdkMessage: EffervaProcessMessage =
+    hasContent && !processMessage.content
+      ? { ...processMessage, content: " " }
+      : processMessage;
+  const messagesThroughProcess =
+    messageIndex >= 0
+      ? currentMessages.slice(0, messageIndex + 1)
+      : [
+          ...(messages ?? []).filter((candidate) => candidate.id !== message.id),
+          sdkMessage,
+        ];
 
   return (
-    <div
-      className="my-1"
-      data-message-id={message.id}
-      {...props}
+    <ProcessRenderContext.Provider
+      value={{
+        messageId: message.id,
+        messages: visibleMessages,
+        process,
+        streaming,
+        toolCalls,
+      }}
     >
-      <CopilotChatReasoningMessage.Header
-        isOpen={isOpen}
-        label={label}
-        hasContent={hasContent}
-        isStreaming={streaming}
-        onClick={
-          hasContent
-            ? () => {
-                userToggledRef.current = true;
-                setIsOpen((current) => !current);
-              }
-            : undefined
-        }
+      <CopilotChatReasoningMessage
+        {...props}
+        message={sdkMessage}
+        messages={messagesThroughProcess}
+        isRunning={streaming}
+        header={{ label, isStreaming: streaming }}
+        contentView={EffervaProcessContent}
       />
-      <CopilotChatReasoningMessage.Toggle isOpen={isOpen}>
-        <div className="border-l pl-3">
-          {process.map((part, index) => {
-            if (part.type === "reasoning") {
-              return (
-                <CopilotChatReasoningMessage.Content
-                  key={`${message.id}:reasoning:${index}`}
-                  hasContent={Boolean(part.text.trim())}
-                >
-                  {part.text}
-                </CopilotChatReasoningMessage.Content>
-              );
-            }
-            const toolCall = processAssistantMessage?.toolCalls?.find(
-              (candidate) => candidate.id === part.toolCallId,
-            );
-            if (!toolCall) return null;
-            const toolMessage: AssistantMessage = {
-              id: `${message.id}:tool:${toolCall.id}`,
-              role: "assistant",
-              content: "",
-              toolCalls: [toolCall],
-            };
-            return (
-              <CopilotChatToolCallsView
-                key={`${message.id}:tool:${toolCall.id}`}
-                message={toolMessage}
-                messages={messages}
-              />
-            );
-          })}
-        </div>
-      </CopilotChatReasoningMessage.Toggle>
-    </div>
+    </ProcessRenderContext.Provider>
   );
 }
 
@@ -262,10 +356,18 @@ type EffervaAssistantMessageProps = ComponentProps<
 
 function EffervaAssistantMessage(props: EffervaAssistantMessageProps) {
   const { message, messages = [] } = props;
-  const toolCallsAreInProcess = messages.some(
-    (candidate) =>
-      candidate.role === "reasoning" &&
-      (candidate as EffervaProcessMessage).assistantMessageId === message.id,
+  const processToolCallIds = new Set(
+    messages.flatMap((candidate) =>
+      candidate.role === "reasoning"
+        ? ((candidate as EffervaProcessMessage).process ?? []).flatMap(
+            (part) =>
+              part.type === "tool-call" ? [part.toolCallId] : [],
+          )
+        : [],
+    ),
+  );
+  const toolCallsAreInProcess = Boolean(
+    message.toolCalls?.some((toolCall) => processToolCallIds.has(toolCall.id)),
   );
 
   return (
@@ -278,10 +380,98 @@ function EffervaAssistantMessage(props: EffervaAssistantMessageProps) {
   );
 }
 
+type MessageListProps = Parameters<
+  NonNullable<ComponentProps<typeof CopilotChatMessageView>["children"]>
+>[0];
+
+function EffervaMessageList({
+  isRunning,
+  messages,
+  messageElements,
+  interruptElement,
+}: MessageListProps) {
+  const lastMessage = messages[messages.length - 1];
+  const showCursor = isRunning && lastMessage?.role !== "reasoning";
+  return (
+    <div
+      data-copilotkit
+      data-testid="copilot-message-list"
+      className="copilotKitMessages cpk:flex cpk:flex-col"
+    >
+      {messageElements}
+      {interruptElement}
+      {showCursor && (
+        <div className="cpk:mt-2">
+          <CopilotChatMessageView.Cursor />
+        </div>
+      )}
+    </div>
+  );
+}
+
+type CompactToolCallProps = {
+  name: string;
+  parameters: unknown;
+  status: "inProgress" | "executing" | "complete";
+  result: string | undefined;
+};
+
+function CompactToolCall({
+  name,
+  parameters,
+  status,
+  result,
+}: CompactToolCallProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const complete = status === "complete";
+
+  return (
+    <div className="pt-1 pb-2 text-sm text-muted-foreground">
+      <div className="overflow-hidden rounded-lg border bg-background">
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-inherit"
+          aria-expanded={isOpen}
+          onClick={() => setIsOpen((current) => !current)}
+        >
+          <span
+            className={`transition-transform ${isOpen ? "rotate-90" : ""}`}
+            aria-hidden="true"
+          >
+            ›
+          </span>
+          <code className="min-w-0 flex-1 truncate bg-transparent p-0 text-sm text-inherit">
+            {name}
+          </code>
+          <span>{complete ? "完成" : "运行中"}</span>
+        </button>
+        {isOpen && (
+          <div className="grid gap-2 border-t px-3 py-2 text-inherit">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-sm text-inherit">
+              {JSON.stringify(parameters ?? {}, null, 2)}
+            </pre>
+            {result !== undefined && (
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border-t pt-2 text-sm text-inherit">
+                {result}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 type RuntimeContextValue = {
   sessionId: string;
+  threadId: string;
   workspace?: string | null;
   loading: boolean;
+  historyMessages: Message[];
+  historyRevision: number;
+  hasOlderHistory: boolean;
+  loadingOlderHistory: boolean;
+  loadOlderHistory: () => Promise<boolean>;
   error: string | null;
   clearError: () => void;
   skills: SkillMetadata[];
@@ -331,14 +521,25 @@ export function EffervaRuntime({
   onRunSettled,
   onThreadNotFound,
 }: EffervaRuntimeProps) {
-  const [loading, setLoading] = useState(Boolean(threadId));
+  const desiredThreadId = threadId ?? "new";
+  const [openedThreadId, setOpenedThreadId] = useState<string | null>(
+    desiredThreadId === "new" ? "new" : null,
+  );
   const [error, setError] = useState<string | null>(null);
+  const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
+  const olderHistoryRequestRef = useRef<AbortController | null>(null);
+  const navigationEpochRef = useRef(0);
+  const desiredThreadIdRef = useRef(desiredThreadId);
   const settingsRef = useRef({ model, reasoningEffort });
   const onThreadCreatedRef = useRef(onThreadCreated);
   const onThreadNameUpdatedRef = useRef(onThreadNameUpdated);
   const onRunSettledRef = useRef(onRunSettled);
   const onThreadNotFoundRef = useRef(onThreadNotFound);
   const createdThreadIdRef = useRef<string | null>(null);
+  desiredThreadIdRef.current = desiredThreadId;
   settingsRef.current = { model, reasoningEffort };
   onThreadCreatedRef.current = onThreadCreated;
   onThreadNameUpdatedRef.current = onThreadNameUpdated;
@@ -372,11 +573,141 @@ export function EffervaRuntime({
     });
     return current;
   }, [sessionId]);
-  const desiredThreadId = threadId ?? "new";
-  const switchingThread = agent.threadId !== desiredThreadId;
+
+  const loadOlderHistory = useCallback(async (): Promise<boolean> => {
+    const cursor = historyCursor;
+    const currentThreadId = desiredThreadIdRef.current;
+    if (
+      !cursor ||
+      currentThreadId === "new" ||
+      olderHistoryRequestRef.current
+    ) {
+      return false;
+    }
+    const controller = new AbortController();
+    olderHistoryRequestRef.current = controller;
+    setLoadingOlderHistory(true);
+    try {
+      const page = await api.loadThreadHistoryPage(
+        sessionId,
+        currentThreadId,
+        { cursor, signal: controller.signal },
+      );
+      if (
+        controller.signal.aborted ||
+        desiredThreadIdRef.current !== currentThreadId
+      ) {
+        return false;
+      }
+      const olderMessages = restoreMessages(page.messages);
+      setHistoryMessages((current) =>
+        prependHistoryMessages(current, olderMessages),
+      );
+      setHistoryCursor(
+        page.next_cursor && page.next_cursor !== cursor
+          ? page.next_cursor
+          : null,
+      );
+      if (olderMessages.length > 0) {
+        setHistoryRevision((current) => current + 1);
+        return true;
+      }
+      return false;
+    } catch (cause) {
+      if (
+        controller.signal.aborted ||
+        (cause instanceof DOMException && cause.name === "AbortError")
+      ) {
+        return false;
+      }
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Failed to load older messages",
+      );
+      return false;
+    } finally {
+      if (olderHistoryRequestRef.current === controller) {
+        olderHistoryRequestRef.current = null;
+        setLoadingOlderHistory(false);
+      }
+    }
+  }, [historyCursor, sessionId]);
 
   useEffect(() => {
+    let activeRunId: string | null = null;
     const subscription = agent.subscribe({
+      onRunStartedEvent({ event }) {
+        activeRunId = event.runId;
+      },
+      onToolCallStartEvent({ event, messages }) {
+        const processMessageId = activeRunId
+          ? `${activeRunId}:process`
+          : null;
+        let processIndex = processMessageId
+          ? messages.findIndex(
+              (message) =>
+                message.id === processMessageId &&
+                message.role === "reasoning",
+            )
+          : -1;
+        if (processIndex < 0) {
+          for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const message = messages[index];
+            if (message?.role === "user") break;
+            if (message?.role === "reasoning") {
+              processIndex = index;
+              break;
+            }
+          }
+        }
+
+        const nextMessages = messages.map((message) => ({ ...message })) as Message[];
+        let processMessage: EffervaProcessMessage;
+        if (processIndex < 0) {
+          processMessage = {
+            id: processMessageId ?? `${event.toolCallId}:process`,
+            role: "reasoning",
+            content: "",
+            process: [],
+            processTextOffset: 0,
+          };
+          nextMessages.push(processMessage);
+          processIndex = nextMessages.length - 1;
+        } else {
+          processMessage = nextMessages[processIndex] as EffervaProcessMessage;
+        }
+
+        const process = [...(processMessage.process ?? [])];
+        if (
+          process.some(
+            (part) =>
+              part.type === "tool-call" &&
+              part.toolCallId === event.toolCallId,
+          )
+        ) {
+          return;
+        }
+        const content =
+          typeof processMessage.content === "string"
+            ? processMessage.content
+            : "";
+        const textOffset = processMessage.processTextOffset ?? 0;
+        const pendingText = content.slice(textOffset);
+        if (pendingText.trim()) {
+          process.push({ type: "reasoning", text: pendingText });
+        }
+        process.push({
+          type: "tool-call",
+          toolCallId: event.toolCallId,
+        });
+        nextMessages[processIndex] = {
+          ...processMessage,
+          process,
+          processTextOffset: content.length,
+        } as EffervaProcessMessage;
+        return { messages: nextMessages };
+      },
       onRawEvent({ event, agent: current }) {
         const raw = event.event as
           | {
@@ -412,13 +743,27 @@ export function EffervaRuntime({
       async onRunFinalized({ agent: current, state }) {
         const settledThreadId = current.threadId;
         if (!settledThreadId || settledThreadId === "new") return;
+        if (desiredThreadIdRef.current !== settledThreadId) return;
         onRunSettledRef.current(settledThreadId);
         try {
-          const detail = await api.readThread(sessionId, settledThreadId);
-          if (current.threadId !== settledThreadId) return;
+          const detail = await api.loadThreadHistoryPage(
+            sessionId,
+            settledThreadId,
+          );
+          if (
+            current.threadId !== settledThreadId ||
+            desiredThreadIdRef.current !== settledThreadId
+          ) {
+            return;
+          }
+          const refreshedMessages = restoreMessages(detail.messages);
+          setHistoryMessages((current) =>
+            mergeHistoryMessages(current, refreshedMessages),
+          );
+          setHistoryRevision((current) => current + 1);
           setError(detail.last_run_error ?? null);
           return {
-            messages: restoreMessages(detail.messages),
+            messages: refreshedMessages,
             state: {
               ...(typeof state === "object" && state ? state : {}),
               threadId: settledThreadId,
@@ -428,6 +773,7 @@ export function EffervaRuntime({
             },
           };
         } catch (cause) {
+          if (desiredThreadIdRef.current !== settledThreadId) return;
           setError(
             cause instanceof Error
               ? cause.message
@@ -444,37 +790,69 @@ export function EffervaRuntime({
 
   useEffect(() => {
     const desiredThreadId = threadId ?? "new";
+    const navigationEpoch = ++navigationEpochRef.current;
     const controller = new AbortController();
-    let cancelled = false;
+    olderHistoryRequestRef.current?.abort();
+    olderHistoryRequestRef.current = null;
+    setLoadingOlderHistory(false);
+    setHistoryMessages([]);
+    setHistoryCursor(null);
+    setHistoryRevision((current) => current + 1);
+    const isCurrentNavigation = () =>
+      navigationEpochRef.current === navigationEpoch &&
+      !controller.signal.aborted;
 
     if (
       agent.isRunning &&
       createdThreadIdRef.current === desiredThreadId &&
       agent.threadId === desiredThreadId
     ) {
-      setLoading(false);
-      return () => controller.abort();
+      setOpenedThreadId(desiredThreadId);
+      return () => {
+        if (navigationEpochRef.current === navigationEpoch) {
+          navigationEpochRef.current += 1;
+        }
+        controller.abort();
+      };
     }
 
     const load = async () => {
       setError(null);
       if (desiredThreadId === "new") {
-        if (agent.isRunning) await agent.detachActiveRun();
+        if (agent.isRunning) {
+          void agent.detachActiveRun().catch((cause: unknown) => {
+            if (isCurrentNavigation()) {
+              setError(
+                cause instanceof Error
+                  ? cause.message
+                  : "Failed to leave the active thread",
+              );
+            }
+          });
+        }
         createdThreadIdRef.current = null;
         agent.threadId = "new";
         agent.setMessages([]);
         agent.setState({});
-        setLoading(false);
+        setOpenedThreadId("new");
         return;
       }
 
-      setLoading(true);
-      if (agent.isRunning) await agent.detachActiveRun();
       try {
-        const detail = await api.readThread(sessionId, desiredThreadId);
-        if (cancelled) return;
+        if (agent.isRunning) await agent.detachActiveRun();
+        if (!isCurrentNavigation()) return;
+        const detail = await api.loadThreadHistoryPage(
+          sessionId,
+          desiredThreadId,
+          { signal: controller.signal },
+        );
+        if (!isCurrentNavigation()) return;
+        const restoredMessages = restoreMessages(detail.messages);
         agent.threadId = desiredThreadId;
-        agent.setMessages(restoreMessages(detail.messages));
+        agent.setMessages(restoredMessages);
+        setHistoryMessages(restoredMessages);
+        setHistoryCursor(detail.next_cursor ?? null);
+        setHistoryRevision((current) => current + 1);
         agent.setState({
           threadId: desiredThreadId,
           turnId: detail.active_turn_id ?? null,
@@ -483,7 +861,7 @@ export function EffervaRuntime({
           activities: {},
         });
         setError(detail.last_run_error ?? null);
-        setLoading(false);
+        setOpenedThreadId(desiredThreadId);
         if (detail.active_turn_id) {
           agent.setResumeSource({
             sessionId,
@@ -492,7 +870,7 @@ export function EffervaRuntime({
             signal: controller.signal,
           });
           void agent.connectAgent().catch((cause: unknown) => {
-            if (!cancelled) {
+            if (isCurrentNavigation()) {
               setError(
                 cause instanceof Error
                   ? cause.message
@@ -502,8 +880,8 @@ export function EffervaRuntime({
           });
         }
       } catch (cause) {
-        if (cancelled) return;
-        setLoading(false);
+        if (!isCurrentNavigation()) return;
+        setOpenedThreadId(desiredThreadId);
         if (cause instanceof ApiError && cause.status === 404) {
           onThreadNotFoundRef.current(desiredThreadId);
           return;
@@ -515,17 +893,28 @@ export function EffervaRuntime({
     };
     void load();
     return () => {
-      cancelled = true;
+      if (navigationEpochRef.current === navigationEpoch) {
+        navigationEpochRef.current += 1;
+      }
       controller.abort();
     };
   }, [agent, sessionId, threadId]);
 
+  const openingThread =
+    desiredThreadId !== "new" && openedThreadId !== desiredThreadId;
+
   const agents = useMemo(() => ({ [AGENT_ID]: agent }), [agent]);
   const context = useMemo<RuntimeContextValue>(
     () => ({
-      loading: loading || switchingThread,
+      loading: openingThread,
+      historyMessages,
+      historyRevision,
+      hasOlderHistory: Boolean(historyCursor),
+      loadingOlderHistory,
+      loadOlderHistory,
       error,
       sessionId,
+      threadId: desiredThreadId,
       workspace,
       clearError: () => setError(null),
       skills,
@@ -537,7 +926,11 @@ export function EffervaRuntime({
     }),
     [
       error,
-      loading,
+      historyCursor,
+      historyMessages,
+      historyRevision,
+      loadOlderHistory,
+      loadingOlderHistory,
       model,
       models,
       onModelChange,
@@ -545,7 +938,8 @@ export function EffervaRuntime({
       reasoningEffort,
       sessionId,
       skills,
-      switchingThread,
+      openingThread,
+      desiredThreadId,
       workspace,
     ],
   );
@@ -619,9 +1013,132 @@ function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
   );
 }
 
+const ComposerTextArea = forwardRef<
+  HTMLTextAreaElement,
+  ComponentProps<typeof CopilotChatInput.TextArea>
+>(function ComposerTextArea(
+  {
+    onCompositionStart: _onCompositionStart,
+    onCompositionEnd: _onCompositionEnd,
+    className: _className,
+    ...props
+  },
+  ref,
+) {
+  return (
+    <CopilotChatInput.TextArea
+      {...props}
+      ref={ref}
+      className="cpk:w-full cpk:px-5 cpk:py-3"
+    />
+  );
+});
+
+type ComposerLayoutProps = Parameters<
+  NonNullable<CopilotChatInputProps["children"]>
+>[0];
+
+function ComposerLayout({
+  textArea,
+  audioRecorder,
+  sendButton,
+  startTranscribeButton,
+  cancelTranscribeButton,
+  finishTranscribeButton,
+  addMenuButton,
+  disclaimer,
+  mode = "input",
+  onStartTranscribe,
+  onCancelTranscribe,
+  onFinishTranscribe,
+  positioning = "static",
+  keyboardHeight = 0,
+  containerRef,
+  showDisclaimer = false,
+  bottomAnchored = false,
+  className,
+  style,
+}: ComposerLayoutProps) {
+  return (
+    <div
+      data-copilotkit
+      ref={containerRef}
+      className={[
+        "cpk:pointer-events-none cpk:relative cpk:z-20",
+        positioning === "absolute" &&
+          "cpk:absolute cpk:bottom-0 cpk:left-0 cpk:right-0",
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={{
+        transform:
+          keyboardHeight > 0
+            ? `translateY(-${keyboardHeight}px)`
+            : undefined,
+        transition: "transform 0.2s ease-out",
+        ...(positioning === "absolute" || bottomAnchored
+          ? { paddingBottom: "var(--copilotkit-license-banner-offset, 0px)" }
+          : {}),
+        ...style,
+      }}
+    >
+      <div className="cpk:max-w-3xl cpk:mx-auto cpk:py-0 cpk:px-4 cpk:@3xl:px-0 cpk:[div[data-sidebar-chat]_&]:px-8 cpk:[div[data-popup-chat]_&]:px-4 cpk:pointer-events-auto">
+        <div
+          data-testid="copilot-chat-input"
+          data-layout="expanded"
+          className="copilotKitInput cpk:flex cpk:w-full cpk:flex-col cpk:items-center cpk:justify-center cpk:cursor-text cpk:overflow-visible cpk:bg-clip-padding cpk:contain-inline-size cpk:bg-white cpk:dark:bg-[#303030] cpk:shadow-[0_4px_4px_0_#0000000a,0_0_1px_0_#0000009e] cpk:rounded-[28px]"
+          onClick={(event) => {
+            const target = event.target;
+            if (
+              target instanceof Element &&
+              target.closest("button, select")
+            ) {
+              return;
+            }
+            event.currentTarget.querySelector("textarea")?.focus();
+          }}
+        >
+          <div
+            data-layout="expanded"
+            className="cpk:grid cpk:w-full cpk:gap-x-3 cpk:gap-y-3 cpk:px-3 cpk:py-2 cpk:grid-cols-[auto_minmax(0,1fr)_auto] cpk:grid-rows-[auto_auto]"
+          >
+            <div className="cpk:flex cpk:items-center cpk:col-start-1 cpk:row-start-2">
+              {addMenuButton}
+            </div>
+            <div className="cpk:relative cpk:flex cpk:min-w-0 cpk:min-h-[50px] cpk:flex-col cpk:justify-center cpk:col-span-3 cpk:row-start-1">
+              {mode === "transcribe" ? audioRecorder : textArea}
+            </div>
+            <div className="cpk:flex cpk:items-center cpk:justify-end cpk:gap-2 cpk:col-start-3 cpk:row-start-2">
+              {mode === "transcribe" ? (
+                <>
+                  {onCancelTranscribe && cancelTranscribeButton}
+                  {onFinishTranscribe && finishTranscribeButton}
+                </>
+              ) : (
+                <>
+                  {onStartTranscribe && startTranscribeButton}
+                  {sendButton}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+      {showDisclaimer && disclaimer}
+    </div>
+  );
+}
+
 export function EffervaChat() {
   const runtime = useContext(RuntimeContext);
   if (!runtime) throw new Error("EffervaChat must be inside EffervaRuntime");
+  useDefaultRenderTool(
+    {
+      render: (props) => <CompactToolCall {...props} />,
+    },
+    [],
+  );
   const { agent } = useAgent({ agentId: AGENT_ID, updates: AGENT_UPDATES });
   const { copilotkit } = useCopilotKit();
   const [input, setInput] = useState("");
@@ -630,6 +1147,101 @@ export function EffervaChat() {
     Array<{ value: string; label: string; description: string }>
   >([]);
   const dispatchingRef = useRef(false);
+  const chatRootRef = useRef<HTMLDivElement>(null);
+  const scrollElementRef = useRef<HTMLElement | null>(null);
+  const isAtBottomRef = useRef(true);
+  const positionedThreadRef = useRef<string | null>(null);
+  const historyAnchorRef = useRef<{
+    element: HTMLElement;
+    scrollHeight: number;
+    scrollTop: number;
+    revision: number;
+    threadId: string;
+  } | null>(null);
+  const visibleMessages = runtime.loading
+    ? []
+    : mergeVisibleMessages(
+        runtime.historyMessages,
+        [...agent.messages] as Message[],
+      );
+
+  useLayoutEffect(() => {
+    const anchor = historyAnchorRef.current;
+    if (!anchor) return;
+    if (anchor.threadId !== runtime.threadId || !anchor.element.isConnected) {
+      historyAnchorRef.current = null;
+      return;
+    }
+    if (anchor.revision === runtime.historyRevision) return;
+    historyAnchorRef.current = null;
+    anchor.element.scrollTop =
+      anchor.scrollTop + anchor.element.scrollHeight - anchor.scrollHeight;
+  }, [runtime.historyRevision, runtime.threadId]);
+
+  useLayoutEffect(() => {
+    if (runtime.loading) return;
+    const element =
+      scrollElementRef.current ??
+      (chatRootRef.current
+        ? findChatScrollElement(chatRootRef.current)
+        : null);
+    if (!element) return;
+    scrollElementRef.current = element;
+    if (positionedThreadRef.current !== runtime.threadId) {
+      positionedThreadRef.current = runtime.threadId;
+      historyAnchorRef.current = null;
+      element.scrollTop = element.scrollHeight;
+      isAtBottomRef.current = true;
+      return;
+    }
+    if (isAtBottomRef.current && !historyAnchorRef.current) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [runtime.loading, runtime.threadId, visibleMessages]);
+
+  const handleHistoryScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      const element = event.currentTarget;
+      scrollElementRef.current = element;
+      isAtBottomRef.current =
+        element.scrollHeight - element.scrollTop - element.clientHeight < 10;
+      if (
+        element.scrollTop > 160 ||
+        runtime.loading ||
+        runtime.loadingOlderHistory ||
+        !runtime.hasOlderHistory ||
+        historyAnchorRef.current
+      ) {
+        return;
+      }
+      const revision = runtime.historyRevision;
+      historyAnchorRef.current = {
+        element,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+        revision,
+        threadId: runtime.threadId,
+      };
+      void runtime.loadOlderHistory().then((loaded) => {
+        const anchor = historyAnchorRef.current;
+        if (
+          !loaded &&
+          anchor?.revision === revision &&
+          anchor.threadId === runtime.threadId
+        ) {
+          historyAnchorRef.current = null;
+        }
+      });
+    },
+    [
+      runtime.hasOlderHistory,
+      runtime.historyRevision,
+      runtime.loadOlderHistory,
+      runtime.loading,
+      runtime.loadingOlderHistory,
+      runtime.threadId,
+    ],
+  );
 
   const send = useCallback(
     async (value: string) => {
@@ -793,23 +1405,31 @@ export function EffervaChat() {
   }, [agent, input, runtime.sessionId]);
 
   return (
-    <div className="relative h-full min-h-0">
+    <div ref={chatRootRef} className="relative h-full min-h-0">
       <CopilotChatView
         className="h-full"
-        messages={[...agent.messages]}
+        messages={visibleMessages}
+        autoScroll="none"
         isRunning={agent.isRunning}
         inputValue={input}
         onInputChange={setInput}
         onSubmitMessage={(value) => void send(value)}
         onStop={stop}
-        input={{ toolsMenu, addMenuButton: ComposerAddMenuButton }}
+        scrollView={{ onScroll: handleHistoryScroll }}
+        input={{
+          toolsMenu,
+          addMenuButton: ComposerAddMenuButton,
+          textArea: ComposerTextArea,
+          children: ComposerLayout,
+        }}
         messageView={{
           assistantMessage:
             EffervaAssistantMessage as typeof CopilotChatAssistantMessage,
           reasoningMessage:
             EffervaReasoningMessage as typeof CopilotChatReasoningMessage,
+          children: EffervaMessageList,
         }}
-        welcomeScreen={!runtime.loading && agent.messages.length === 0}
+        welcomeScreen={!runtime.loading && visibleMessages.length === 0}
       />
       {queued.length > 0 && (
         <div className="absolute right-6 bottom-24 left-6 mx-auto max-w-2xl rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-sm">
