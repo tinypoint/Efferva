@@ -86,9 +86,4 @@ export type FileSearchResult = {
   indices?: number[] | null;
 };
 
-export type CreateThreadInput = {
-  workspace?: string;
-  model?: string;
-  reasoning_effort?: string;
-};
 import type { Message } from "@ag-ui/client";

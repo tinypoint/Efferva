@@ -1,9 +1,8 @@
-import posixpath
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from efferva.identity import Capability
 
@@ -24,22 +23,6 @@ class Session(BaseModel):
     last_active_at: datetime
     created_at: datetime
     updated_at: datetime
-
-
-class ThreadCreate(BaseModel):
-    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
-    model: str | None = Field(default=None, min_length=1, max_length=200)
-    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=50)
-    tools: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
-
-    @field_validator("workspace")
-    @classmethod
-    def validate_workspace(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value.startswith("/"):
-            raise ValueError("workspace must be an absolute Sandbox path")
-        return posixpath.normpath(value)
 
 
 class PromptInput(BaseModel):
@@ -73,5 +56,32 @@ class RunAgentInput(BaseModel):
     context: list[dict[str, Any]] = Field(default_factory=list)
     forwarded_props: Any = Field(default=None, alias="forwardedProps")
     resume: list[dict[str, Any]] | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class CodexControlInput(BaseModel):
+    run_id: str | None = Field(
+        default=None,
+        alias="runId",
+        min_length=1,
+        max_length=200,
+    )
+    action: Literal[
+        "plan.enable",
+        "goal.get",
+        "goal.clear",
+        "goal.status",
+        "goal.set",
+    ]
+    status: Literal["active", "paused"] | None = None
+    objective: str | None = Field(default=None, min_length=1, max_length=1_000_000)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    reasoning_effort: str | None = Field(
+        default=None,
+        alias="reasoningEffort",
+        min_length=1,
+        max_length=50,
+    )
 
     model_config = {"populate_by_name": True}

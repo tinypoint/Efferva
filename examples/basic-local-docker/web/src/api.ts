@@ -1,5 +1,4 @@
 import type {
-  CreateThreadInput,
   FileSearchResult,
   ModelOption,
   Session,
@@ -100,11 +99,6 @@ export const api = {
       `/sessions/${sessionId}/files?${params.toString()}`,
     );
   },
-  createThread: (sessionId: string, input: CreateThreadInput) =>
-    request<ThreadSummary>(`/sessions/${sessionId}/threads`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
   loadThreadHistoryPage: (
     sessionId: string,
     threadId: string,

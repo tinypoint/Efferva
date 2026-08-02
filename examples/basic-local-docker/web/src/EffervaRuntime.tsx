@@ -15,6 +15,7 @@ import {
 import {
   HttpAgent,
   type BaseEvent,
+  type HttpAgentConfig,
   type Message,
   type RunAgentInput,
 } from "@ag-ui/client";
@@ -39,7 +40,6 @@ import { from, type Observable } from "rxjs";
 import { api, ApiError } from "./api";
 import type {
   AgUiMessage,
-  CreateThreadInput,
   ExecutionSettings,
   ModelOption,
   SkillMetadata,
@@ -60,11 +60,143 @@ type ResumeSource = {
   signal: AbortSignal;
 };
 
+type CodexControl =
+  | { action: "plan.enable" }
+  | { action: "goal.get" }
+  | { action: "goal.clear" }
+  | { action: "goal.status"; status: "active" | "paused" }
+  | { action: "goal.set"; objective: string };
+
+type RunOverrides = {
+  collaborationMode?: "plan";
+  control?: CodexControl;
+};
+
+type ComposerSubmission = {
+  prompt: string;
+  overrides?: RunOverrides;
+};
+
+function submissionFromPrompt(prompt: string): ComposerSubmission {
+  const command = prompt.match(/^\/(plan|goal)(?:\s+([\s\S]*))?$/u);
+  if (!command) return { prompt };
+  const name = command[1];
+  const argument = (command[2] ?? "").trim();
+  if (name === "plan") {
+    return argument
+      ? { prompt: argument, overrides: { collaborationMode: "plan" } }
+      : { prompt, overrides: { control: { action: "plan.enable" } } };
+  }
+  if (!argument) {
+    return { prompt, overrides: { control: { action: "goal.get" } } };
+  }
+  if (argument === "clear") {
+    return { prompt, overrides: { control: { action: "goal.clear" } } };
+  }
+  if (argument === "pause") {
+    return {
+      prompt,
+      overrides: {
+        control: { action: "goal.status", status: "paused" },
+      },
+    };
+  }
+  if (argument === "resume") {
+    return {
+      prompt,
+      overrides: {
+        control: { action: "goal.status", status: "active" },
+      },
+    };
+  }
+  return {
+    prompt,
+    overrides: {
+      control: {
+        action: "goal.set",
+        objective: argument.startsWith("edit ")
+          ? argument.slice("edit ".length).trim()
+          : argument,
+      },
+    },
+  };
+}
+
+class CodexControlAgent extends HttpAgent {
+  constructor(
+    config: HttpAgentConfig,
+    private readonly control: CodexControl,
+  ) {
+    super(config);
+  }
+
+  protected override requestInit(input: RunAgentInput): RequestInit {
+    const forwarded =
+      typeof input.forwardedProps === "object" && input.forwardedProps
+        ? input.forwardedProps as Record<string, unknown>
+        : {};
+    return {
+      ...super.requestInit(input),
+      body: JSON.stringify({
+        runId: input.runId,
+        ...this.control,
+        ...(typeof forwarded.model === "string"
+          ? { model: forwarded.model }
+          : {}),
+        ...(typeof forwarded.reasoningEffort === "string"
+          ? { reasoningEffort: forwarded.reasoningEffort }
+          : {}),
+      }),
+    };
+  }
+}
+
 class EffervaAgent extends HttpAgent {
   private resumeSource?: ResumeSource;
+  private runOverrides?: RunOverrides;
+  private controlAgent?: CodexControlAgent;
 
   setResumeSource(source: ResumeSource) {
     this.resumeSource = source;
+  }
+
+  setRunOverrides(overrides?: RunOverrides) {
+    this.runOverrides = overrides;
+  }
+
+  getRunOverrides() {
+    return this.runOverrides;
+  }
+
+  override run(input: RunAgentInput): Observable<BaseEvent> {
+    const forwarded =
+      typeof input.forwardedProps === "object" && input.forwardedProps
+        ? input.forwardedProps as Record<string, unknown>
+        : {};
+    const control = forwarded.control as CodexControl | undefined;
+    if (!control) {
+      this.controlAgent = undefined;
+      return super.run(input);
+    }
+    const sessionId = String(forwarded.sessionId || "");
+    const controlAgent = new CodexControlAgent(
+      {
+        agentId: AGENT_ID,
+        threadId: input.threadId,
+        url: `/agent/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(input.threadId)}/controls`,
+        headers: this.headers,
+        fetch: this.fetch,
+      },
+      control,
+    );
+    this.controlAgent = controlAgent;
+    return controlAgent.run(input);
+  }
+
+  override abortRun() {
+    this.controlAgent?.abortRun();
+    this.controlAgent = undefined;
+    super.abortRun();
   }
 
   protected override connect(_input: RunAgentInput): Observable<BaseEvent> {
@@ -465,10 +597,10 @@ type RuntimeContextValue = {
   skills: SkillMetadata[];
   models: ModelOption[];
   model: string;
-  reasoningEffort: NonNullable<CreateThreadInput["reasoning_effort"]>;
+  reasoningEffort: string;
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (
-    effort: NonNullable<CreateThreadInput["reasoning_effort"]>,
+    effort: string,
   ) => void;
 };
 
@@ -478,11 +610,11 @@ type EffervaRuntimeProps = {
   sessionId: string;
   threadId?: string;
   model?: string;
-  reasoningEffort: NonNullable<CreateThreadInput["reasoning_effort"]>;
+  reasoningEffort: string;
   models: ModelOption[];
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (
-    effort: NonNullable<CreateThreadInput["reasoning_effort"]>,
+    effort: string,
   ) => void;
   workspace?: string | null;
   skills: SkillMetadata[];
@@ -553,6 +685,7 @@ export function EffervaRuntime({
           ? input.forwardedProps
           : {};
       const settings = settingsRef.current;
+      const overrides = current.getRunOverrides();
       return next.run({
         ...input,
         threadId: current.threadId,
@@ -563,6 +696,7 @@ export function EffervaRuntime({
             ? { model: settings.model.trim() }
             : {}),
           reasoningEffort: settings.reasoningEffort,
+          ...overrides,
         },
       });
     });
@@ -1247,12 +1381,18 @@ export function EffervaChat() {
         return;
       }
       setInput("");
+      const submission = submissionFromPrompt(prompt);
+      agent.setRunOverrides(submission.overrides);
       agent.addMessage({
         id: crypto.randomUUID(),
         role: "user",
-        content: prompt,
+        content: submission.prompt,
       });
-      await copilotkit.runAgent({ agent });
+      try {
+        await copilotkit.runAgent({ agent });
+      } finally {
+        agent.setRunOverrides();
+      }
     },
     [agent, copilotkit, runtime.loading],
   );

@@ -13,12 +13,12 @@ from efferva.broker import RedisRunBroker, RunQueueFullError
 from efferva.codex_projection import project_turn_messages
 from efferva.identity import IdentityResolver, Principal
 from efferva.models import (
+    CodexControlInput,
     PrincipalView,
     RunAgentInput,
     PromptInput,
     Session,
     SessionCreate,
-    ThreadCreate,
 )
 from efferva.repository import (
     AccessMode,
@@ -146,31 +146,6 @@ def create_api_router(
             await runs().update(run_id, status="failed", error=str(error))
             raise
 
-    async def validate_execution_settings(
-        session: dict[str, Any],
-        model: str,
-        reasoning_effort: str | None = None,
-    ) -> None:
-        models = await codex_proxy().list_models(session)
-        selected = next(
-            (item for item in models if item.get("model") == model),
-            None,
-        )
-        if selected is None:
-            raise HTTPException(status_code=422, detail="unsupported model")
-        if reasoning_effort is None:
-            return
-        efforts = {
-            str(item.get("reasoningEffort"))
-            for item in selected.get("supportedReasoningEfforts") or []
-            if item.get("reasoningEffort")
-        }
-        if reasoning_effort not in efforts:
-            raise HTTPException(
-                status_code=422,
-                detail="unsupported reasoning effort for this model",
-            )
-
     async def load_thread(
         session: dict[str, Any],
         thread_id: str,
@@ -249,13 +224,6 @@ def create_api_router(
     ) -> list[dict[str, Any]]:
         return await repository().list_sessions(principal, scope)
 
-    @router.get("/api/sessions/{session_id}", response_model=Session)
-    async def get_session(
-        session_id: UUID,
-        principal: Principal = Depends(resolve_principal),
-    ) -> dict[str, Any]:
-        return await repository().get_session(principal, session_id)
-
     @router.get("/api/sessions/{session_id}/threads")
     async def list_threads(
         session_id: UUID,
@@ -304,62 +272,6 @@ def create_api_router(
             session,
             query,
             workspace=workspace,
-        )
-
-    @router.post("/api/sessions/{session_id}/threads", status_code=201)
-    async def create_thread(
-        session_id: UUID,
-        payload: ThreadCreate,
-        principal: Principal = Depends(resolve_principal),
-    ) -> dict[str, Any]:
-        session = await repository().get_session(
-            principal,
-            session_id,
-            mode=AccessMode.WRITE,
-            touch=True,
-        )
-        thread = await codex_proxy().start_thread(
-            session,
-            workspace=payload.workspace,
-            model=payload.model,
-            reasoning_effort=payload.reasoning_effort,
-            dynamic_tools=payload.tools,
-        )
-        return thread
-
-    @router.get("/api/sessions/{session_id}/threads/{thread_id}")
-    async def read_thread(
-        session_id: UUID,
-        thread_id: str,
-        principal: Principal = Depends(resolve_principal),
-    ) -> dict[str, Any]:
-        session = await repository().get_session(principal, session_id, touch=True)
-        return await load_thread(session, thread_id)
-
-    @router.get("/api/sessions/{session_id}/threads/{thread_id}/turns")
-    async def list_thread_turns(
-        session_id: UUID,
-        thread_id: str,
-        cursor: str | None = Query(default=None),
-        limit: int | None = Query(default=None, ge=1),
-        sort_direction: Literal["asc", "desc"] | None = Query(
-            default=None,
-            alias="sortDirection",
-        ),
-        items_view: Literal["notLoaded", "summary", "full"] | None = Query(
-            default=None,
-            alias="itemsView",
-        ),
-        principal: Principal = Depends(resolve_principal),
-    ) -> dict[str, Any]:
-        session = await repository().get_session(principal, session_id, touch=True)
-        return await codex_proxy().list_thread_turns(
-            session,
-            thread_id,
-            cursor=cursor,
-            limit=limit,
-            sort_direction=sort_direction,
-            items_view=items_view,
         )
 
     @router.get("/api/sessions/{session_id}/threads/{thread_id}/ag-ui")
@@ -516,6 +428,63 @@ def create_api_router(
         )
         return {"turnId": steered_turn_id}
 
+    @router.post(
+        "/api/sessions/{session_id}/threads/{thread_id}/controls"
+    )
+    async def run_control(
+        session_id: UUID,
+        thread_id: str,
+        payload: CodexControlInput,
+        principal: Principal = Depends(resolve_principal),
+    ) -> StreamingResponse:
+        if thread_id == "new":
+            raise HTTPException(
+                status_code=409,
+                detail="this control requires an existing thread",
+            )
+        session = await repository().get_session(
+            principal,
+            session_id,
+            mode=AccessMode.WRITE,
+            touch=True,
+        )
+        control: dict[str, Any] = {}
+        if payload.action == "plan.enable":
+            control.update(
+                {
+                    "model": payload.model,
+                    "reasoningEffort": payload.reasoning_effort,
+                }
+            )
+        elif payload.action == "goal.status":
+            if payload.status is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="goal.status requires status",
+                )
+            control["status"] = payload.status
+        elif payload.action == "goal.set":
+            objective = (payload.objective or "").strip()
+            if not objective:
+                raise HTTPException(
+                    status_code=422,
+                    detail="goal.set requires an objective",
+                )
+            control["objective"] = objective
+        run_id = str(uuid4())
+        await enqueue(
+            {
+                "kind": "control",
+                "action": payload.action,
+                "runId": run_id,
+                "clientRunId": payload.run_id or run_id,
+                "sessionId": str(session["id"]),
+                "threadId": thread_id,
+                **control,
+            }
+        )
+        return _brokered_response(run_broker(), run_id)
+
     @router.post("/api/ag-ui")
     async def run_agui(
         payload: RunAgentInput,
@@ -575,73 +544,15 @@ def create_api_router(
         reasoning_effort = (
             str(forwarded.get("reasoningEffort") or "").strip() or None
         )
-        if model:
-            await validate_execution_settings(session, model, reasoning_effort)
         workspace = str(forwarded.get("workspace") or "").strip() or None
-        command, separator, argument = prompt.partition(" ")
-        argument = argument.strip() if separator else ""
-        if command == "/plan":
-            if not argument:
-                await enqueue(
-                    {
-                        "kind": "control",
-                        "action": "plan.enable",
-                        "runId": run_id,
-                        "clientRunId": client_run_id,
-                        "sessionId": str(session["id"]),
-                        "threadId": payload.thread_id,
-                        "model": model,
-                        "reasoningEffort": reasoning_effort,
-                    }
-                )
-                return _brokered_response(run_broker(), run_id)
-            await enqueue(
-                {
-                    "kind": "start",
-                    "runId": run_id,
-                    "clientRunId": client_run_id,
-                    "sessionId": str(session["id"]),
-                    "threadId": payload.thread_id,
-                    "prompt": argument,
-                    "model": model,
-                    "reasoningEffort": reasoning_effort,
-                    "collaborationMode": "plan",
-                    "workspace": workspace,
-                    "tools": payload.tools,
-                }
+        collaboration_mode = (
+            str(forwarded.get("collaborationMode") or "").strip() or None
+        )
+        if collaboration_mode not in {None, "plan"}:
+            raise HTTPException(
+                status_code=422,
+                detail="unsupported collaborationMode",
             )
-            return _brokered_response(
-                run_broker(),
-                run_id,
-                after="0-0",
-            )
-        if command == "/goal":
-            action = "goal.get"
-            control: dict[str, Any] = {}
-            if argument == "clear":
-                action = "goal.clear"
-            elif argument in {"pause", "resume"}:
-                action = "goal.status"
-                control["status"] = "paused" if argument == "pause" else "active"
-            elif argument:
-                action = "goal.set"
-                control["objective"] = (
-                    argument.removeprefix("edit ").strip()
-                    if argument.startswith("edit ")
-                    else argument
-                )
-            await enqueue(
-                {
-                    "kind": "control",
-                    "action": action,
-                    "runId": run_id,
-                    "clientRunId": client_run_id,
-                    "sessionId": str(session["id"]),
-                    "threadId": payload.thread_id,
-                    **control,
-                }
-            )
-            return _brokered_response(run_broker(), run_id)
         await enqueue(
             {
                 "kind": "start",
@@ -652,6 +563,7 @@ def create_api_router(
                 "prompt": prompt,
                 "model": model,
                 "reasoningEffort": reasoning_effort,
+                "collaborationMode": collaboration_mode,
                 "workspace": workspace,
                 "tools": payload.tools,
                 "inputs": _media_inputs_from_agui(payload),
