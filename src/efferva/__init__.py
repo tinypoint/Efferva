@@ -7,7 +7,6 @@ from efferva.identity import (
     Principal,
     UnauthenticatedError,
 )
-from efferva.codex_rpc import ServerRequestHandler
 from efferva.sandbox import (
     CommandResult,
     DirectoryEntry,
@@ -34,7 +33,6 @@ __all__ = [
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
-    "ServerRequestHandler",
     "SessionVolumeHandle",
     "UnauthenticatedError",
     "serve_worker",

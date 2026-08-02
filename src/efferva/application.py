@@ -8,7 +8,6 @@ from fastapi.responses import JSONResponse
 
 from efferva.api import create_api_router
 from efferva.codex_release import prepare_official_codex
-from efferva.codex_rpc import CodexRpcError
 from efferva.codex_tunnel import RedisCodexTunnel
 from efferva.config import Settings, get_settings
 from efferva.db import Database
@@ -38,6 +37,7 @@ class _RuntimeResources:
             raise RuntimeError("Efferva application has not started")
         return self.tunnel
 
+
 class Efferva:
     """Product-facing facade for installing Efferva into an authenticated application."""
 
@@ -59,6 +59,8 @@ class Efferva:
 
         resources = _RuntimeResources()
         settings = self.settings
+        if settings.database_url is None:
+            raise ValueError("EFFERVA_DATABASE_URL is required by the API")
         schema = files("efferva").joinpath("schema.sql").read_text()
 
         @asynccontextmanager
@@ -68,9 +70,11 @@ class Efferva:
             tunnel = RedisCodexTunnel(
                 settings.redis_url,
                 prefix=settings.redis_prefix,
-                ttl_seconds=settings.redis_run_ttl_seconds,
-                lease_seconds=settings.worker_lease_seconds,
-                dispatch_queue_capacity=settings.redis_dispatch_queue_capacity,
+                ttl_seconds=settings.codex_connection_ttl_seconds,
+                lease_seconds=settings.codex_connection_lease_seconds,
+                dispatch_queue_capacity=settings.codex_connection_queue_capacity,
+                frame_queue_capacity=settings.codex_frame_queue_capacity,
+                frame_max_bytes=settings.codex_frame_max_bytes,
             )
             await database.open()
             await tunnel.open()
@@ -134,13 +138,6 @@ class Efferva:
         async def forbidden_handler(_, error: ForbiddenError) -> JSONResponse:
             return JSONResponse(status_code=403, content={"detail": str(error)})
 
-        async def codex_rpc_handler(_, error: CodexRpcError) -> JSONResponse:
-            return JSONResponse(
-                status_code=502,
-                content={"detail": str(error), "codex_error": error.error},
-            )
-
         app.add_exception_handler(NotFoundError, not_found_handler)
         app.add_exception_handler(UnauthenticatedError, unauthenticated_handler)
         app.add_exception_handler(ForbiddenError, forbidden_handler)
-        app.add_exception_handler(CodexRpcError, codex_rpc_handler)

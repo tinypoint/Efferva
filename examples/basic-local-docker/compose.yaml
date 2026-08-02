@@ -70,23 +70,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      opensandbox-server:
-        condition: service_healthy
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
       EFFERVA_REDIS_URL: redis://redis:6379/0
-      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
-      EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
-      EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
-      EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"
       EFFERVA_CODEX_RELEASE_CACHE_DIR: /var/cache/efferva/codex
-      EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
-      EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${EFFERVA_HTTP_PORT:-8080}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - codex-cache:/var/cache/efferva/codex
     healthcheck:
@@ -108,14 +97,11 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "basic_local_docker.worker"]
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       opensandbox-server:
         condition: service_healthy
     environment:
-      EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
       EFFERVA_REDIS_URL: redis://redis:6379/0
       EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
@@ -123,8 +109,7 @@ services:
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"
       EFFERVA_CODEX_RELEASE_CACHE_DIR: /var/cache/efferva/codex
       EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
-      EFFERVA_CODEX_MODEL: ${EFFERVA_CODEX_MODEL:-}
-      EFFERVA_WORKER_CONCURRENCY: ${EFFERVA_WORKER_CONCURRENCY:-16}
+      EFFERVA_WORKER_CONNECTION_CAPACITY: ${EFFERVA_WORKER_CONNECTION_CAPACITY:-16}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"

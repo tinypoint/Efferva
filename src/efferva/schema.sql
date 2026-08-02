@@ -26,26 +26,3 @@ CREATE INDEX IF NOT EXISTS app_sessions_tenant_updated_idx
 
 CREATE INDEX IF NOT EXISTS app_sessions_last_active_idx
     ON app_sessions(last_active_at);
-
-DROP TABLE IF EXISTS thread_execution_settings;
-
-CREATE TABLE IF NOT EXISTS agent_runs (
-    id text PRIMARY KEY,
-    session_id uuid NOT NULL REFERENCES app_sessions(id) ON DELETE CASCADE,
-    thread_id text NOT NULL,
-    turn_id text,
-    status text NOT NULL DEFAULT 'queued',
-    worker_id text,
-    command jsonb NOT NULL,
-    error text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    started_at timestamptz,
-    completed_at timestamptz,
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS agent_runs_status_created_idx
-    ON agent_runs(status, created_at);
-
-CREATE INDEX IF NOT EXISTS agent_runs_thread_updated_idx
-    ON agent_runs(session_id, thread_id, updated_at DESC);
