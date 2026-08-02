@@ -41,6 +41,8 @@ export function App() {
   const [threadToDelete, setThreadToDelete] = useState<ThreadSummary | null>(
     null,
   );
+  const [draftSettings, setDraftSettings] =
+    useState<Required<ExecutionSettings> | null>(null);
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.listSessions,
@@ -55,14 +57,15 @@ export function App() {
     queryFn: () => api.listModels(sessionId!),
     enabled: Boolean(sessionId),
   });
-  const executionSettings = useQuery({
-    queryKey: ["execution-settings", sessionId, threadId ?? null],
-    queryFn: () => api.getExecutionSettings(sessionId!, threadId),
-    enabled: Boolean(sessionId),
+  const threadSettings = useQuery({
+    queryKey: ["execution-settings", sessionId, threadId],
+    queryFn: () => api.getExecutionSettings(sessionId!, threadId!),
+    enabled: Boolean(sessionId && threadId),
   });
+  const activeSettings = threadId ? threadSettings.data : draftSettings;
   const selectedModel =
     models.data?.find(
-      (item) => item.model === executionSettings.data?.model,
+      (item) => item.model === activeSettings?.model,
     ) ??
     models.data?.find((item) => item.isDefault) ??
     models.data?.[0];
@@ -70,7 +73,7 @@ export function App() {
   const reasoningEffort =
     selectedModel?.supportedReasoningEfforts.find(
       (item) =>
-        item.reasoningEffort === executionSettings.data?.reasoning_effort,
+        item.reasoningEffort === activeSettings?.reasoning_effort,
     )?.reasoningEffort ??
     selectedModel?.defaultReasoningEffort ??
     "low";
@@ -106,30 +109,28 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!selectedModel || !executionSettings.data || !sessionId) return;
+    if (!threadId || !selectedModel || !threadSettings.data || !sessionId) {
+      return;
+    }
     if (
-      executionSettings.data.model !== model ||
-      executionSettings.data.reasoning_effort !== reasoningEffort
+      threadSettings.data.model !== model ||
+      threadSettings.data.reasoning_effort !== reasoningEffort
     ) {
       const normalized: Required<ExecutionSettings> = {
         model,
         reasoning_effort: reasoningEffort,
       };
       queryClient.setQueryData(
-        ["execution-settings", sessionId, threadId ?? null],
+        ["execution-settings", sessionId, threadId],
         normalized,
       );
-      const queryKey = [
-        "execution-settings",
-        sessionId,
-        threadId ?? null,
-      ];
+      const queryKey = ["execution-settings", sessionId, threadId];
       void api
-        .updateExecutionSettings(sessionId, normalized, threadId)
+        .updateExecutionSettings(sessionId, threadId, normalized)
         .catch(() => queryClient.invalidateQueries({ queryKey }));
     }
   }, [
-    executionSettings.data,
+    threadSettings.data,
     model,
     queryClient,
     reasoningEffort,
@@ -145,14 +146,14 @@ export function App() {
         model: nextModel,
         reasoning_effort: nextEffort,
       };
-      const queryKey = [
-        "execution-settings",
-        sessionId,
-        threadId ?? null,
-      ];
+      if (!threadId) {
+        setDraftSettings(settings);
+        return;
+      }
+      const queryKey = ["execution-settings", sessionId, threadId];
       queryClient.setQueryData(queryKey, settings);
       void api
-        .updateExecutionSettings(sessionId, settings, threadId)
+        .updateExecutionSettings(sessionId, threadId, settings)
         .catch(() => queryClient.invalidateQueries({ queryKey }));
     },
     [queryClient, sessionId, threadId],
@@ -200,6 +201,7 @@ export function App() {
         ["execution-settings", sessionId, thread.id],
         settings,
       );
+      setDraftSettings(null);
     },
     [model, navigate, queryClient, reasoningEffort, sessionId],
   );
@@ -278,8 +280,8 @@ export function App() {
     !threads.data ||
     models.isLoading ||
     !models.data ||
-    executionSettings.isLoading ||
-    !executionSettings.data
+    (Boolean(threadId) &&
+      (threadSettings.isLoading || !threadSettings.data))
   ) {
     return (
       <div className="grid h-screen place-items-center bg-background">

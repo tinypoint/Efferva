@@ -1180,19 +1180,30 @@ export function EffervaChat() {
 
   useLayoutEffect(() => {
     if (runtime.loading) return;
-    const element =
-      scrollElementRef.current ??
-      (chatRootRef.current
+    const resolveScrollElement = () => {
+      const current = scrollElementRef.current;
+      if (current?.isConnected) return current;
+      const resolved = chatRootRef.current
         ? findChatScrollElement(chatRootRef.current)
-        : null);
+        : null;
+      scrollElementRef.current = resolved;
+      return resolved;
+    };
+    const element = resolveScrollElement();
     if (!element) return;
-    scrollElementRef.current = element;
     if (positionedThreadRef.current !== runtime.threadId) {
       positionedThreadRef.current = runtime.threadId;
       historyAnchorRef.current = null;
       element.scrollTop = element.scrollHeight;
       isAtBottomRef.current = true;
-      return;
+      const frame = requestAnimationFrame(() => {
+        scrollElementRef.current = null;
+        const mountedElement = resolveScrollElement();
+        if (mountedElement) {
+          mountedElement.scrollTop = mountedElement.scrollHeight;
+        }
+      });
+      return () => cancelAnimationFrame(frame);
     }
     if (isAtBottomRef.current && !historyAnchorRef.current) {
       element.scrollTop = element.scrollHeight;

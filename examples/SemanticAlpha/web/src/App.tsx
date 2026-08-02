@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import FullCalendar from "@fullcalendar/react";
-import dayGridPlugin from "@fullcalendar/react/daygrid";
 import zhCnLocale from "@fullcalendar/react/locales/zh-cn";
-import monarchPlugin from "@fullcalendar/react/themes/monarch";
-import "@fullcalendar/react/skeleton.css";
-import "@fullcalendar/react/themes/monarch/theme.css";
-import "@fullcalendar/react/themes/monarch/palettes/green.css";
 import {
   type ColumnDef,
   type SortingState,
@@ -28,6 +22,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { EventCalendar } from "@/components/event-calendar";
 import { ThreadPanel } from "./ThreadPanel";
 
 type ViewMode = "calendar" | "table";
@@ -568,17 +563,11 @@ export function App() {
           <div className="report-view-surface">
             {viewMode === "calendar" ? (
               <div className="report-calendar">
-                <FullCalendar
-                  plugins={[monarchPlugin, dayGridPlugin]}
-                  initialView="dayGridMonth"
+                <EventCalendar
+                  availableViews={["dayGridMonth"]}
                   initialDate={calendarDate}
                   locale={zhCnLocale}
                   firstDay={1}
-                  headerToolbar={{
-                    left: "prev,next today",
-                    center: "title",
-                    right: "",
-                  }}
                   events={calendarEvents}
                   defaultTimedEventDuration={{ milliseconds: 1 }}
                   eventDisplay="list-item"

@@ -86,21 +86,17 @@ export const api = {
     request<ThreadSummary[]>(`/sessions/${sessionId}/threads`),
   listModels: (sessionId: string) =>
     request<ModelOption[]>(`/sessions/${sessionId}/models`),
-  getExecutionSettings: (sessionId: string, threadId?: string) =>
+  getExecutionSettings: (sessionId: string, threadId: string) =>
     request<ExecutionSettings>(
-      threadId
-        ? `/sessions/${sessionId}/threads/${threadId}/settings`
-        : `/sessions/${sessionId}/settings`,
+      `/sessions/${sessionId}/threads/${threadId}/settings`,
     ),
   updateExecutionSettings: (
     sessionId: string,
+    threadId: string,
     settings: Required<ExecutionSettings>,
-    threadId?: string,
   ) =>
     request<ExecutionSettings>(
-      threadId
-        ? `/sessions/${sessionId}/threads/${threadId}/settings`
-        : `/sessions/${sessionId}/settings`,
+      `/sessions/${sessionId}/threads/${threadId}/settings`,
       {
         method: "PUT",
         body: JSON.stringify(settings),
