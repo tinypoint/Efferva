@@ -9,6 +9,8 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { cn } from "@/lib/utils";
+
 type ToolCall = {
   id: string;
   function?: {
@@ -130,20 +132,20 @@ function ProcessView({
   );
 
   return (
-    <details className="thread-process">
-      <summary>
+    <details className="mb-3 border-l-2 border-[#cfd7cf] pl-3">
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold text-[#657067] select-none [&::-webkit-details-marker]:hidden">
         <span>{formatDuration(message.processDurationMs)}</span>
-        <span className="thread-process-count">
+        <span className="font-normal text-[#929890]">
           {message.process.length} 个步骤
         </span>
       </summary>
-      <div className="thread-process-body">
+      <div className="pt-3">
         {message.process.map((part, index) => {
           if (part.type === "reasoning") {
             return (
               <div
                 key={`${message.id}:reasoning:${index}`}
-                className="thread-reasoning"
+                className="rich-text rich-text-sm mt-3 text-[#697169] first:mt-0"
               >
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {part.text}
@@ -158,26 +160,36 @@ function ProcessView({
           return (
             <details
               key={`${message.id}:tool:${part.toolCallId}`}
-              className="thread-tool"
+              className="mt-3 rounded-lg border border-[#e1e2dc] bg-[#fafaf7] first:mt-0"
             >
-              <summary>
-                <Wrench aria-hidden="true" />
+              <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs font-semibold text-[#657067] select-none [&::-webkit-details-marker]:hidden">
+                <Wrench aria-hidden="true" className="size-3.5" />
                 <span>{toolName}</span>
                 {result?.isError ? (
-                  <span className="thread-tool-error">失败</span>
+                  <span className="ml-auto text-[0.68rem] text-[#a6382d]">
+                    失败
+                  </span>
                 ) : null}
               </summary>
-              <div className="thread-tool-body">
+              <div className="border-t border-[#e1e2dc] p-3">
                 {call?.function?.arguments ? (
                   <>
-                    <div className="thread-tool-label">输入</div>
-                    <pre>{formatArguments(call.function.arguments)}</pre>
+                    <div className="my-1 text-[0.68rem] font-semibold text-[#747a72] uppercase">
+                      输入
+                    </div>
+                    <pre className="mb-3 max-h-96 overflow-auto rounded-md bg-[#172018] p-2.5 font-mono text-[0.68rem] leading-relaxed whitespace-pre-wrap text-[#dfe9e1]">
+                      {formatArguments(call.function.arguments)}
+                    </pre>
                   </>
                 ) : null}
                 {result ? (
                   <>
-                    <div className="thread-tool-label">输出</div>
-                    <pre>{contentText(result.content)}</pre>
+                    <div className="my-1 text-[0.68rem] font-semibold text-[#747a72] uppercase">
+                      输出
+                    </div>
+                    <pre className="max-h-96 overflow-auto rounded-md bg-[#172018] p-2.5 font-mono text-[0.68rem] leading-relaxed whitespace-pre-wrap text-[#dfe9e1]">
+                      {contentText(result.content)}
+                    </pre>
                   </>
                 ) : null}
               </div>
@@ -201,9 +213,14 @@ function MessageView({
 
   return (
     <section
-      className={`thread-message ${isUser ? "thread-message-user" : "thread-message-agent"}`}
+      className={cn(
+        "mt-6 [overflow-wrap:anywhere] first:mt-0",
+        isUser
+          ? "ml-10 rounded-xl bg-[#edf4ee] p-4"
+          : "py-1",
+      )}
     >
-      <div className="thread-message-label">
+      <div className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold text-[#5f685f] [&_svg]:size-4">
         {isUser ? (
           <CircleUserRound aria-hidden="true" />
         ) : (
@@ -215,7 +232,7 @@ function MessageView({
         <ProcessView message={message} toolResults={toolResults} />
       ) : null}
       {body ? (
-        <div className="thread-markdown">
+        <div className="rich-text rich-text-sm">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
         </div>
       ) : null}
@@ -307,49 +324,63 @@ export function ThreadPanel({
   );
 
   return (
-    <div className="thread-panel">
-      <header className="thread-panel-header">
-        <div className="thread-panel-title-row">
+    <div className="grid h-full min-h-0 text-[#263128] [grid-template-rows:auto_minmax(0,1fr)_auto]">
+      <header className="min-h-20 border-b border-[#deddd5] px-5 py-4">
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="thread-panel-eyebrow">生成上下文</div>
-            <h2>生成线程</h2>
+            <div className="mb-0.5 text-[0.68rem] font-semibold tracking-[0.08em] text-[#747a72] uppercase">
+              生成上下文
+            </div>
+            <h2 className="m-0 text-base font-semibold tracking-tight text-[#172018]">
+              生成线程
+            </h2>
           </div>
           {thread ? (
-            <span className="thread-panel-count">
+            <span className="shrink-0 text-xs text-[#747a72]">
               {conversation.length} 条对话 · {toolResults.size} 次工具
             </span>
           ) : null}
         </div>
         {metadata ? (
-          <div className="thread-panel-metadata">
-            <span className="thread-metadata-chip" title={sessionId}>
-              <span className="thread-metadata-label">Session</span>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <span
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-[#e1e2dc] bg-[#fafaf7] px-2 py-1 text-[0.68rem] leading-tight text-[#475148]"
+              title={sessionId}
+            >
+              <span className="font-semibold text-[#8a9189]">Session</span>
               {metadata.sessionName}
             </span>
-            <span className="thread-metadata-chip" title={metadata.model}>
-              <span className="thread-metadata-label">模型</span>
+            <span
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-[#e1e2dc] bg-[#fafaf7] px-2 py-1 text-[0.68rem] leading-tight text-[#475148]"
+              title={metadata.model}
+            >
+              <span className="font-semibold text-[#8a9189]">模型</span>
               {metadata.modelLabel}
             </span>
-            <span className="thread-metadata-chip">
-              <span className="thread-metadata-label">推理</span>
+            <span className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-[#e1e2dc] bg-[#fafaf7] px-2 py-1 text-[0.68rem] leading-tight text-[#475148]">
+              <span className="font-semibold text-[#8a9189]">推理</span>
               {metadata.reasoningEffort}
             </span>
           </div>
         ) : null}
       </header>
 
-      <div className="thread-panel-content">
+      <div className="min-h-0 overflow-y-auto p-5">
         {!thread && !error ? (
-          <div className="thread-panel-state">
-            <LoaderCircle className="thread-spinner" aria-hidden="true" />
+          <div className="flex h-full min-h-40 items-center justify-center gap-2 p-8 text-center text-sm text-[#747a72]">
+            <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
             正在读取生成线程…
           </div>
         ) : null}
         {error ? (
-          <div className="thread-panel-state thread-panel-error">{error}</div>
+          <div className="flex h-full min-h-40 items-center justify-center p-8 text-center text-sm text-[#a6382d]">
+            {error}
+          </div>
         ) : null}
         {thread && conversation.length === 0 ? (
-          <div className="thread-panel-state">这个线程还没有消息。</div>
+          <div className="flex h-full min-h-40 items-center justify-center p-8 text-center text-sm text-[#747a72]">
+            这个线程还没有消息。
+          </div>
         ) : null}
         {conversation.map((message) => (
           <MessageView
@@ -360,9 +391,11 @@ export function ThreadPanel({
         ))}
       </div>
 
-      <footer className="thread-panel-footer">
-        <Terminal aria-hidden="true" />
-        <span title={threadId}>{threadId}</span>
+      <footer className="flex min-w-0 items-center gap-2 border-t border-[#deddd5] px-5 py-3 font-mono text-[0.65rem] text-[#929890]">
+        <Terminal aria-hidden="true" className="size-3 shrink-0" />
+        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={threadId}>
+          {threadId}
+        </span>
       </footer>
     </div>
   );

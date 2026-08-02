@@ -139,19 +139,6 @@ function mergeVisibleMessages(
   ];
 }
 
-function findChatScrollElement(root: HTMLElement): HTMLElement | null {
-  const content = root.querySelector<HTMLElement>(
-    '[data-testid="copilot-scroll-content"]',
-  );
-  let element = content?.parentElement ?? null;
-  while (element && element !== root) {
-    const overflowY = getComputedStyle(element).overflowY;
-    if (overflowY === "auto" || overflowY === "scroll") return element;
-    element = element.parentElement;
-  }
-  return null;
-}
-
 type AssistantMessage = Extract<Message, { role: "assistant" }>;
 type EffervaProcessMessage = Extract<Message, { role: "reasoning" }> & {
   process?: AgUiMessage["process"];
@@ -1147,10 +1134,6 @@ export function EffervaChat() {
     Array<{ value: string; label: string; description: string }>
   >([]);
   const dispatchingRef = useRef(false);
-  const chatRootRef = useRef<HTMLDivElement>(null);
-  const scrollElementRef = useRef<HTMLElement | null>(null);
-  const isAtBottomRef = useRef(true);
-  const positionedThreadRef = useRef<string | null>(null);
   const historyAnchorRef = useRef<{
     element: HTMLElement;
     scrollHeight: number;
@@ -1178,44 +1161,15 @@ export function EffervaChat() {
       anchor.scrollTop + anchor.element.scrollHeight - anchor.scrollHeight;
   }, [runtime.historyRevision, runtime.threadId]);
 
-  useLayoutEffect(() => {
-    if (runtime.loading) return;
-    const resolveScrollElement = () => {
-      const current = scrollElementRef.current;
-      if (current?.isConnected) return current;
-      const resolved = chatRootRef.current
-        ? findChatScrollElement(chatRootRef.current)
-        : null;
-      scrollElementRef.current = resolved;
-      return resolved;
-    };
-    const element = resolveScrollElement();
-    if (!element) return;
-    if (positionedThreadRef.current !== runtime.threadId) {
-      positionedThreadRef.current = runtime.threadId;
-      historyAnchorRef.current = null;
-      element.scrollTop = element.scrollHeight;
-      isAtBottomRef.current = true;
-      const frame = requestAnimationFrame(() => {
-        scrollElementRef.current = null;
-        const mountedElement = resolveScrollElement();
-        if (mountedElement) {
-          mountedElement.scrollTop = mountedElement.scrollHeight;
-        }
-      });
-      return () => cancelAnimationFrame(frame);
-    }
-    if (isAtBottomRef.current && !historyAnchorRef.current) {
-      element.scrollTop = element.scrollHeight;
-    }
-  }, [runtime.loading, runtime.threadId, visibleMessages]);
-
   const handleHistoryScroll = useCallback(
     (event: UIEvent<HTMLDivElement>) => {
-      const element = event.currentTarget;
-      scrollElementRef.current = element;
-      isAtBottomRef.current =
-        element.scrollHeight - element.scrollTop - element.clientHeight < 10;
+      const element = event.target;
+      if (
+        !(element instanceof HTMLElement) ||
+        !element.querySelector('[data-testid="copilot-scroll-content"]')
+      ) {
+        return;
+      }
       if (
         element.scrollTop > 160 ||
         runtime.loading ||
@@ -1252,6 +1206,18 @@ export function EffervaChat() {
       runtime.loadingOlderHistory,
       runtime.threadId,
     ],
+  );
+  const scrollView = useMemo(
+    () =>
+      ({
+        initial: "instant",
+        resize: "instant",
+        onScrollCapture: handleHistoryScroll,
+      }) as ComponentProps<typeof CopilotChatView.ScrollView> & {
+        initial: "instant";
+        resize: "instant";
+      },
+    [handleHistoryScroll],
   );
 
   const send = useCallback(
@@ -1416,17 +1382,17 @@ export function EffervaChat() {
   }, [agent, input, runtime.sessionId]);
 
   return (
-    <div ref={chatRootRef} className="relative h-full min-h-0">
+    <div className="relative h-full min-h-0">
       <CopilotChatView
         className="h-full"
         messages={visibleMessages}
-        autoScroll="none"
+        autoScroll="pin-to-bottom"
         isRunning={agent.isRunning}
         inputValue={input}
         onInputChange={setInput}
         onSubmitMessage={(value) => void send(value)}
         onStop={stop}
-        scrollView={{ onScroll: handleHistoryScroll }}
+        scrollView={scrollView}
         input={{
           toolsMenu,
           addMenuButton: ComposerAddMenuButton,

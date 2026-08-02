@@ -23,6 +23,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { EventCalendar } from "@/components/event-calendar";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { ThreadPanel } from "./ThreadPanel";
 
 type ViewMode = "calendar" | "table";
@@ -68,6 +70,13 @@ const STATUS_LABEL: Record<string, string> = {
   running: "生成中",
   succeeded: "已完成",
   failed: "失败",
+};
+
+const STATUS_STYLE: Record<string, string> = {
+  queued: "bg-[#edf4ee] text-[#24603c]",
+  running: "bg-[#edf4ee] text-[#24603c]",
+  succeeded: "bg-[#e5f2e8] text-[#24603c]",
+  failed: "bg-[#fbeceb] text-[#a6382d]",
 };
 
 async function requestJson<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -116,7 +125,12 @@ function duration(value: number | null): string {
 
 function RunStatus({ status }: { status: string }) {
   return (
-    <span className={`run-status run-status-${status}`}>
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-1 text-[0.68rem] font-semibold",
+        STATUS_STYLE[status] ?? "bg-muted text-muted-foreground",
+      )}
+    >
       {STATUS_LABEL[status] ?? status}
     </span>
   );
@@ -152,8 +166,10 @@ function ReportRunsTable({
           const run = info.row.original;
           return (
             <div>
-              <div className="report-table-title">{run.title}</div>
-              <div className="report-table-subtitle">
+              <div className="text-[0.82rem] font-semibold text-[#172018]">
+                {run.title}
+              </div>
+              <div className="mt-0.5 text-[0.7rem] text-[#8a9189]">
                 {run.report_type} · {run.subject}
               </div>
             </div>
@@ -187,7 +203,7 @@ function ReportRunsTable({
         cell: (info) => {
           const run = info.row.original;
           return (
-            <div className="report-trace">
+            <div className="grid gap-0.5 font-mono text-[0.65rem] text-[#697169] [&>span]:overflow-hidden [&>span]:text-ellipsis [&>span]:whitespace-nowrap">
               <span title={run.session_id ?? undefined}>
                 S · {run.session_id ?? "—"}
               </span>
@@ -213,20 +229,24 @@ function ReportRunsTable({
   });
 
   return (
-    <div className="report-table-shell">
-      <div className="report-table-scroll">
-        <table className="report-table">
+    <div className="min-w-0">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[75rem] table-fixed border-collapse text-xs text-[#354038] [&_tbody_tr:last-child_td]:border-b-0">
           <thead>
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => {
                   const sorted = header.column.getIsSorted();
                   return (
-                    <th key={header.id} style={{ width: header.getSize() }}>
+                    <th
+                      key={header.id}
+                      className="border-b border-[#deddd5] bg-[#f5f4ee] p-0 text-left text-[0.68rem] font-semibold text-[#747a72]"
+                      style={{ width: header.getSize() }}
+                    >
                       {header.isPlaceholder ? null : (
                         <button
                           type="button"
-                          className="report-table-sort"
+                          className="flex min-h-11 w-full items-center justify-between gap-2 border-0 bg-transparent px-3.5 py-3 text-left font-[inherit] text-[inherit] enabled:hover:bg-[#edebe2] disabled:cursor-default [&_svg]:size-3 [&_svg]:shrink-0"
                           onClick={header.column.getToggleSortingHandler()}
                           disabled={!header.column.getCanSort()}
                         >
@@ -255,11 +275,15 @@ function ReportRunsTable({
             {table.getRowModel().rows.map((row) => (
               <tr
                 key={row.id}
-                className="report-table-row"
+                className="cursor-pointer hover:bg-[#fafaf7]"
                 onClick={() => onOpen(row.original.id)}
               >
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} style={{ width: cell.column.getSize() }}>
+                  <td
+                    key={cell.id}
+                    className="h-[3.7rem] border-b border-[#e8e6df] px-3.5 py-3 align-middle"
+                    style={{ width: cell.column.getSize() }}
+                  >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
@@ -267,7 +291,10 @@ function ReportRunsTable({
             ))}
             {table.getRowModel().rows.length === 0 ? (
               <tr>
-                <td colSpan={columns.length} className="report-table-empty">
+                <td
+                  colSpan={columns.length}
+                  className="h-48 text-center text-[#8a9189]"
+                >
                   暂无报告运行
                 </td>
               </tr>
@@ -276,11 +303,12 @@ function ReportRunsTable({
         </table>
       </div>
 
-      <div className="report-table-pagination">
+      <div className="flex min-h-14 items-center justify-end gap-2.5 border-t border-[#deddd5] px-3.5 py-2.5 text-[0.7rem] text-[#747a72]">
         <span>共 {runs.length} 次运行</span>
-        <label>
+        <label className="flex items-center gap-1.5">
           每页
           <select
+            className="h-8 rounded-md border border-[#deddd5] bg-white px-2 font-[inherit] text-[#475148]"
             value={table.getState().pagination.pageSize}
             onChange={(event) => table.setPageSize(Number(event.target.value))}
           >
@@ -289,25 +317,29 @@ function ReportRunsTable({
             ))}
           </select>
         </label>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="icon"
           onClick={() => table.previousPage()}
           disabled={!table.getCanPreviousPage()}
           aria-label="上一页"
         >
-          <ChevronLeft aria-hidden="true" />
-        </button>
+          <ChevronLeft aria-hidden="true" className="size-3.5" />
+        </Button>
         <span>
           {table.getState().pagination.pageIndex + 1} / {table.getPageCount() || 1}
         </span>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="icon"
           onClick={() => table.nextPage()}
           disabled={!table.getCanNextPage()}
           aria-label="下一页"
         >
-          <ChevronRight aria-hidden="true" />
-        </button>
+          <ChevronRight aria-hidden="true" className="size-3.5" />
+        </Button>
       </div>
     </div>
   );
@@ -325,37 +357,41 @@ function ReportDetail({
   onBack: () => void;
 }) {
   return (
-    <main className="report-detail-shell">
-      <section className="report-detail-layout">
-        <div className="report-document-scroll">
-          <div className="report-detail-back-row">
-            <button type="button" onClick={onBack} className="report-back-button">
-              <ArrowLeft aria-hidden="true" />
+    <main className="h-screen min-h-0 overflow-hidden bg-[#f8f7f2] text-[#172018]">
+      <section className="grid h-full overflow-hidden [grid-template-columns:minmax(0,3fr)_minmax(25rem,2fr)] max-[880px]:block max-[880px]:overflow-y-auto">
+        <div className="min-w-0 overflow-y-auto p-8 max-[880px]:overflow-visible max-[880px]:p-4">
+          <div className="mx-auto mb-3 w-full max-w-[60rem]">
+            <Button type="button" onClick={onBack} variant="ghost">
+              <ArrowLeft aria-hidden="true" className="size-4" />
               返回
-            </button>
+            </Button>
           </div>
 
-          <article className="report-document">
+          <article className="mx-auto min-h-[calc(100vh-7rem)] w-full max-w-[60rem] rounded-xl border border-[#deddd5] bg-white p-10 shadow-[0_1px_2px_rgb(23_32_24/4%)] max-[880px]:min-h-0 max-[880px]:p-6">
             {run ? (
-              <div className="report-document-meta">
+              <div className="mb-9 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-[#e6e4dc] pb-4 text-xs text-[#747a72]">
                 <span>{run.report_type} · {run.subject}</span>
                 <span>计划于 {dateTime(run.scheduled_for)}</span>
                 <RunStatus status={run.status} />
               </div>
             ) : null}
 
-            {loading ? <p className="report-state">正在读取报告…</p> : null}
-            {error ? <p className="report-state report-state-error">{error}</p> : null}
+            {loading ? (
+              <p className="text-sm text-[#747a72]">正在读取报告…</p>
+            ) : null}
+            {error ? <p className="text-sm text-[#a6382d]">{error}</p> : null}
             {run?.markdown ? (
-              <div className="markdown-body">
+              <div className="rich-text">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {run.markdown}
                 </ReactMarkdown>
               </div>
             ) : null}
             {run && !run.markdown && !loading ? (
-              <div className="report-empty-state">
-                <h1>{run.title}</h1>
+              <div className="text-sm text-[#747a72]">
+                <h1 className="mb-4 text-3xl leading-tight font-semibold text-[#172018]">
+                  {run.title}
+                </h1>
                 <p>
                   {run.status === "failed"
                     ? run.error ?? "这次报告生成失败。"
@@ -366,7 +402,7 @@ function ReportDetail({
           </article>
         </div>
 
-        <aside className="report-thread-pane">
+        <aside className="min-h-0 min-w-0 border-l border-[#deddd5] bg-white max-[880px]:h-[70vh] max-[880px]:min-h-[36rem] max-[880px]:border-t max-[880px]:border-l-0">
           {run?.session_id && run.thread_id ? (
             <ThreadPanel
               sessionId={run.session_id}
@@ -376,7 +412,7 @@ function ReportDetail({
               live={run.status === "queued" || run.status === "running"}
             />
           ) : (
-            <div className="thread-panel-state">
+            <div className="flex h-full min-h-40 items-center justify-center p-8 text-center text-sm text-[#747a72]">
               {loading ? "正在读取生成线程…" : "生成线程尚未创建。"}
             </div>
           )}
@@ -519,13 +555,13 @@ export function App() {
   }));
 
   return (
-      <main className="report-workspace">
-        <section className="report-collection">
-          <div className="report-toolbar">
+      <main className="min-h-screen bg-[#f8f7f2] text-[#172018]">
+        <section className="mx-auto w-full max-w-[96rem] p-6 max-[880px]:p-3">
+          <div className="mb-3.5 flex items-center gap-2">
             <select
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
-              className="report-filter"
+              className="h-10 w-[min(22rem,calc(100vw-8rem))] rounded-lg border border-[#deddd5] bg-white px-3 pr-8 text-sm text-[#172018] outline-none focus:border-[#8fa697] focus:ring-2 focus:ring-[#244d35]/10"
               aria-label="按报告类型和主题筛选"
             >
               {options.map((option) => (
@@ -534,35 +570,42 @@ export function App() {
                 </option>
               ))}
             </select>
-            <div className="report-view-switch" aria-label="报告视图">
-              <button
+            <div
+              className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[#deddd5] bg-white p-1"
+              aria-label="报告视图"
+            >
+              <Button
                 type="button"
-                className={viewMode === "calendar" ? "is-active" : ""}
+                variant={viewMode === "calendar" ? "default" : "ghost"}
+                size="icon"
                 onClick={() => setViewMode("calendar")}
                 aria-label="日历视图"
                 title="日历视图"
               >
-                <CalendarDays aria-hidden="true" />
-              </button>
-              <button
+                <CalendarDays aria-hidden="true" className="size-4" />
+              </Button>
+              <Button
                 type="button"
-                className={viewMode === "table" ? "is-active" : ""}
+                variant={viewMode === "table" ? "default" : "ghost"}
+                size="icon"
                 onClick={() => setViewMode("table")}
                 aria-label="表格视图"
                 title="表格视图"
               >
-                <TableProperties aria-hidden="true" />
-              </button>
+                <TableProperties aria-hidden="true" className="size-4" />
+              </Button>
             </div>
           </div>
 
           {collectionError ? (
-            <div className="collection-error">{collectionError}</div>
+            <div className="mb-3.5 rounded-lg border border-[#efcbc7] bg-[#fff3f1] px-3.5 py-3 text-sm text-[#a6382d]">
+              {collectionError}
+            </div>
           ) : null}
 
-          <div className="report-view-surface">
+          <div className="overflow-hidden rounded-xl border border-[#deddd5] bg-white max-[880px]:overflow-x-auto">
             {viewMode === "calendar" ? (
-              <div className="report-calendar">
+              <div className="p-5 text-sm text-[#172018] max-[880px]:min-w-[46rem]">
                 <EventCalendar
                   availableViews={["dayGridMonth"]}
                   initialDate={calendarDate}
