@@ -23,6 +23,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { api } from "./api";
 import { createCodexClient } from "./CodexAgent";
+import { CodexEvents } from "./codexEvents";
 import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
 import type {
   CollaborationMode,
@@ -55,7 +56,17 @@ export function App() {
     () => (sessionId ? createCodexClient(sessionId) : null),
     [sessionId],
   );
-  useEffect(() => () => codex?.close(), [codex]);
+  const codexEvents = useMemo(
+    () => (codex ? new CodexEvents(codex) : null),
+    [codex],
+  );
+  useEffect(
+    () => () => {
+      codexEvents?.close();
+      codex?.close();
+    },
+    [codex, codexEvents],
+  );
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.listSessions,
@@ -76,6 +87,33 @@ export function App() {
     },
     enabled: Boolean(codex),
   });
+  useEffect(() => {
+    if (!codexEvents || !sessionId) return;
+    const listChangingMethods = new Set([
+      "thread/started",
+      "thread/name/updated",
+      "thread/status/changed",
+      "thread/archived",
+      "thread/unarchived",
+      "thread/deleted",
+      "thread/closed",
+      "thread/settings/updated",
+      "turn/started",
+      "turn/completed",
+    ]);
+    return codexEvents.subscribe(({ threadId: notifiedThreadId, notification }) => {
+      if (!listChangingMethods.has(notification.method)) return;
+      if (
+        notification.method === "thread/deleted" &&
+        notifiedThreadId === threadId
+      ) {
+        navigate(`/sessions/${sessionId}`, { replace: true });
+      }
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", sessionId],
+      });
+    });
+  }, [codexEvents, navigate, queryClient, sessionId, threadId]);
   const models = useQuery({
     queryKey: ["models", sessionId],
     queryFn: async () => {
@@ -331,6 +369,7 @@ export function App() {
     <EffervaRuntime
       key={sessionId}
       client={codex as CodexClient}
+      events={codexEvents!}
       sessionId={sessionId}
       threadId={threadId}
       model={model}

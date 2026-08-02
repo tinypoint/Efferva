@@ -32,6 +32,7 @@ import {
 import { CodexRpcError, type CodexClient } from "@efferva/codex-client";
 
 import { CodexAgent, type CodexRunConfig } from "./CodexAgent";
+import { CodexEvents } from "./codexEvents";
 import { asObject, projectTurnMessages } from "./codexProjection";
 import type {
   AgUiMessage,
@@ -563,6 +564,7 @@ const RuntimeContext = createContext<RuntimeContextValue | null>(null);
 
 type EffervaRuntimeProps = {
   client: CodexClient;
+  events: CodexEvents;
   sessionId: string;
   threadId?: string;
   model?: string;
@@ -592,6 +594,7 @@ type EffervaRuntimeProps = {
 
 export function EffervaRuntime({
   client,
+  events,
   sessionId,
   threadId,
   model,
@@ -635,6 +638,7 @@ export function EffervaRuntime({
   const onRunSettledRef = useRef(onRunSettled);
   const onThreadNotFoundRef = useRef(onThreadNotFound);
   const createdThreadIdRef = useRef<string | null>(null);
+  const mirroredTurnIdRef = useRef<string | null>(null);
   desiredThreadIdRef.current = desiredThreadId;
   settingsRef.current = {
     model,
@@ -650,8 +654,71 @@ export function EffervaRuntime({
   onThreadNotFoundRef.current = onThreadNotFound;
 
   const agent = useMemo(() => {
-    return new CodexAgent(client, () => settingsRef.current);
-  }, [client]);
+    return new CodexAgent(client, events, () => settingsRef.current);
+  }, [client, events]);
+
+  useEffect(() => {
+    return events.subscribe(({ sequence, threadId: notifiedThreadId, notification }) => {
+      const params = asObject(notification.params);
+      if (
+        notification.method === "thread/name/updated" &&
+        params.threadId &&
+        params.threadName
+      ) {
+        onThreadNameUpdatedRef.current(
+          String(params.threadId),
+          String(params.threadName),
+        );
+      }
+      if (
+        notification.method === "thread/settings/updated" &&
+        notifiedThreadId
+      ) {
+        const settings = asObject(params.threadSettings);
+        onExecutionSettingsLoadedRef.current(notifiedThreadId, {
+          model: settings.model ? String(settings.model) : undefined,
+          reasoning_effort: settings.effort
+            ? String(settings.effort)
+            : undefined,
+          collaboration_mode:
+            asObject(settings.collaborationMode).mode === "plan"
+              ? "plan"
+              : "default",
+        });
+      }
+      if (
+        notification.method !== "turn/started" ||
+        !notifiedThreadId ||
+        notifiedThreadId !== desiredThreadIdRef.current ||
+        agent.isRunning ||
+        agent.isFollowingTurn
+      ) {
+        return;
+      }
+      const turn = asObject(params.turn);
+      const nativeTurnId = turn.id ? String(turn.id) : "";
+      if (!nativeTurnId || mirroredTurnIdRef.current === nativeTurnId) return;
+      mirroredTurnIdRef.current = nativeTurnId;
+      agent.setResumeSource({
+        threadId: notifiedThreadId,
+        turnId: nativeTurnId,
+        afterSequence: sequence - 1,
+        mirrorUserMessages: true,
+      });
+      void agent.connectAgent().catch((cause: unknown) => {
+        if (mirroredTurnIdRef.current === nativeTurnId) {
+          mirroredTurnIdRef.current = null;
+        }
+        if (desiredThreadIdRef.current === notifiedThreadId) {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Failed to follow the active turn",
+          );
+        }
+      });
+    });
+  }, [agent, events]);
 
   const loadOlderHistory = useCallback(async (): Promise<boolean> => {
     const cursor = historyCursor;
@@ -932,6 +999,7 @@ export function EffervaRuntime({
       },
       async onRunFinalized({ agent: current, state }) {
         const settledThreadId = current.threadId;
+        mirroredTurnIdRef.current = null;
         if (!settledThreadId || settledThreadId === "new") return;
         if (desiredThreadIdRef.current !== settledThreadId) return;
         onRunSettledRef.current(settledThreadId);

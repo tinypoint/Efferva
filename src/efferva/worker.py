@@ -12,11 +12,9 @@ from prometheus_client import Gauge, start_http_server
 
 from efferva.codex_appserver import CodexAppServerManager
 from efferva.codex_release import prepare_official_codex
+from efferva.codex_session import CodexSession
 from efferva.codex_transport import CodexTransport
-from efferva.codex_tunnel import (
-    CodexTunnelBackpressureError,
-    RedisCodexTunnel,
-)
+from efferva.codex_tunnel import RedisCodexTunnel
 from efferva.config import Settings, get_settings
 from efferva.sandbox import SandboxProvider
 from efferva.sandbox.manager import create_sandbox_control_plane
@@ -25,20 +23,20 @@ LOGGER = logging.getLogger(__name__)
 
 WORKER_READY = Gauge(
     "efferva_worker_ready",
-    "Whether this worker can accept Codex connections",
+    "Whether this worker can accept Codex Sessions",
 )
-ACTIVE_CODEX_CONNECTIONS = Gauge(
-    "efferva_worker_active_codex_connections",
-    "Active Codex connections held by this worker",
+ACTIVE_CODEX_SESSIONS = Gauge(
+    "efferva_worker_active_codex_sessions",
+    "Active Codex Sessions held by this worker",
 )
-CODEX_CONNECTION_CAPACITY = Gauge(
-    "efferva_worker_codex_connection_capacity",
-    "Maximum Codex connections accepted by this worker",
+CODEX_SESSION_CAPACITY = Gauge(
+    "efferva_worker_codex_session_capacity",
+    "Maximum Codex Sessions accepted by this worker",
 )
 
 
-class CodexConnectionWorker:
-    """Claims browser connections and relays their Codex WebSocket frames."""
+class CodexSessionWorker:
+    """Claims Session channels and keeps one Codex WebSocket per Session."""
 
     def __init__(
         self,
@@ -50,13 +48,11 @@ class CodexConnectionWorker:
         self._transport = transport
         self._tunnel = tunnel
         self._worker_id = os.environ.get("HOSTNAME") or f"worker-{uuid4()}"
-        self._connections: dict[str, asyncio.Task[None]] = {}
+        self._sessions: dict[str, asyncio.Task[None]] = {}
         self._stopping = asyncio.Event()
 
     async def run(self) -> None:
-        CODEX_CONNECTION_CAPACITY.set(
-            self._settings.worker_connection_capacity
-        )
+        CODEX_SESSION_CAPACITY.set(self._settings.worker_session_capacity)
         await self._tunnel.ping()
         WORKER_READY.set(1)
 
@@ -67,64 +63,61 @@ class CodexConnectionWorker:
 
         try:
             while not self._stopping.is_set():
-                self._remove_finished_connections()
+                self._remove_finished_sessions()
                 capacity = (
-                    self._settings.worker_connection_capacity
-                    - len(self._connections)
+                    self._settings.worker_session_capacity - len(self._sessions)
                 )
                 if capacity <= 0:
                     await self._wait_for_capacity()
                     continue
 
-                claimed = await self._tunnel.reclaim_stale_connections(
+                claimed = await self._tunnel.reclaim_stale_channels(
                     self._worker_id,
                     min_idle_ms=(
-                        self._settings.worker_connection_claim_idle_seconds
-                        * 1000
+                        self._settings.worker_session_claim_idle_seconds * 1000
                     ),
                     count=capacity,
                 )
                 capacity -= len(claimed)
                 if capacity > 0:
                     claimed.extend(
-                        await self._tunnel.claim_new_connections(
+                        await self._tunnel.claim_new_channels(
                             self._worker_id,
                             count=capacity,
                         )
                     )
-                await self._start_connections(claimed)
+                await self._start_sessions(claimed)
         finally:
             WORKER_READY.set(0)
             self._stopping.set()
-            await self._drain_connections()
+            await self._drain_sessions()
 
-    async def _start_connections(
+    async def _start_sessions(
         self,
         claimed: list[tuple[str, dict[str, Any]]],
     ) -> None:
         for dispatch_id, command in claimed:
-            connection_id = str(command.get("connectionId") or "")
+            channel_id = str(command.get("channelId") or "")
             session_id = str(command.get("sessionId") or "")
-            if not connection_id or not session_id:
-                await self._tunnel.acknowledge_connection(dispatch_id)
+            if not channel_id or not session_id:
                 continue
-            if connection_id in self._connections:
+            if channel_id in self._sessions:
                 continue
-            self._connections[connection_id] = asyncio.create_task(
-                self._serve_connection(dispatch_id, command),
-                name=f"efferva-codex:{connection_id}",
+            self._sessions[channel_id] = asyncio.create_task(
+                self._serve_session(dispatch_id, command),
+                name=f"efferva-codex-session:{session_id}",
             )
-        ACTIVE_CODEX_CONNECTIONS.set(len(self._connections))
+        ACTIVE_CODEX_SESSIONS.set(len(self._sessions))
 
-    async def _serve_connection(
+    async def _serve_session(
         self,
         dispatch_id: str,
         command: dict[str, Any],
     ) -> None:
-        connection_id = str(command["connectionId"])
+        channel_id = str(command["channelId"])
         session_id = str(command["sessionId"])
-        acquired = await self._tunnel.acquire_connection_lease(
-            connection_id,
+        acquired = await self._tunnel.acquire_channel_lease(
+            channel_id,
             self._worker_id,
         )
         if not acquired:
@@ -132,155 +125,69 @@ class CodexConnectionWorker:
 
         owner = asyncio.current_task()
         lease_task = asyncio.create_task(
-            self._renew_lease(connection_id, dispatch_id, owner)
+            self._renew_lease(session_id, channel_id, dispatch_id, owner)
         )
+        status = "closed"
+        error: str | None = None
         try:
-            state = await self._tunnel.get_state(connection_id)
-            if state.get("status") in {"closed", "failed"}:
-                await self._tunnel.acknowledge_connection(dispatch_id)
-                return
+            state = await self._tunnel.get_state(channel_id)
             if state.get("status") == "ready":
-                await self._finish_connection(
-                    connection_id,
-                    dispatch_id,
-                    status="failed",
-                    error="the worker holding this Codex connection was lost",
+                raise RuntimeError(
+                    "the worker holding this Codex Session was lost"
                 )
+            if state.get("status") in {"closed", "failed"}:
                 return
-            if not await self._tunnel.client_is_connected(connection_id):
-                await self._finish_connection(
-                    connection_id,
-                    dispatch_id,
-                    status="closed",
-                )
+            if not await self._tunnel.active_clients(channel_id):
                 return
 
             await self._tunnel.set_state(
-                connection_id,
+                channel_id,
                 {"status": "connecting", "workerId": self._worker_id},
             )
             async with self._transport.connect({"id": session_id}) as upstream:
-                if not await self._tunnel.client_is_connected(connection_id):
-                    await self._finish_connection(
-                        connection_id,
-                        dispatch_id,
-                        status="closed",
-                    )
-                    return
+                codex_session = CodexSession(channel_id, upstream, self._tunnel)
+                await codex_session.initialize()
                 await self._tunnel.set_state(
-                    connection_id,
+                    channel_id,
                     {"status": "ready", "workerId": self._worker_id},
                 )
-                tasks = {
-                    asyncio.create_task(
-                        self._client_to_server(connection_id, upstream)
-                    ),
-                    asyncio.create_task(
-                        self._server_to_client(connection_id, upstream)
-                    ),
-                    asyncio.create_task(self._watch_client(connection_id)),
-                }
-                done, pending = await asyncio.wait(
-                    tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    task.result()
-            await self._finish_connection(
-                connection_id,
-                dispatch_id,
-                status="closed",
-            )
+                await codex_session.run()
         except asyncio.CancelledError:
-            await self._finish_connection(
-                connection_id,
-                dispatch_id,
-                status="failed",
-                error="the worker closed this Codex connection",
-            )
+            status = "failed"
+            error = "the worker closed this Codex Session"
             raise
-        except Exception as error:
-            await self._finish_connection(
-                connection_id,
-                dispatch_id,
-                status="failed",
-                error=str(error),
-            )
+        except Exception as exception:
+            status = "failed"
+            error = str(exception)
         finally:
             lease_task.cancel()
             with suppress(asyncio.CancelledError):
                 await lease_task
-            await self._tunnel.release_connection_lease(
-                connection_id,
-                self._worker_id,
+            await self._finish_session(
+                session_id,
+                channel_id,
+                dispatch_id,
+                status=status,
+                error=error,
             )
-
-    async def _client_to_server(
-        self,
-        connection_id: str,
-        upstream: Any,
-    ) -> None:
-        cursor = "0-0"
-        while True:
-            frames = await self._tunnel.read_frames(
-                connection_id,
-                "client",
-                after=cursor,
-            )
-            for frame_id, kind, payload in frames:
-                cursor = frame_id
-                if kind == "close":
-                    await self._tunnel.acknowledge_frame(
-                        connection_id,
-                        "client",
-                        frame_id,
-                    )
-                    return
-                await upstream.send(payload)
-                await self._tunnel.acknowledge_frame(
-                    connection_id,
-                    "client",
-                    frame_id,
-                )
-
-    async def _server_to_client(
-        self,
-        connection_id: str,
-        upstream: Any,
-    ) -> None:
-        async for payload in upstream:
-            if not isinstance(payload, str):
-                raise TypeError("Codex JSON-RPC requires text frames")
-            await self._tunnel.send_frame(
-                connection_id,
-                "server",
-                payload=payload,
-            )
-
-    async def _watch_client(self, connection_id: str) -> None:
-        while True:
-            await asyncio.sleep(self._tunnel.heartbeat_interval_seconds)
-            if not await self._tunnel.client_is_connected(connection_id):
-                return
 
     async def _renew_lease(
         self,
-        connection_id: str,
+        session_id: str,
+        channel_id: str,
         dispatch_id: str,
         owner: asyncio.Task[Any] | None,
     ) -> None:
         while True:
             await asyncio.sleep(self._tunnel.heartbeat_interval_seconds)
             try:
-                await self._tunnel.touch_connection_claim(
+                await self._tunnel.touch_channel_claim(
                     self._worker_id,
                     dispatch_id,
                 )
-                renewed = await self._tunnel.renew_connection_lease(
-                    connection_id,
+                renewed = await self._tunnel.renew_channel_lease(
+                    session_id,
+                    channel_id,
                     self._worker_id,
                 )
             except Exception:
@@ -290,57 +197,66 @@ class CodexConnectionWorker:
                     owner.cancel()
                 return
 
-    async def _finish_connection(
+    async def _finish_session(
         self,
-        connection_id: str,
+        session_id: str,
+        channel_id: str,
         dispatch_id: str,
         *,
         status: str,
-        error: str | None = None,
+        error: str | None,
     ) -> None:
-        values: dict[str, Any] = {"status": status}
+        state: dict[str, Any] = {"status": status}
         if error:
-            values["error"] = error
-        await self._tunnel.set_state(connection_id, values)
-        with suppress(CodexTunnelBackpressureError):
-            await self._tunnel.send_frame(
-                connection_id,
-                "server",
-                kind="close",
-            )
-        await self._tunnel.acknowledge_connection(dispatch_id)
+            state["error"] = error
+        await self._tunnel.set_state(channel_id, state)
+        clients = await self._tunnel.active_clients(channel_id)
+        await asyncio.gather(
+            *(
+                self._tunnel.send_server_frame(
+                    channel_id,
+                    client_id,
+                    kind="close",
+                )
+                for client_id in clients
+            ),
+            return_exceptions=True,
+        )
+        await self._tunnel.release_channel(
+            session_id,
+            channel_id,
+            self._worker_id,
+            dispatch_id,
+        )
 
-    def _remove_finished_connections(self) -> None:
-        for connection_id, task in self._connections.items():
+    def _remove_finished_sessions(self) -> None:
+        for channel_id, task in self._sessions.items():
             if task.done() and not task.cancelled():
                 try:
                     task.result()
                 except Exception:
-                    LOGGER.exception(
-                        "Codex connection %s failed",
-                        connection_id,
-                    )
-        self._connections = {
-            connection_id: task
-            for connection_id, task in self._connections.items()
+                    LOGGER.exception("Codex channel %s failed", channel_id)
+        self._sessions = {
+            channel_id: task
+            for channel_id, task in self._sessions.items()
             if not task.done()
         }
-        ACTIVE_CODEX_CONNECTIONS.set(len(self._connections))
+        ACTIVE_CODEX_SESSIONS.set(len(self._sessions))
 
     async def _wait_for_capacity(self) -> None:
-        if not self._connections:
+        if not self._sessions:
             return
         await asyncio.wait(
-            self._connections.values(),
+            self._sessions.values(),
             timeout=1,
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-    async def _drain_connections(self) -> None:
-        if not self._connections:
+    async def _drain_sessions(self) -> None:
+        if not self._sessions:
             return
         _, pending = await asyncio.wait(
-            self._connections.values(),
+            self._sessions.values(),
             timeout=self._settings.worker_shutdown_grace_seconds,
         )
         for task in pending:
@@ -359,9 +275,9 @@ async def serve_worker(
     tunnel = RedisCodexTunnel(
         settings.redis_url,
         prefix=settings.redis_prefix,
-        ttl_seconds=settings.codex_connection_ttl_seconds,
-        lease_seconds=settings.codex_connection_lease_seconds,
-        dispatch_queue_capacity=settings.codex_connection_queue_capacity,
+        ttl_seconds=settings.codex_session_ttl_seconds,
+        lease_seconds=settings.codex_session_lease_seconds,
+        dispatch_queue_capacity=settings.codex_session_queue_capacity,
         frame_queue_capacity=settings.codex_frame_queue_capacity,
         frame_max_bytes=settings.codex_frame_max_bytes,
     )
@@ -376,7 +292,7 @@ async def serve_worker(
             sandboxes,
         )
         start_http_server(settings.worker_metrics_port)
-        worker = CodexConnectionWorker(
+        worker = CodexSessionWorker(
             CodexTransport(app_servers),
             tunnel,
             settings,

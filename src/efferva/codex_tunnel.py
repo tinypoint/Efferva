@@ -17,7 +17,7 @@ class CodexTunnelBackpressureError(RuntimeError):
 
 
 class RedisCodexTunnel:
-    """Redis-backed, opaque, ordered transport for Codex WebSocket frames."""
+    """Redis transport between browser clients and Session-level Codex channels."""
 
     def __init__(
         self,
@@ -37,7 +37,7 @@ class RedisCodexTunnel:
         self._dispatch_queue_capacity = dispatch_queue_capacity
         self._frame_queue_capacity = frame_queue_capacity
         self._frame_max_bytes = frame_max_bytes
-        self._dispatch_stream = f"{self._prefix}:codex-connections"
+        self._dispatch_stream = f"{self._prefix}:codex-channels"
         self._dispatch_group = f"{self._prefix}:codex-workers"
 
     @property
@@ -63,42 +63,260 @@ class RedisCodexTunnel:
     async def close(self) -> None:
         await self._redis.aclose()
 
-    async def open_connection(self, connection_id: str, session_id: str) -> str:
+    async def attach_client(
+        self,
+        session_id: str,
+        client_id: str,
+        candidate_channel_id: str,
+    ) -> str:
         command = _encode(
             {
-                "connectionId": connection_id,
+                "channelId": candidate_channel_id,
                 "sessionId": session_id,
             }
         )
         result = await self._redis.eval(
             """
-            if redis.call('xlen', KEYS[2]) >= tonumber(ARGV[3]) then
-              return '__CODEX_TUNNEL_QUEUE_FULL__'
+            local channel = redis.call('get', KEYS[2])
+            if channel then
+              local state_key = ARGV[1] .. channel .. ':state'
+              local status = redis.call('hget', state_key, 'status')
+              if status == ARGV[9] or status == ARGV[10] or status == ARGV[11] then
+                redis.call('del', KEYS[2])
+                channel = false
+              end
             end
-            if not redis.call('set', KEYS[1], '1', 'EX', ARGV[1], 'NX') then
-              return ''
+
+            if not channel then
+              if redis.call('xlen', KEYS[1]) >= tonumber(ARGV[4]) then
+                return '__CODEX_TUNNEL_QUEUE_FULL__'
+              end
+              channel = ARGV[7]
+              redis.call('set', KEYS[2], channel, 'EX', ARGV[2])
+              local base = ARGV[1] .. channel
+              redis.call('set', base .. ':enqueued', '1', 'EX', ARGV[2])
+              redis.call('hset', base .. ':state',
+                'status', ARGV[8], 'sessionId', ARGV[12])
+              redis.call('expire', base .. ':state', ARGV[2])
+              redis.call('xadd', KEYS[1], '*', 'command', ARGV[13])
+            else
+              redis.call('expire', KEYS[2], ARGV[2])
             end
-            redis.call('hset', KEYS[3], 'status', '"queued"')
-            redis.call('expire', KEYS[3], ARGV[1])
-            redis.call('set', KEYS[4], '1', 'EX', ARGV[2])
-            return redis.call('xadd', KEYS[2], '*', 'command', ARGV[4])
+
+            local base = ARGV[1] .. channel
+            redis.call('sadd', base .. ':clients', ARGV[6])
+            redis.call('expire', base .. ':clients', ARGV[2])
+            redis.call('set',
+              base .. ':client:' .. ARGV[6] .. ':presence',
+              '1', 'EX', ARGV[3])
+            return channel
             """,
-            4,
-            self._enqueued_key(connection_id),
+            2,
             self._dispatch_stream,
-            self._state_key(connection_id),
-            self._client_key(connection_id),
+            self._current_channel_key(session_id),
+            f"{self._prefix}:codex:",
             self._ttl_seconds,
             self._lease_seconds,
             self._dispatch_queue_capacity,
+            session_id,
+            client_id,
+            candidate_channel_id,
+            _encode("queued"),
+            _encode("closing"),
+            _encode("closed"),
+            _encode("failed"),
+            _encode(session_id),
             command,
         )
         result = str(result or "")
         if result == "__CODEX_TUNNEL_QUEUE_FULL__":
-            raise CodexTunnelQueueFullError("the Codex connection queue is full")
+            raise CodexTunnelQueueFullError("the Codex Session queue is full")
+        if not result:
+            raise RuntimeError("Redis did not attach the Codex client")
         return result
 
-    async def claim_new_connections(
+    async def detach_client(self, channel_id: str, client_id: str) -> None:
+        await self._redis.eval(
+            """
+            redis.call('xadd', KEYS[1], '*',
+              'clientId', ARGV[1], 'kind', 'close', 'payload', '')
+            redis.call('expire', KEYS[1], ARGV[2])
+            redis.call('srem', KEYS[2], ARGV[1])
+            redis.call('del', KEYS[3])
+            """,
+            3,
+            self._incoming_stream(channel_id),
+            self._clients_key(channel_id),
+            self._client_presence_key(channel_id, client_id),
+            client_id,
+            self._ttl_seconds,
+        )
+
+    async def touch_client(self, channel_id: str, client_id: str) -> bool:
+        result = await self._redis.eval(
+            """
+            if redis.call('exists', KEYS[1]) == 0 then
+              return 0
+            end
+            redis.call('expire', KEYS[1], ARGV[1])
+            redis.call('expire', KEYS[2], ARGV[2])
+            redis.call('expire', KEYS[3], ARGV[2])
+            redis.call('expire', KEYS[4], ARGV[2])
+            return 1
+            """,
+            4,
+            self._client_presence_key(channel_id, client_id),
+            self._clients_key(channel_id),
+            self._state_key(channel_id),
+            self._incoming_stream(channel_id),
+            self._lease_seconds,
+            self._ttl_seconds,
+        )
+        return bool(result)
+
+    async def active_clients(self, channel_id: str) -> list[str]:
+        clients = sorted(await self._redis.smembers(self._clients_key(channel_id)))
+        if not clients:
+            return []
+        presence = await self._redis.mget(
+            [self._client_presence_key(channel_id, client_id) for client_id in clients]
+        )
+        active = [
+            client_id
+            for client_id, present in zip(clients, presence, strict=True)
+            if present is not None
+        ]
+        stale = set(clients) - set(active)
+        if stale:
+            await self._redis.srem(self._clients_key(channel_id), *stale)
+        return active
+
+    async def send_client_frame(
+        self,
+        channel_id: str,
+        client_id: str,
+        *,
+        payload: str,
+    ) -> str:
+        self._validate_frame(payload)
+        result = await self._redis.eval(
+            """
+            if redis.call('exists', KEYS[2]) == 0 then
+              return ''
+            end
+            if redis.call('xlen', KEYS[1]) >= tonumber(ARGV[1]) then
+              return '__CODEX_TUNNEL_BACKPRESSURE__'
+            end
+            local id = redis.call('xadd', KEYS[1], '*',
+              'clientId', ARGV[2], 'kind', 'text', 'payload', ARGV[3])
+            redis.call('expire', KEYS[1], ARGV[4])
+            return id
+            """,
+            2,
+            self._incoming_stream(channel_id),
+            self._client_presence_key(channel_id, client_id),
+            self._frame_queue_capacity,
+            client_id,
+            payload,
+            self._ttl_seconds,
+        )
+        return self._frame_result(result, "incoming")
+
+    async def read_client_frames(
+        self,
+        channel_id: str,
+        *,
+        after: str,
+        block_ms: int = 15_000,
+    ) -> list[tuple[str, str, str, str]]:
+        rows = await self._redis.xread(
+            {self._incoming_stream(channel_id): after},
+            block=block_ms,
+        )
+        return [
+            (
+                str(entry_id),
+                str(fields.get("clientId") or ""),
+                str(fields.get("kind") or "text"),
+                str(fields.get("payload") or ""),
+            )
+            for _, entries in rows
+            for entry_id, fields in entries
+        ]
+
+    async def acknowledge_client_frame(
+        self,
+        channel_id: str,
+        frame_id: str,
+    ) -> None:
+        await self._redis.xdel(self._incoming_stream(channel_id), frame_id)
+
+    async def send_server_frame(
+        self,
+        channel_id: str,
+        client_id: str,
+        *,
+        payload: str = "",
+        kind: Literal["text", "close"] = "text",
+    ) -> str:
+        self._validate_frame(payload)
+        result = await self._redis.eval(
+            """
+            if redis.call('exists', KEYS[2]) == 0 then
+              return ''
+            end
+            if redis.call('xlen', KEYS[1]) >= tonumber(ARGV[1]) then
+              return '__CODEX_TUNNEL_BACKPRESSURE__'
+            end
+            local id = redis.call('xadd', KEYS[1], '*',
+              'kind', ARGV[2], 'payload', ARGV[3])
+            redis.call('expire', KEYS[1], ARGV[4])
+            return id
+            """,
+            2,
+            self._outgoing_stream(channel_id, client_id),
+            self._client_presence_key(channel_id, client_id),
+            self._frame_queue_capacity,
+            kind,
+            payload,
+            self._ttl_seconds,
+        )
+        return self._frame_result(result, f"outgoing client {client_id}")
+
+    async def read_server_frames(
+        self,
+        channel_id: str,
+        client_id: str,
+        *,
+        after: str,
+        block_ms: int = 15_000,
+    ) -> list[tuple[str, str, str]]:
+        rows = await self._redis.xread(
+            {self._outgoing_stream(channel_id, client_id): after},
+            block=block_ms,
+        )
+        return [
+            (
+                str(entry_id),
+                str(fields.get("kind") or "text"),
+                str(fields.get("payload") or ""),
+            )
+            for _, entries in rows
+            for entry_id, fields in entries
+        ]
+
+    async def acknowledge_server_frame(
+        self,
+        channel_id: str,
+        client_id: str,
+        frame_id: str,
+    ) -> None:
+        await self._redis.xdel(
+            self._outgoing_stream(channel_id, client_id),
+            frame_id,
+        )
+
+    async def claim_new_channels(
         self,
         worker_id: str,
         *,
@@ -116,7 +334,7 @@ class RedisCodexTunnel:
         )
         return _dispatch_rows(rows)
 
-    async def reclaim_stale_connections(
+    async def reclaim_stale_channels(
         self,
         worker_id: str,
         *,
@@ -139,21 +357,7 @@ class RedisCodexTunnel:
             for entry_id, fields in rows
         ]
 
-    async def acknowledge_connection(self, dispatch_id: str) -> None:
-        async with self._redis.pipeline(transaction=True) as pipeline:
-            pipeline.xack(
-                self._dispatch_stream,
-                self._dispatch_group,
-                dispatch_id,
-            )
-            pipeline.xdel(self._dispatch_stream, dispatch_id)
-            await pipeline.execute()
-
-    async def touch_connection_claim(
-        self,
-        worker_id: str,
-        dispatch_id: str,
-    ) -> None:
+    async def touch_channel_claim(self, worker_id: str, dispatch_id: str) -> None:
         await self._redis.xclaim(
             self._dispatch_stream,
             self._dispatch_group,
@@ -163,176 +367,137 @@ class RedisCodexTunnel:
             justid=True,
         )
 
-    async def acquire_connection_lease(
+    async def acquire_channel_lease(
         self,
-        connection_id: str,
+        channel_id: str,
         worker_id: str,
     ) -> bool:
         return bool(
             await self._redis.set(
-                self._lease_key(connection_id),
+                self._lease_key(channel_id),
                 worker_id,
                 ex=self._lease_seconds,
                 nx=True,
             )
         )
 
-    async def renew_connection_lease(
+    async def renew_channel_lease(
         self,
-        connection_id: str,
+        session_id: str,
+        channel_id: str,
         worker_id: str,
     ) -> bool:
         result = await self._redis.eval(
             """
-            if redis.call('get', KEYS[1]) == ARGV[1] then
-              return redis.call('expire', KEYS[1], ARGV[2])
+            if redis.call('get', KEYS[1]) ~= ARGV[1] then
+              return 0
             end
-            return 0
+            redis.call('expire', KEYS[1], ARGV[2])
+            if redis.call('get', KEYS[2]) == ARGV[3] then
+              redis.call('expire', KEYS[2], ARGV[4])
+            end
+            redis.call('expire', KEYS[3], ARGV[4])
+            redis.call('expire', KEYS[4], ARGV[4])
+            redis.call('expire', KEYS[5], ARGV[4])
+            return 1
             """,
-            1,
-            self._lease_key(connection_id),
+            5,
+            self._lease_key(channel_id),
+            self._current_channel_key(session_id),
+            self._enqueued_key(channel_id),
+            self._state_key(channel_id),
+            self._clients_key(channel_id),
             worker_id,
             self._lease_seconds,
+            channel_id,
+            self._ttl_seconds,
         )
         return bool(result)
 
-    async def release_connection_lease(
+    async def release_channel(
         self,
-        connection_id: str,
+        session_id: str,
+        channel_id: str,
         worker_id: str,
+        dispatch_id: str,
     ) -> None:
         await self._redis.eval(
             """
             if redis.call('get', KEYS[1]) == ARGV[1] then
-              return redis.call('del', KEYS[1])
+              redis.call('del', KEYS[1])
             end
-            return 0
+            if redis.call('get', KEYS[2]) == ARGV[2] then
+              redis.call('del', KEYS[2])
+            end
+            redis.call('del', KEYS[3])
+            redis.call('xack', KEYS[4], ARGV[3], ARGV[4])
+            redis.call('xdel', KEYS[4], ARGV[4])
             """,
-            1,
-            self._lease_key(connection_id),
+            4,
+            self._current_channel_key(session_id),
+            self._lease_key(channel_id),
+            self._enqueued_key(channel_id),
+            self._dispatch_stream,
+            channel_id,
             worker_id,
-        )
-
-    async def touch_client(self, connection_id: str) -> bool:
-        return bool(
-            await self._redis.expire(
-                self._client_key(connection_id),
-                self._lease_seconds,
-            )
-        )
-
-    async def client_is_connected(self, connection_id: str) -> bool:
-        return bool(await self._redis.exists(self._client_key(connection_id)))
-
-    async def disconnect_client(self, connection_id: str) -> None:
-        try:
-            await self.send_frame(connection_id, "client", kind="close")
-        finally:
-            await self._redis.delete(self._client_key(connection_id))
-
-    async def send_frame(
-        self,
-        connection_id: str,
-        direction: Literal["client", "server"],
-        *,
-        payload: str = "",
-        kind: Literal["text", "close"] = "text",
-    ) -> str:
-        if len(payload.encode()) > self._frame_max_bytes:
-            raise ValueError("Codex frame exceeds the transport size limit")
-        key = self._frame_stream(connection_id, direction)
-        result = await self._redis.eval(
-            """
-            if redis.call('xlen', KEYS[1]) >= tonumber(ARGV[1]) then
-              return '__CODEX_TUNNEL_BACKPRESSURE__'
-            end
-            local id = redis.call(
-              'xadd', KEYS[1], '*', 'kind', ARGV[2], 'payload', ARGV[3]
-            )
-            redis.call('expire', KEYS[1], ARGV[4])
-            return id
-            """,
-            1,
-            key,
-            self._frame_queue_capacity,
-            kind,
-            payload,
-            self._ttl_seconds,
-        )
-        result = str(result or "")
-        if result == "__CODEX_TUNNEL_BACKPRESSURE__":
-            raise CodexTunnelBackpressureError(
-                f"the Codex {direction} frame queue is full"
-            )
-        return result
-
-    async def read_frames(
-        self,
-        connection_id: str,
-        direction: Literal["client", "server"],
-        *,
-        after: str,
-        block_ms: int = 15_000,
-    ) -> list[tuple[str, str, str]]:
-        rows = await self._redis.xread(
-            {self._frame_stream(connection_id, direction): after},
-            block=block_ms,
-        )
-        return [
-            (
-                str(entry_id),
-                str(fields.get("kind") or "text"),
-                str(fields.get("payload") or ""),
-            )
-            for _, entries in rows
-            for entry_id, fields in entries
-        ]
-
-    async def acknowledge_frame(
-        self,
-        connection_id: str,
-        direction: Literal["client", "server"],
-        frame_id: str,
-    ) -> None:
-        await self._redis.xdel(
-            self._frame_stream(connection_id, direction),
-            frame_id,
+            self._dispatch_group,
+            dispatch_id,
         )
 
     async def set_state(
         self,
-        connection_id: str,
+        channel_id: str,
         values: Mapping[str, Any],
     ) -> None:
         encoded = {name: _encode(value) for name, value in values.items()}
         if not encoded:
             return
-        key = self._state_key(connection_id)
+        key = self._state_key(channel_id)
         await self._redis.hset(key, mapping=encoded)
         await self._redis.expire(key, self._ttl_seconds)
 
-    async def get_state(self, connection_id: str) -> dict[str, Any]:
-        values = await self._redis.hgetall(self._state_key(connection_id))
+    async def get_state(self, channel_id: str) -> dict[str, Any]:
+        values = await self._redis.hgetall(self._state_key(channel_id))
         return {name: _decode(value) for name, value in values.items()}
 
-    def _frame_stream(
-        self,
-        connection_id: str,
-        direction: Literal["client", "server"],
-    ) -> str:
-        return f"{self._prefix}:codex:{connection_id}:{direction}"
+    def _frame_result(self, result: Any, queue: str) -> str:
+        normalized = str(result or "")
+        if normalized == "__CODEX_TUNNEL_BACKPRESSURE__":
+            raise CodexTunnelBackpressureError(
+                f"the Codex {queue} frame queue is full"
+            )
+        return normalized
 
-    def _state_key(self, connection_id: str) -> str:
-        return f"{self._prefix}:codex:{connection_id}:state"
+    def _validate_frame(self, payload: str) -> None:
+        if len(payload.encode()) > self._frame_max_bytes:
+            raise ValueError("Codex frame exceeds the transport size limit")
 
-    def _client_key(self, connection_id: str) -> str:
-        return f"{self._prefix}:codex:{connection_id}:client-presence"
+    def _current_channel_key(self, session_id: str) -> str:
+        return f"{self._prefix}:codex-session:{session_id}:channel"
 
-    def _lease_key(self, connection_id: str) -> str:
-        return f"{self._prefix}:codex:{connection_id}:lease"
+    def _base(self, channel_id: str) -> str:
+        return f"{self._prefix}:codex:{channel_id}"
 
-    def _enqueued_key(self, connection_id: str) -> str:
-        return f"{self._prefix}:codex:{connection_id}:enqueued"
+    def _clients_key(self, channel_id: str) -> str:
+        return f"{self._base(channel_id)}:clients"
+
+    def _client_presence_key(self, channel_id: str, client_id: str) -> str:
+        return f"{self._base(channel_id)}:client:{client_id}:presence"
+
+    def _incoming_stream(self, channel_id: str) -> str:
+        return f"{self._base(channel_id)}:incoming"
+
+    def _outgoing_stream(self, channel_id: str, client_id: str) -> str:
+        return f"{self._base(channel_id)}:client:{client_id}:outgoing"
+
+    def _state_key(self, channel_id: str) -> str:
+        return f"{self._base(channel_id)}:state"
+
+    def _lease_key(self, channel_id: str) -> str:
+        return f"{self._base(channel_id)}:lease"
+
+    def _enqueued_key(self, channel_id: str) -> str:
+        return f"{self._base(channel_id)}:enqueued"
 
 
 def _dispatch_rows(rows: Any) -> list[tuple[str, dict[str, Any]]]:

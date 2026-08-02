@@ -80,10 +80,14 @@ def create_api_router(
             await websocket.close(code=4404)
             return
 
-        connection_id = str(uuid4())
+        client_id = str(uuid4())
         tunnel = codex_tunnel()
         try:
-            await tunnel.open_connection(connection_id, str(session_id))
+            channel_id = await tunnel.attach_client(
+                str(session_id),
+                client_id,
+                str(uuid4()),
+            )
         except CodexTunnelQueueFullError:
             await websocket.close(code=1013, reason="Codex workers are busy")
             return
@@ -92,7 +96,7 @@ def create_api_router(
         async def client_heartbeat() -> None:
             while True:
                 await asyncio.sleep(tunnel.heartbeat_interval_seconds)
-                if not await tunnel.touch_client(connection_id):
+                if not await tunnel.touch_client(channel_id, client_id):
                     return
 
         async def client_to_worker() -> None:
@@ -107,22 +111,22 @@ def create_api_router(
                         reason="Codex JSON-RPC requires text frames",
                     )
                     return
-                await tunnel.send_frame(
-                    connection_id,
-                    "client",
+                await tunnel.send_client_frame(
+                    channel_id,
+                    client_id,
                     payload=payload,
                 )
 
         async def worker_to_client() -> None:
             cursor = "0-0"
             while True:
-                frames = await tunnel.read_frames(
-                    connection_id,
-                    "server",
+                frames = await tunnel.read_server_frames(
+                    channel_id,
+                    client_id,
                     after=cursor,
                 )
                 if not frames:
-                    state = await tunnel.get_state(connection_id)
+                    state = await tunnel.get_state(channel_id)
                     if state.get("status") in {"closed", "failed"}:
                         await websocket.close(
                             code=1011 if state.get("status") == "failed" else 1000,
@@ -137,12 +141,12 @@ def create_api_router(
                 for frame_id, kind, payload in frames:
                     cursor = frame_id
                     if kind == "close":
-                        await tunnel.acknowledge_frame(
-                            connection_id,
-                            "server",
+                        await tunnel.acknowledge_server_frame(
+                            channel_id,
+                            client_id,
                             frame_id,
                         )
-                        state = await tunnel.get_state(connection_id)
+                        state = await tunnel.get_state(channel_id)
                         await websocket.close(
                             code=1011 if state.get("status") == "failed" else 1000,
                             reason=(
@@ -153,9 +157,9 @@ def create_api_router(
                         )
                         return
                     await websocket.send_text(payload)
-                    await tunnel.acknowledge_frame(
-                        connection_id,
-                        "server",
+                    await tunnel.acknowledge_server_frame(
+                        channel_id,
+                        client_id,
                         frame_id,
                     )
 
@@ -180,8 +184,7 @@ def create_api_router(
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            with suppress(CodexTunnelBackpressureError):
-                await tunnel.disconnect_client(connection_id)
+            await tunnel.detach_client(channel_id, client_id)
             if websocket.client_state == WebSocketState.CONNECTED:
                 with suppress(RuntimeError):
                     await websocket.close()

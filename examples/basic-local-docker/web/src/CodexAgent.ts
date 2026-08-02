@@ -15,6 +15,7 @@ import {
   projectToolCall,
   type JsonObject,
 } from "./codexProjection";
+import { CodexEvents } from "./codexEvents";
 import type { SkillMetadata, ThreadSummary } from "./types";
 
 export type CodexRunConfig = {
@@ -28,6 +29,8 @@ export type CodexRunConfig = {
 type ResumeSource = {
   threadId: string;
   turnId: string;
+  afterSequence?: number;
+  mirrorUserMessages?: boolean;
 };
 
 type TurnStartResult = {
@@ -295,9 +298,11 @@ export function createCodexClient(sessionId: string): CodexClient {
 export class CodexAgent extends AbstractAgent {
   private resumeSource?: ResumeSource;
   private activeTurn?: ResumeSource;
+  private followingTurn = false;
 
   constructor(
     readonly client: CodexClient,
+    private readonly events: CodexEvents,
     private readonly getRunConfig: () => CodexRunConfig,
   ) {
     super({ agentId: "efferva", threadId: "new" });
@@ -305,6 +310,10 @@ export class CodexAgent extends AbstractAgent {
 
   setResumeSource(source: ResumeSource): void {
     this.resumeSource = source;
+  }
+
+  get isFollowingTurn(): boolean {
+    return this.followingTurn;
   }
 
   run(input: RunAgentInput): Observable<BaseEvent> {
@@ -428,6 +437,8 @@ export class CodexAgent extends AbstractAgent {
         subscriber,
         runId,
         threadId,
+        this.events.sequence,
+        false,
         () =>
           this.client.request<TurnStartResult>("turn/start", {
             threadId,
@@ -479,6 +490,8 @@ export class CodexAgent extends AbstractAgent {
       subscriber,
       runId,
       source.threadId,
+      source.afterSequence ?? this.events.sequence,
+      source.mirrorUserMessages ?? false,
       async () => {
         const response = await this.client.request<ThreadResumeResult>("thread/resume", {
           threadId: source.threadId,
@@ -495,8 +508,11 @@ export class CodexAgent extends AbstractAgent {
     subscriber: Subscriber<BaseEvent>,
     runId: string,
     threadId: string,
+    afterSequence: number,
+    mirrorUserMessages: boolean,
     start: () => Promise<TurnStartResult | null>,
   ): Promise<void> {
+    this.followingTurn = true;
     const projection = new TurnTextProjection(runId);
     const startedTools = new Set<string>();
     let turnId: string | undefined;
@@ -540,9 +556,8 @@ export class CodexAgent extends AbstractAgent {
       );
     };
 
-    const unsubscribeNotification = this.client.onNotification((notification) => {
+    const unsubscribeNotification = this.events.subscribe(({ notification }) => {
       const params = asObject(notification.params);
-      if (params.threadId && String(params.threadId) !== threadId) return;
       if (turnId && params.turnId && String(params.turnId) !== turnId) return;
       this.projectNotification(
         notification,
@@ -557,8 +572,9 @@ export class CodexAgent extends AbstractAgent {
         },
         runId,
         threadId,
+        mirrorUserMessages,
       );
-    });
+    }, { threadId, after: afterSequence });
     let rejectClose!: (error: Error) => void;
     const closed = new Promise<never>((_, reject) => {
       rejectClose = reject;
@@ -584,6 +600,7 @@ export class CodexAgent extends AbstractAgent {
       finishStepStart(result.turn.id, result.turn.startedAt);
       if (!settled) await Promise.race([completion, closed]);
     } finally {
+      this.followingTurn = false;
       unsubscribeClose();
       unsubscribeNotification();
       if (this.activeTurn?.turnId === turnId) this.activeTurn = undefined;
@@ -600,6 +617,7 @@ export class CodexAgent extends AbstractAgent {
     onSettled: () => void,
     runId: string,
     threadId: string,
+    mirrorUserMessages: boolean,
   ): void {
     const params = asObject(notification.params);
     const method = notification.method;
@@ -630,7 +648,26 @@ export class CodexAgent extends AbstractAgent {
       return;
     }
     if (method === "item/started") {
-      const tool = projectToolCall(params.item);
+      const item = asObject(params.item);
+      if (mirrorUserMessages && item.type === "userMessage") {
+        const text = (Array.isArray(item.content) ? item.content : [])
+          .map(asObject)
+          .filter((part) => part.type === "text")
+          .map((part) => String(part.text ?? ""))
+          .join("");
+        if (text) {
+          const messageId = String(item.id ?? crypto.randomUUID());
+          subscriber.next(
+            event({ type: "TEXT_MESSAGE_START", messageId, role: "user" }),
+          );
+          subscriber.next(
+            event({ type: "TEXT_MESSAGE_CONTENT", messageId, delta: text }),
+          );
+          subscriber.next(event({ type: "TEXT_MESSAGE_END", messageId }));
+        }
+        return;
+      }
+      const tool = projectToolCall(item);
       if (!tool) return;
       startedTools.add(tool.id);
       subscriber.next(

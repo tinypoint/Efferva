@@ -70,9 +70,9 @@ class Efferva:
             tunnel = RedisCodexTunnel(
                 settings.redis_url,
                 prefix=settings.redis_prefix,
-                ttl_seconds=settings.codex_connection_ttl_seconds,
-                lease_seconds=settings.codex_connection_lease_seconds,
-                dispatch_queue_capacity=settings.codex_connection_queue_capacity,
+                ttl_seconds=settings.codex_session_ttl_seconds,
+                lease_seconds=settings.codex_session_lease_seconds,
+                dispatch_queue_capacity=settings.codex_session_queue_capacity,
                 frame_queue_capacity=settings.codex_frame_queue_capacity,
                 frame_max_bytes=settings.codex_frame_max_bytes,
             )
