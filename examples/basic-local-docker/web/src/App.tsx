@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Menu } from "@base-ui/react/menu";
+import type { CodexClient } from "@efferva/codex-client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Code2,
@@ -21,10 +22,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { api } from "./api";
+import { createCodexClient } from "./CodexAgent";
 import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
 import type {
   CollaborationMode,
   ExecutionSettings,
+  ModelOption,
+  SkillListEntry,
   ThreadSummary,
 } from "./types";
 
@@ -47,19 +51,41 @@ export function App() {
   const [executionSettingsByThread, setExecutionSettingsByThread] = useState<
     Record<string, ExecutionSettings>
   >({});
+  const codex = useMemo(
+    () => (sessionId ? createCodexClient(sessionId) : null),
+    [sessionId],
+  );
+  useEffect(() => () => codex?.close(), [codex]);
   const sessions = useQuery({
     queryKey: ["sessions"],
     queryFn: api.listSessions,
   });
   const threads = useQuery({
     queryKey: ["threads", sessionId],
-    queryFn: () => api.listThreads(sessionId!),
-    enabled: Boolean(sessionId),
+    queryFn: async () => {
+      const response = await codex!.request<{ data: ThreadSummary[] }>(
+        "thread/list",
+        {
+          limit: 100,
+          sortKey: "updated_at",
+          sortDirection: "desc",
+          sourceKinds: ["vscode"],
+        },
+      );
+      return response.data;
+    },
+    enabled: Boolean(codex),
   });
   const models = useQuery({
     queryKey: ["models", sessionId],
-    queryFn: () => api.listModels(sessionId!),
-    enabled: Boolean(sessionId),
+    queryFn: async () => {
+      const response = await codex!.request<{ data: ModelOption[] }>(
+        "model/list",
+        { limit: 100, includeHidden: false },
+      );
+      return response.data;
+    },
+    enabled: Boolean(codex),
   });
   const activeSettings = threadId
     ? executionSettingsByThread[threadId]
@@ -83,9 +109,17 @@ export function App() {
   const selectedThread = threads.data?.find((item) => item.id === threadId);
   const skills = useQuery({
     queryKey: ["skills", sessionId, selectedThread?.cwd],
-    queryFn: () =>
-      api.listSkills(sessionId!, selectedThread?.cwd ?? undefined),
-    enabled: Boolean(sessionId),
+    queryFn: async () => {
+      const response = await codex!.request<{ data: SkillListEntry[] }>(
+        "skills/list",
+        {
+          cwds: selectedThread?.cwd ? [selectedThread.cwd] : [],
+          forceReload: false,
+        },
+      );
+      return response.data;
+    },
+    enabled: Boolean(codex),
   });
   const createDefaultSession = useMutation({
     mutationFn: () => api.createSession("Default"),
@@ -211,12 +245,9 @@ export function App() {
   );
 
   const handleRunSettled = useCallback(
-    (settledThreadId: string) => {
+    (_settledThreadId: string) => {
       void queryClient.invalidateQueries({
         queryKey: ["threads", sessionId],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: ["thread", sessionId, settledThreadId],
       });
     },
     [queryClient, sessionId],
@@ -247,8 +278,8 @@ export function App() {
 
   const deleteThread = useMutation({
     mutationFn: async (deletedThreadId: string) => {
-      if (!sessionId) throw new Error("Session is unavailable");
-      return api.deleteThread(sessionId, deletedThreadId);
+      if (!codex) throw new Error("Codex is unavailable");
+      return codex.request("thread/delete", { threadId: deletedThreadId });
     },
     onSuccess: (_, deletedThreadId) => {
       queryClient.setQueryData<ThreadSummary[]>(
@@ -280,6 +311,7 @@ export function App() {
   );
   if (
     !sessionId ||
+    !codex ||
     threads.isLoading ||
     !threads.data ||
     models.isLoading ||
@@ -298,6 +330,7 @@ export function App() {
   return (
     <EffervaRuntime
       key={sessionId}
+      client={codex as CodexClient}
       sessionId={sessionId}
       threadId={threadId}
       model={model}

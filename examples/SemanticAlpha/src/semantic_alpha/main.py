@@ -72,7 +72,6 @@ app.include_router(create_report_tasks_router())
 
 Efferva(
     identity=resolve_local_principal,
-    sandbox=sandbox_provider,
 ).install(app, prefix="/agent")
 
 

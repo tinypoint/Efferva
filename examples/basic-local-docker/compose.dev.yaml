@@ -1,15 +1,17 @@
 services:
   app:
     environment:
-      PYTHONPATH: /product/efferva-src
+      PYTHONPATH: /product/example-src:/product/efferva-src
     volumes:
       - ../../src:/product/efferva-src:ro
+      - ./src:/product/example-src:ro
 
   worker:
     environment:
-      PYTHONPATH: /product/efferva-src
+      PYTHONPATH: /product/example-src:/product/efferva-src
     volumes:
       - ../../src:/product/efferva-src:ro
+      - ./src:/product/example-src:ro
 
   web:
     build:

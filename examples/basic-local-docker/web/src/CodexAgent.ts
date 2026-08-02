@@ -10,9 +10,12 @@ import {
 } from "@ag-ui/client";
 import { Observable, type Subscriber } from "rxjs";
 
+import {
+  asObject,
+  projectToolCall,
+  type JsonObject,
+} from "./codexProjection";
 import type { SkillMetadata, ThreadSummary } from "./types";
-
-type JsonObject = Record<string, unknown>;
 
 export type CodexRunConfig = {
   model?: string;
@@ -46,106 +49,8 @@ type ThreadResumeResult = {
   reasoningEffort?: string | null;
 };
 
-type ProjectedToolCall = {
-  id: string;
-  name: string;
-  arguments: string;
-  result: string;
-  isError: boolean;
-};
-
-const TOOL_ITEM_TYPES = new Set([
-  "commandExecution",
-  "fileChange",
-  "mcpToolCall",
-  "dynamicToolCall",
-  "collabToolCall",
-  "webSearch",
-  "imageView",
-  "sleep",
-]);
-
-function asObject(value: unknown): JsonObject {
-  return typeof value === "object" && value !== null
-    ? (value as JsonObject)
-    : {};
-}
-
 function event(value: JsonObject): BaseEvent {
   return value as BaseEvent;
-}
-
-function json(value: unknown): string {
-  return typeof value === "string" ? value : JSON.stringify(value ?? null);
-}
-
-function projectToolCall(value: unknown): ProjectedToolCall | null {
-  const item = asObject(value);
-  const type = String(item.type ?? "");
-  if (!TOOL_ITEM_TYPES.has(type)) return null;
-  const id = String(item.id ?? crypto.randomUUID());
-  let name: string;
-  let parameters: unknown;
-  let result: unknown;
-  let isError = false;
-
-  if (type === "commandExecution") {
-    name = "exec_command";
-    parameters = { command: item.command ?? "", cwd: item.cwd ?? null };
-    result =
-      item.aggregatedOutput ??
-      { status: item.status ?? null, exitCode: item.exitCode ?? null };
-    isError = item.status === "failed" || item.status === "declined";
-  } else if (type === "fileChange") {
-    name = "apply_patch";
-    parameters = { changes: item.changes ?? [] };
-    result = { status: item.status ?? null };
-    isError = item.status === "failed" || item.status === "declined";
-  } else if (type === "mcpToolCall") {
-    name = `mcp__${String(item.server ?? "mcp")}__${String(item.tool ?? "tool")}`;
-    parameters = item.arguments ?? {};
-    result = item.result ?? item.error ?? { status: item.status ?? null };
-    isError = item.status === "failed" || item.error != null;
-  } else if (type === "dynamicToolCall") {
-    name = String(item.tool ?? "tool");
-    parameters = item.arguments ?? {};
-    result =
-      item.contentItems ??
-      { status: item.status ?? null, success: item.success ?? null };
-    isError = item.status === "failed" || item.success === false;
-  } else if (type === "collabToolCall") {
-    name = String(item.tool ?? "collaboration");
-    parameters = {
-      prompt: item.prompt ?? null,
-      receiverThreadId: item.receiverThreadId ?? null,
-    };
-    result = {
-      status: item.status ?? null,
-      newThreadId: item.newThreadId ?? null,
-      agentStatus: item.agentStatus ?? null,
-    };
-    isError = item.status === "failed";
-  } else if (type === "webSearch") {
-    name = "web_search";
-    parameters = { query: item.query ?? null, action: item.action ?? null };
-    result = item.results ?? { status: item.status ?? null };
-  } else if (type === "imageView") {
-    name = "view_image";
-    parameters = { path: item.path ?? null };
-    result = { status: item.status ?? "completed" };
-  } else {
-    name = "wait";
-    parameters = { durationMs: item.durationMs ?? null };
-    result = { status: item.status ?? "completed" };
-  }
-
-  return {
-    id,
-    name,
-    arguments: JSON.stringify(parameters),
-    result: json(result),
-    isError,
-  };
 }
 
 class TurnTextProjection {
@@ -379,21 +284,23 @@ async function defaultServerRequest(request: CodexServerRequest): Promise<unknow
   throw new Error(`Unsupported Codex server request: ${request.method}`);
 }
 
+export function createCodexClient(sessionId: string): CodexClient {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return new CodexClient({
+    url: `${protocol}//${window.location.host}/agent/api/sessions/${encodeURIComponent(sessionId)}/codex`,
+    serverRequestHandler: defaultServerRequest,
+  });
+}
+
 export class CodexAgent extends AbstractAgent {
-  readonly client: CodexClient;
   private resumeSource?: ResumeSource;
   private activeTurn?: ResumeSource;
 
   constructor(
-    sessionId: string,
+    readonly client: CodexClient,
     private readonly getRunConfig: () => CodexRunConfig,
   ) {
     super({ agentId: "efferva", threadId: "new" });
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    this.client = new CodexClient({
-      url: `${protocol}//${window.location.host}/agent/api/sessions/${encodeURIComponent(sessionId)}/codex`,
-      serverRequestHandler: defaultServerRequest,
-    });
   }
 
   setResumeSource(source: ResumeSource): void {

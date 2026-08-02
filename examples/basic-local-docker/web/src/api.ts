@@ -1,11 +1,4 @@
-import type {
-  FileSearchResult,
-  ModelOption,
-  Session,
-  SkillListEntry,
-  ThreadHistoryPage,
-  ThreadSummary,
-} from "./types";
+import type { Session } from "./types";
 
 const API_ROOT = "/agent/api";
 
@@ -45,42 +38,4 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  listThreads: (sessionId: string) =>
-    request<ThreadSummary[]>(`/sessions/${sessionId}/threads`),
-  listModels: (sessionId: string) =>
-    request<ModelOption[]>(`/sessions/${sessionId}/models`),
-  listSkills: (sessionId: string, workspace?: string) => {
-    const query = workspace
-      ? `?workspace=${encodeURIComponent(workspace)}`
-      : "";
-    return request<SkillListEntry[]>(
-      `/sessions/${sessionId}/skills${query}`,
-    );
-  },
-  searchFiles: (sessionId: string, query: string, workspace?: string) => {
-    const params = new URLSearchParams({ query });
-    if (workspace) params.set("workspace", workspace);
-    return request<FileSearchResult[]>(
-      `/sessions/${sessionId}/files?${params.toString()}`,
-    );
-  },
-  loadThreadHistoryPage: (
-    sessionId: string,
-    threadId: string,
-    options?: { cursor?: string; signal?: AbortSignal },
-  ) => {
-    const params = new URLSearchParams();
-    if (options?.cursor) params.set("cursor", options.cursor);
-    const encodedParams = params.toString();
-    const query = encodedParams ? `?${encodedParams}` : "";
-    return request<ThreadHistoryPage>(
-      `/sessions/${sessionId}/threads/${threadId}/ag-ui${query}`,
-      { signal: options?.signal },
-    );
-  },
-  deleteThread: (sessionId: string, threadId: string) =>
-    request<{ deleted: boolean }>(
-      `/sessions/${sessionId}/threads/${threadId}`,
-      { method: "DELETE" },
-    ),
 };

@@ -29,17 +29,20 @@ import {
   type CopilotChatInputProps,
   type ToolsMenuItem,
 } from "@copilotkit/react-core/v2";
+import { CodexRpcError, type CodexClient } from "@efferva/codex-client";
 
-import { api, ApiError } from "./api";
 import { CodexAgent, type CodexRunConfig } from "./CodexAgent";
+import { asObject, projectTurnMessages } from "./codexProjection";
 import type {
   AgUiMessage,
   CodexControl,
   CodexControlResult,
   CollaborationMode,
   ExecutionSettings,
+  FileSearchResult,
   ModelOption,
   SkillMetadata,
+  ThreadHistoryPage,
   ThreadSummary,
 } from "./types";
 
@@ -49,6 +52,91 @@ const AGENT_UPDATES = [
   UseAgentUpdate.OnStateChanged,
   UseAgentUpdate.OnRunStatusChanged,
 ];
+
+type NativeTurnPage = {
+  data: unknown[];
+  nextCursor?: string | null;
+};
+
+type NativeThreadResume = {
+  thread: ThreadSummary;
+  model: string;
+  reasoningEffort?: string | null;
+  initialTurnsPage?: NativeTurnPage | null;
+};
+
+async function loadThreadHistoryPage(
+  client: CodexClient,
+  threadId: string,
+  cursor?: string,
+): Promise<ThreadHistoryPage> {
+  let page: NativeTurnPage;
+  let resume: NativeThreadResume | null = null;
+  if (cursor) {
+    page = await client.request<NativeTurnPage>("thread/turns/list", {
+      threadId,
+      cursor,
+      limit: 20,
+      sortDirection: "desc",
+      itemsView: "full",
+    });
+  } else {
+    resume = await client.request<NativeThreadResume>("thread/resume", {
+      threadId,
+      excludeTurns: true,
+      initialTurnsPage: {
+        limit: 20,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+    });
+    if (!resume.initialTurnsPage) {
+      throw new Error("thread/resume did not return initialTurnsPage");
+    }
+    page = resume.initialTurnsPage;
+  }
+
+  const turns = [...page.data].reverse().map(asObject);
+  const detail: ThreadHistoryPage = {
+    messages: projectTurnMessages(turns),
+    next_cursor: page.nextCursor ?? null,
+  };
+  if (!resume) return detail;
+
+  const activeTurn = [...turns]
+    .reverse()
+    .find((turn) => turn.status === "inProgress");
+  const latestTurn = turns.at(-1);
+  const extra = asObject(asObject(resume.thread).extra);
+  const collaborationMode = String(
+    asObject(extra.collaborationMode).mode ?? "",
+  ).toLocaleLowerCase();
+  detail.model = resume.model;
+  detail.reasoning_effort = resume.reasoningEffort ?? null;
+  detail.collaboration_mode = collaborationMode
+    ? collaborationMode === "plan"
+      ? "plan"
+      : "default"
+    : null;
+  detail.active_turn_id = activeTurn ? String(activeTurn.id ?? "") : null;
+  detail.active_turn_started_at = activeTurn?.startedAt as
+    | string
+    | number
+    | null
+    | undefined;
+  if (latestTurn?.status === "failed") {
+    detail.last_run_error =
+      String(asObject(latestTurn.error).message ?? "") || "Turn failed";
+  }
+  return detail;
+}
+
+function isMissingThread(error: unknown): boolean {
+  return (
+    error instanceof CodexRpcError &&
+    /not found|no rollout found/iu.test(error.message)
+  );
+}
 
 function controlFromPrompt(prompt: string): CodexControl | null {
   const command = prompt.match(/^\/(plan|goal)(?:\s+([\s\S]*))?$/u);
@@ -456,6 +544,7 @@ type RuntimeContextValue = {
   hasOlderHistory: boolean;
   loadingOlderHistory: boolean;
   loadOlderHistory: () => Promise<boolean>;
+  searchFiles: (query: string) => Promise<FileSearchResult[]>;
   error: string | null;
   clearError: () => void;
   skills: SkillMetadata[];
@@ -473,6 +562,7 @@ type RuntimeContextValue = {
 const RuntimeContext = createContext<RuntimeContextValue | null>(null);
 
 type EffervaRuntimeProps = {
+  client: CodexClient;
   sessionId: string;
   threadId?: string;
   model?: string;
@@ -501,6 +591,7 @@ type EffervaRuntimeProps = {
 };
 
 export function EffervaRuntime({
+  client,
   sessionId,
   threadId,
   model,
@@ -559,10 +650,8 @@ export function EffervaRuntime({
   onThreadNotFoundRef.current = onThreadNotFound;
 
   const agent = useMemo(() => {
-    return new CodexAgent(sessionId, () => settingsRef.current);
-  }, [sessionId]);
-
-  useEffect(() => () => agent.client.close(), [agent]);
+    return new CodexAgent(client, () => settingsRef.current);
+  }, [client]);
 
   const loadOlderHistory = useCallback(async (): Promise<boolean> => {
     const cursor = historyCursor;
@@ -578,10 +667,10 @@ export function EffervaRuntime({
     olderHistoryRequestRef.current = controller;
     setLoadingOlderHistory(true);
     try {
-      const page = await api.loadThreadHistoryPage(
-        sessionId,
+      const page = await loadThreadHistoryPage(
+        client,
         currentThreadId,
-        { cursor, signal: controller.signal },
+        cursor,
       );
       if (
         controller.signal.aborted ||
@@ -622,7 +711,7 @@ export function EffervaRuntime({
         setLoadingOlderHistory(false);
       }
     }
-  }, [historyCursor, sessionId]);
+  }, [client, historyCursor]);
 
   const runControl = useCallback(
     async (control: CodexControl): Promise<CodexControlResult | null> => {
@@ -847,10 +936,7 @@ export function EffervaRuntime({
         if (desiredThreadIdRef.current !== settledThreadId) return;
         onRunSettledRef.current(settledThreadId);
         try {
-          const detail = await api.loadThreadHistoryPage(
-            sessionId,
-            settledThreadId,
-          );
+          const detail = await loadThreadHistoryPage(client, settledThreadId);
           if (
             current.threadId !== settledThreadId ||
             desiredThreadIdRef.current !== settledThreadId
@@ -892,7 +978,7 @@ export function EffervaRuntime({
       },
     });
     return subscription.unsubscribe;
-  }, [agent, sessionId]);
+  }, [agent, client]);
 
   useEffect(() => {
     const desiredThreadId = threadId ?? "new";
@@ -947,11 +1033,7 @@ export function EffervaRuntime({
       try {
         if (agent.isRunning) await agent.detachActiveRun();
         if (!isCurrentNavigation()) return;
-        const detail = await api.loadThreadHistoryPage(
-          sessionId,
-          desiredThreadId,
-          { signal: controller.signal },
-        );
+        const detail = await loadThreadHistoryPage(client, desiredThreadId);
         if (!isCurrentNavigation()) return;
         onExecutionSettingsLoadedRef.current(desiredThreadId, {
           model: detail.model,
@@ -991,7 +1073,7 @@ export function EffervaRuntime({
       } catch (cause) {
         if (!isCurrentNavigation()) return;
         setOpenedThreadId(desiredThreadId);
-        if (cause instanceof ApiError && cause.status === 404) {
+        if (isMissingThread(cause)) {
           onThreadNotFoundRef.current(desiredThreadId);
           return;
         }
@@ -1007,10 +1089,26 @@ export function EffervaRuntime({
       }
       controller.abort();
     };
-  }, [agent, sessionId, threadId]);
+  }, [agent, client, threadId]);
 
   const openingThread =
     desiredThreadId !== "new" && openedThreadId !== desiredThreadId;
+
+  const searchFiles = useCallback(
+    async (query: string): Promise<FileSearchResult[]> => {
+      const root = workspace || "/home/sandbox/workspace";
+      const response = await client.request<{ files: FileSearchResult[] }>(
+        "fuzzyFileSearch",
+        {
+          query,
+          roots: [root],
+          cancellationToken: `efferva:${sessionId}`,
+        },
+      );
+      return response.files;
+    },
+    [client, sessionId, workspace],
+  );
 
   const agents = useMemo(() => ({ [AGENT_ID]: agent }), [agent]);
   const context = useMemo<RuntimeContextValue>(
@@ -1021,6 +1119,7 @@ export function EffervaRuntime({
       hasOlderHistory: Boolean(historyCursor),
       loadingOlderHistory,
       loadOlderHistory,
+      searchFiles,
       error,
       sessionId,
       threadId: desiredThreadId,
@@ -1049,6 +1148,7 @@ export function EffervaRuntime({
       onReasoningEffortChange,
       reasoningEffort,
       runControl,
+      searchFiles,
       sessionId,
       skills,
       openingThread,
@@ -1422,8 +1522,8 @@ export function EffervaChat() {
     }
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      void api
-        .searchFiles(runtime.sessionId, trigger.query, runtime.workspace ?? undefined)
+      void runtime
+        .searchFiles(trigger.query)
         .then((files) => {
           if (cancelled) return;
           setFileOptions(
@@ -1442,7 +1542,7 @@ export function EffervaChat() {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [runtime.sessionId, runtime.workspace, trigger]);
+  }, [runtime.searchFiles, trigger]);
 
   const triggerOptions = useMemo(() => {
     if (!trigger) return [];
