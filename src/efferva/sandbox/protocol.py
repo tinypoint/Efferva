@@ -108,6 +108,8 @@ class SandboxProvider(Protocol):
     name: str
     capabilities: SandboxCapabilities
 
+    async def open(self) -> None: ...
+
     async def ensure_session_volume(
         self,
         context: SandboxContext,
@@ -124,3 +126,5 @@ class SandboxProvider(Protocol):
     async def stop(self, sandbox: SandboxHandle) -> None: ...
 
     async def destroy(self, sandbox: SandboxHandle) -> None: ...
+
+    async def close(self) -> None: ...

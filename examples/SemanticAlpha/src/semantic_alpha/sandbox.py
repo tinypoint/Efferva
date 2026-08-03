@@ -50,6 +50,9 @@ class BundledSkillsProvider:
     def capabilities(self) -> SandboxCapabilities:
         return self._inner.capabilities
 
+    async def open(self) -> None:
+        await self._inner.open()
+
     async def ensure_session_volume(
         self,
         context: SandboxContext,

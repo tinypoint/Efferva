@@ -30,6 +30,15 @@ class Database:
         async with self._pool.connection() as connection:
             yield connection
 
+    @asynccontextmanager
+    async def advisory_lock(self, key: str) -> AsyncIterator[None]:
+        async with self.connection() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s::text, 0))",
+                (key,),
+            )
+            yield
+
     async def initialize(self, schema: str) -> None:
         async with self.connection() as connection:
             await connection.execute(

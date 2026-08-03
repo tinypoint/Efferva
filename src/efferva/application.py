@@ -72,10 +72,14 @@ class Efferva:
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             codex_release = await prepare_official_codex(settings)
             database = Database(settings.database_url)
-            sandboxes = create_sandbox_control_plane(settings, self.sandbox)
+            sandboxes = create_sandbox_control_plane(
+                settings,
+                self.sandbox,
+                database,
+            )
             await database.open()
-            await sandboxes.start()
             try:
+                await sandboxes.start()
                 await database.initialize(schema)
                 repository = SessionRepository(
                     database,

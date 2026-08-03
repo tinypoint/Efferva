@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 from uuid import UUID
 
 from efferva.config import Settings
+from efferva.db import Database
 from efferva.sandbox.protocol import (
     SandboxContext,
     SandboxEnvironment,
@@ -16,21 +16,22 @@ class SandboxControlPlane:
         self,
         settings: Settings,
         provider: SandboxProvider,
+        database: Database,
     ) -> None:
         if not provider.capabilities.coding_agent_compatible:
             raise ValueError(
                 f"sandbox provider {provider.name!r} does not satisfy Coding Agent requirements"
             )
         self._settings = settings
+        self._database = database
         self.provider = provider
-        self._locks: dict[UUID, asyncio.Lock] = {}
 
     async def start(self) -> None:
-        return None
+        await self.provider.open()
 
     async def ensure(self, session_id: UUID) -> SandboxEnvironment:
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        advisory_lock_key = f"efferva:sandbox-session:{session_id}"
+        async with self._database.advisory_lock(advisory_lock_key):
             context = SandboxContext(
                 session_id=session_id,
                 workspace_path=self._settings.workspace_path,
@@ -47,13 +48,12 @@ class SandboxControlPlane:
             )
 
     async def close(self) -> None:
-        close = getattr(self.provider, "close", None)
-        if close is not None:
-            await close()
+        await self.provider.close()
 
 
 def create_sandbox_control_plane(
     settings: Settings,
     provider: SandboxProvider,
+    database: Database,
 ) -> SandboxControlPlane:
-    return SandboxControlPlane(settings, provider)
+    return SandboxControlPlane(settings, provider, database)

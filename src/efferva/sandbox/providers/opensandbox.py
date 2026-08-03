@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import os.path
 import shlex
@@ -146,10 +145,13 @@ class OpenSandboxProvider:
                 "EFFERVA_OPENSANDBOX_SERVER_URL is required for the OpenSandbox provider"
             )
         self._settings = settings
-        self._lock = asyncio.Lock()
         self._manager: SandboxManager | None = None
         self._sandboxes: dict[str, Sandbox] = {}
         self._runtimes: dict[str, OpenSandboxRuntime] = {}
+
+    async def open(self) -> None:
+        if self._manager is None:
+            self._manager = await SandboxManager.create(self._connection_config())
 
     async def ensure_session_volume(
         self,
@@ -172,61 +174,60 @@ class OpenSandboxProvider:
         context: SandboxContext,
         volume: SessionVolumeHandle,
     ) -> SandboxHandle:
-        async with self._lock:
-            info = await self._find_sandbox(context)
-            credential_proxy = self._credential_proxy_target()
-            credential_proxy_active = False
-            if info is not None:
-                credential_proxy_active = (
-                    (info.metadata or {}).get(_CREDENTIAL_PROXY_METADATA_KEY) == "true"
-                )
-                if info.status.state.upper() == "PAUSED":
-                    await (await self._get_manager()).resume_sandbox(info.id)
-                sandbox = await Sandbox.connect(
-                    info.id,
-                    connection_config=self._connection_config(),
-                )
-            else:
-                sandbox = await Sandbox.create(
-                    self._settings.sandbox_image,
-                    timeout=None,
-                    metadata={
-                        _SESSION_METADATA_KEY: str(context.session_id),
-                        _CREDENTIAL_PROXY_METADATA_KEY: str(
-                            credential_proxy is not None
-                        ).lower(),
-                    },
-                    resource={
-                        "cpu": self._settings.sandbox_cpu_limit,
-                        "memory": self._settings.sandbox_memory_limit,
-                    },
-                    credential_proxy=(
-                        CredentialProxyConfig(enabled=True)
-                        if credential_proxy is not None
-                        else None
-                    ),
-                    volumes=[
-                        Volume(
-                            name="session-data",
-                            pvc=PVC(
-                                claim_name=volume.external_ref,
-                                create_if_not_exists=True,
-                                delete_on_sandbox_termination=False,
-                                storage=self._settings.session_volume_size,
-                            ),
-                            mount_path=self._settings.session_volume_path,
-                        )
-                    ],
-                    connection_config=self._connection_config(),
-                )
-                if credential_proxy is not None:
-                    await self._configure_credential_proxy(
-                        sandbox,
-                        host=credential_proxy[0],
-                        scheme=credential_proxy[1],
+        info = await self._find_sandbox(context)
+        credential_proxy = self._credential_proxy_target()
+        credential_proxy_active = False
+        if info is not None:
+            credential_proxy_active = (info.metadata or {}).get(
+                _CREDENTIAL_PROXY_METADATA_KEY
+            ) == "true"
+            if info.status.state.upper() == "PAUSED":
+                await self._require_manager().resume_sandbox(info.id)
+            sandbox = await Sandbox.connect(
+                info.id,
+                connection_config=self._connection_config(),
+            )
+        else:
+            sandbox = await Sandbox.create(
+                self._settings.sandbox_image,
+                timeout=None,
+                metadata={
+                    _SESSION_METADATA_KEY: str(context.session_id),
+                    _CREDENTIAL_PROXY_METADATA_KEY: str(
+                        credential_proxy is not None
+                    ).lower(),
+                },
+                resource={
+                    "cpu": self._settings.sandbox_cpu_limit,
+                    "memory": self._settings.sandbox_memory_limit,
+                },
+                credential_proxy=(
+                    CredentialProxyConfig(enabled=True)
+                    if credential_proxy is not None
+                    else None
+                ),
+                volumes=[
+                    Volume(
+                        name="session-data",
+                        pvc=PVC(
+                            claim_name=volume.external_ref,
+                            create_if_not_exists=True,
+                            delete_on_sandbox_termination=False,
+                            storage=self._settings.session_volume_size,
+                        ),
+                        mount_path=self._settings.session_volume_path,
                     )
-                    credential_proxy_active = True
-            self._sandboxes[sandbox.id] = sandbox
+                ],
+                connection_config=self._connection_config(),
+            )
+            if credential_proxy is not None:
+                await self._configure_credential_proxy(
+                    sandbox,
+                    host=credential_proxy[0],
+                    scheme=credential_proxy[1],
+                )
+                credential_proxy_active = True
+        self._sandboxes[sandbox.id] = sandbox
         return SandboxHandle(
             provider=self.name,
             external_ref=sandbox.id,
@@ -251,12 +252,12 @@ class OpenSandboxProvider:
 
     async def stop(self, sandbox: SandboxHandle) -> None:
         await self._close_runtime(sandbox.external_ref)
-        await (await self._get_manager()).pause_sandbox(sandbox.external_ref)
+        await self._require_manager().pause_sandbox(sandbox.external_ref)
 
     async def destroy(self, sandbox: SandboxHandle) -> None:
         await self._close_runtime(sandbox.external_ref)
         self._sandboxes.pop(sandbox.external_ref, None)
-        await (await self._get_manager()).kill_sandbox(sandbox.external_ref)
+        await self._require_manager().kill_sandbox(sandbox.external_ref)
 
     async def close(self) -> None:
         for sandbox_id in tuple(self._runtimes):
@@ -269,7 +270,7 @@ class OpenSandboxProvider:
             self._manager = None
 
     async def _find_sandbox(self, context: SandboxContext) -> Any | None:
-        result = await (await self._get_manager()).list_sandbox_infos(
+        result = await self._require_manager().list_sandbox_infos(
             SandboxFilter(
                 states=["RUNNING", "PAUSED"],
                 metadata={_SESSION_METADATA_KEY: str(context.session_id)},
@@ -281,9 +282,9 @@ class OpenSandboxProvider:
             return None
         return max(result.sandbox_infos, key=lambda item: item.created_at)
 
-    async def _get_manager(self) -> SandboxManager:
+    def _require_manager(self) -> SandboxManager:
         if self._manager is None:
-            self._manager = await SandboxManager.create(self._connection_config())
+            raise RuntimeError("OpenSandboxProvider is not open")
         return self._manager
 
     def _connection_config(self) -> ConnectionConfig:
