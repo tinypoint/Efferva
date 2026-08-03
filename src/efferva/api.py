@@ -4,16 +4,13 @@ import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
+from websockets.exceptions import ConnectionClosed
 
-from efferva.codex_tunnel import (
-    CodexTunnelBackpressureError,
-    CodexTunnelQueueFullError,
-    RedisCodexTunnel,
-)
+from efferva.codex_transport import CodexTransport
 from efferva.identity import (
     ForbiddenError,
     IdentityResolver,
@@ -44,7 +41,7 @@ def create_api_router(
     *,
     identity: IdentityResolver,
     repository: Callable[[], SessionRepository],
-    codex_tunnel: Callable[[], RedisCodexTunnel],
+    codex: Callable[[], CodexTransport],
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
@@ -52,7 +49,6 @@ def create_api_router(
     @router.get("/healthz")
     async def healthz() -> dict[str, str]:
         await repository().ping()
-        await codex_tunnel().ping()
         return {"status": "ok"}
 
     @router.websocket("/api/sessions/{session_id}/codex")
@@ -64,7 +60,7 @@ def create_api_router(
             principal = await identity(websocket)
             if not isinstance(principal, Principal):
                 raise TypeError("IdentityResolver must return efferva.Principal")
-            await repository().get_session(
+            session = await repository().get_session(
                 principal,
                 session_id,
                 mode=AccessMode.WRITE,
@@ -80,26 +76,15 @@ def create_api_router(
             await websocket.close(code=4404)
             return
 
-        client_id = str(uuid4())
-        tunnel = codex_tunnel()
         try:
-            channel_id = await tunnel.attach_client(
-                str(session_id),
-                client_id,
-                str(uuid4()),
-            )
-        except CodexTunnelQueueFullError:
-            await websocket.close(code=1013, reason="Codex workers are busy")
+            upstream_context = codex().connect(session)
+            upstream = await upstream_context.__aenter__()
+        except Exception:
+            await websocket.close(code=1011, reason="Codex app-server unavailable")
             return
         await websocket.accept()
 
-        async def client_heartbeat() -> None:
-            while True:
-                await asyncio.sleep(tunnel.heartbeat_interval_seconds)
-                if not await tunnel.touch_client(channel_id, client_id):
-                    return
-
-        async def client_to_worker() -> None:
+        async def client_to_codex() -> None:
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
@@ -111,62 +96,21 @@ def create_api_router(
                         reason="Codex JSON-RPC requires text frames",
                     )
                     return
-                await tunnel.send_client_frame(
-                    channel_id,
-                    client_id,
-                    payload=payload,
-                )
+                await upstream.send(payload)
 
-        async def worker_to_client() -> None:
-            cursor = "0-0"
-            while True:
-                frames = await tunnel.read_server_frames(
-                    channel_id,
-                    client_id,
-                    after=cursor,
-                )
-                if not frames:
-                    state = await tunnel.get_state(channel_id)
-                    if state.get("status") in {"closed", "failed"}:
-                        await websocket.close(
-                            code=1011 if state.get("status") == "failed" else 1000,
-                            reason=(
-                                "Codex connection failed"
-                                if state.get("status") == "failed"
-                                else "Codex connection closed"
-                            ),
-                        )
-                        return
-                    continue
-                for frame_id, kind, payload in frames:
-                    cursor = frame_id
-                    if kind == "close":
-                        await tunnel.acknowledge_server_frame(
-                            channel_id,
-                            client_id,
-                            frame_id,
-                        )
-                        state = await tunnel.get_state(channel_id)
-                        await websocket.close(
-                            code=1011 if state.get("status") == "failed" else 1000,
-                            reason=(
-                                "Codex connection failed"
-                                if state.get("status") == "failed"
-                                else "Codex connection closed"
-                            ),
-                        )
-                        return
-                    await websocket.send_text(payload)
-                    await tunnel.acknowledge_server_frame(
-                        channel_id,
-                        client_id,
-                        frame_id,
+        async def codex_to_client() -> None:
+            async for payload in upstream:
+                if not isinstance(payload, str):
+                    await websocket.close(
+                        code=1003,
+                        reason="Codex JSON-RPC requires text frames",
                     )
+                    return
+                await websocket.send_text(payload)
 
         tasks = {
-            asyncio.create_task(client_heartbeat()),
-            asyncio.create_task(client_to_worker()),
-            asyncio.create_task(worker_to_client()),
+            asyncio.create_task(client_to_codex()),
+            asyncio.create_task(codex_to_client()),
         }
         try:
             done, pending = await asyncio.wait(
@@ -178,13 +122,13 @@ def create_api_router(
             await asyncio.gather(*pending, return_exceptions=True)
             for task in done:
                 task.result()
-        except (CodexTunnelBackpressureError, ValueError, WebSocketDisconnect):
+        except (ConnectionClosed, ValueError, WebSocketDisconnect):
             pass
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await tunnel.detach_client(channel_id, client_id)
+            await upstream_context.__aexit__(None, None, None)
             if websocket.client_state == WebSocketState.CONNECTED:
                 with suppress(RuntimeError):
                     await websocket.close()

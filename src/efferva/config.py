@@ -12,13 +12,6 @@ class Settings(BaseSettings):
     )
 
     database_url: str | None = None
-    redis_url: str = "redis://localhost:6379/0"
-    redis_prefix: str = "efferva"
-    codex_session_ttl_seconds: int = 24 * 60 * 60
-    codex_session_queue_capacity: int = 10_000
-    codex_frame_queue_capacity: int = 1_000
-    codex_frame_max_bytes: int = 128 * 1024 * 1024
-    codex_session_lease_seconds: int = 30
     codex_version: str = "0.146.0"
     codex_release_target: str | None = None
     codex_archive_sha256: str | None = None
@@ -41,10 +34,6 @@ class Settings(BaseSettings):
     session_volume_size: str = "10Gi"
     sandbox_idle_timeout_seconds: int = 12 * 60 * 60
     deleted_session_volume_retention_days: int = 30
-    worker_session_capacity: int = 16
-    worker_session_claim_idle_seconds: int = 45
-    worker_shutdown_grace_seconds: int = 30
-    worker_metrics_port: int = 9090
 
 
 @lru_cache

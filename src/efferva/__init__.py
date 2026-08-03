@@ -18,7 +18,6 @@ from efferva.sandbox import (
     SandboxRuntime,
     SessionVolumeHandle,
 )
-from efferva.worker import serve_worker
 
 __all__ = [
     "Capability",
@@ -35,5 +34,4 @@ __all__ = [
     "SandboxRuntime",
     "SessionVolumeHandle",
     "UnauthenticatedError",
-    "serve_worker",
 ]

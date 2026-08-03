@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from efferva import Efferva, Principal
+from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
 
 
 async def resolve_local_principal(_: Request) -> Principal:
@@ -33,6 +34,7 @@ app.mount(
 
 Efferva(
     identity=resolve_local_principal,
+    sandbox=OpenSandboxProvider(),
 ).install(app, prefix="/agent")
 
 

@@ -7,8 +7,9 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 
 from efferva.api import create_api_router
+from efferva.codex_appserver import CodexAppServerManager
 from efferva.codex_release import prepare_official_codex
-from efferva.codex_tunnel import RedisCodexTunnel
+from efferva.codex_transport import CodexTransport
 from efferva.config import Settings, get_settings
 from efferva.db import Database
 from efferva.identity import (
@@ -20,22 +21,24 @@ from efferva.repository import (
     NotFoundError,
     SessionRepository,
 )
+from efferva.sandbox import SandboxProvider
+from efferva.sandbox.manager import create_sandbox_control_plane
 
 
 @dataclass(slots=True)
 class _RuntimeResources:
     repository: SessionRepository | None = None
-    tunnel: RedisCodexTunnel | None = None
+    codex: CodexTransport | None = None
 
     def require_repository(self) -> SessionRepository:
         if self.repository is None:
             raise RuntimeError("Efferva application has not started")
         return self.repository
 
-    def require_tunnel(self) -> RedisCodexTunnel:
-        if self.tunnel is None:
+    def require_codex(self) -> CodexTransport:
+        if self.codex is None:
             raise RuntimeError("Efferva application has not started")
-        return self.tunnel
+        return self.codex
 
 
 class Efferva:
@@ -45,9 +48,11 @@ class Efferva:
         self,
         *,
         identity: IdentityResolver,
+        sandbox: SandboxProvider,
         settings: Settings | None = None,
     ) -> None:
         self.identity = identity
+        self.sandbox = sandbox
         self.settings = settings or get_settings()
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
@@ -67,17 +72,9 @@ class Efferva:
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             codex_release = await prepare_official_codex(settings)
             database = Database(settings.database_url)
-            tunnel = RedisCodexTunnel(
-                settings.redis_url,
-                prefix=settings.redis_prefix,
-                ttl_seconds=settings.codex_session_ttl_seconds,
-                lease_seconds=settings.codex_session_lease_seconds,
-                dispatch_queue_capacity=settings.codex_session_queue_capacity,
-                frame_queue_capacity=settings.codex_frame_queue_capacity,
-                frame_max_bytes=settings.codex_frame_max_bytes,
-            )
+            sandboxes = create_sandbox_control_plane(settings, self.sandbox)
             await database.open()
-            await tunnel.open()
+            await sandboxes.start()
             try:
                 await database.initialize(schema)
                 repository = SessionRepository(
@@ -86,13 +83,19 @@ class Efferva:
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
                 resources.repository = repository
-                resources.tunnel = tunnel
+                resources.codex = CodexTransport(
+                    CodexAppServerManager(
+                        codex_release.binary,
+                        settings,
+                        sandboxes,
+                    )
+                )
                 yield
             finally:
-                resources.tunnel = None
+                resources.codex = None
                 resources.repository = None
                 try:
-                    await tunnel.close()
+                    await sandboxes.close()
                 finally:
                     await database.close()
 
@@ -101,7 +104,7 @@ class Efferva:
             create_api_router(
                 identity=self.identity,
                 repository=resources.require_repository,
-                codex_tunnel=resources.require_tunnel,
+                codex=resources.require_codex,
             )
         )
 

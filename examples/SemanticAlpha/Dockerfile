@@ -1,10 +1,8 @@
 FROM node:22-alpine AS web
 
 WORKDIR /web
-COPY examples/SemanticAlpha/web/package.json \
-     examples/SemanticAlpha/web/package-lock.json ./
-RUN npm ci
 COPY examples/SemanticAlpha/web/ ./
+RUN npm ci
 RUN npm run build
 
 FROM python:3.13-slim-bookworm

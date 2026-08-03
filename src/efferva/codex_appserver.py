@@ -125,11 +125,24 @@ class CodexAppServerManager:
             f"{key}={json.dumps(value)}"
             for key, value in app_server_overrides.items()
         )
+        api_key = os.environ.get("OPENAI_API_KEY")
+        effective_api_key = None
+        if api_key:
+            effective_api_key = (
+                "efferva-credential-proxy"
+                if sandbox.sandbox.state.get("credentialProxy")
+                else api_key
+            )
         app_server_launch_sha256 = sha256(
             json.dumps(
                 {
                     "binary": self._binary_sha256,
                     "config": app_server_config_args,
+                    "openaiApiKeySha256": (
+                        sha256(effective_api_key.encode()).hexdigest()
+                        if effective_api_key
+                        else None
+                    ),
                 },
                 separators=(",", ":"),
             ).encode()
@@ -190,13 +203,8 @@ class CodexAppServerManager:
             "CODEX_HOME": codex_home,
             "HOME": self._settings.session_volume_path,
         }
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if api_key:
-            environment["OPENAI_API_KEY"] = (
-                "efferva-credential-proxy"
-                if sandbox.sandbox.state.get("credentialProxy")
-                else api_key
-            )
+        if effective_api_key:
+            environment["OPENAI_API_KEY"] = effective_api_key
         await self._run_command(
             sandbox,
             ("sh", "-lc", command),

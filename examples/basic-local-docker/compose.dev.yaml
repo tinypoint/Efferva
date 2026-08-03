@@ -1,12 +1,19 @@
 services:
   app:
-    environment:
-      PYTHONPATH: /product/example-src:/product/efferva-src
-    volumes:
-      - ../../src:/product/efferva-src:ro
-      - ./src:/product/example-src:ro
-
-  worker:
+    command:
+      [
+        "uvicorn",
+        "basic_local_docker.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+        "--reload",
+        "--reload-dir",
+        "/product/efferva-src",
+        "--reload-dir",
+        "/product/example-src",
+      ]
     environment:
       PYTHONPATH: /product/example-src:/product/efferva-src
     volumes:
@@ -26,9 +33,9 @@ services:
     ports:
       - "${EFFERVA_WEB_PORT:-5173}:5173"
     volumes:
-      - ./web:/web
-      - ../../packages/codex-client:/packages/codex-client:ro
-      - web-node-modules:/web/node_modules
+      - ./web:/repo/examples/basic-local-docker/web
+      - ../../packages/codex-client:/repo/packages/codex-client:ro
+      - web-node-modules:/repo/examples/basic-local-docker/web/node_modules
     networks:
       - efferva-local
 
