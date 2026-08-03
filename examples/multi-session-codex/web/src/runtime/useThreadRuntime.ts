@@ -525,7 +525,7 @@ export function useThreadRuntime({
 
   const searchFiles = useCallback(
     async (query: string): Promise<FileSearchResult[]> => {
-      const root = workspace || "/home/sandbox/workspace";
+      const root = workspace || "/home/node/workspace";
       const response = await client.request<{ files: FileSearchResult[] }>(
         "fuzzyFileSearch",
         {

@@ -1,7 +1,7 @@
 """Efferva public Python API."""
 
 from efferva.application import Efferva
-from efferva.config import CodexConfig, EffervaConfig, SandboxLayout
+from efferva.config import CodexConfig, EffervaConfig, SandboxIdentity, SandboxLayout
 from efferva.identity import (
     Capability,
     IdentityResolver,
@@ -33,6 +33,7 @@ __all__ = [
     "SandboxCapabilities",
     "SandboxContext",
     "SandboxHandle",
+    "SandboxIdentity",
     "SandboxLayout",
     "SandboxProvider",
     "SandboxRuntime",

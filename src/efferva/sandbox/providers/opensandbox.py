@@ -7,6 +7,7 @@ import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Literal
 from uuid import UUID
 
@@ -41,6 +42,7 @@ _CREDENTIAL_PROXY_METADATA_KEY = "efferva.credential-proxy"
 _CPU_METADATA_KEY = "efferva.cpu-limit"
 _MEMORY_METADATA_KEY = "efferva.memory-limit"
 _VOLUME_SIZE_METADATA_KEY = "efferva.session-volume-size"
+_LAYOUT_METADATA_KEY = "efferva.sandbox-layout"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,7 @@ class OpenSandboxCreateSpec:
     memory_limit: str = "2g"
     session_volume_size: str = "10Gi"
     credential_proxy: OpenSandboxCredentialProxy | None = None
+    layout: SandboxLayout | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,11 +215,12 @@ class OpenSandboxProvider:
             self._manager = await SandboxManager.create(self._connection_config())
 
     async def ensure(self, context: SandboxContext) -> SandboxEnvironment:
-        sandbox, runtime = await self._ensure_runtime(context)
+        sandbox, runtime, layout = await self._ensure_runtime(context)
         return SandboxEnvironment(
             environment_id=str(context.session_id),
             endpoint=f"sandbox://{sandbox.external_ref}",
-            workspace_path=context.workspace_path,
+            workspace_path=layout.workspace_path,
+            layout=layout,
             sandbox=sandbox,
             runtime=runtime,
         )
@@ -224,10 +228,24 @@ class OpenSandboxProvider:
     async def _ensure_runtime(
         self,
         context: SandboxContext,
-    ) -> tuple[SandboxHandle, OpenSandboxRuntime]:
+    ) -> tuple[SandboxHandle, OpenSandboxRuntime, SandboxLayout]:
+        active_sandboxes = await self._list_active_sandboxes(context)
+        spec = await self._resolve_spec(
+            OpenSandboxCreateContext(
+                session=context,
+                active_sandboxes=active_sandboxes,
+            )
+        )
+        layout = spec.layout or self._layout
         info = await self._find_sandbox(context.session_id)
         credential_proxy_active = False
         if info is not None:
+            if (info.metadata or {}).get(_LAYOUT_METADATA_KEY) != (
+                _layout_fingerprint(layout)
+            ):
+                raise RuntimeError(
+                    "sandbox layout changed after creation; recreate the sandbox"
+                )
             credential_proxy_active = (info.metadata or {}).get(
                 _CREDENTIAL_PROXY_METADATA_KEY
             ) == "true"
@@ -244,13 +262,6 @@ class OpenSandboxProvider:
                 self._runtimes[info.id] = runtime
             sandbox_id = info.id
         else:
-            active_sandboxes = await self._list_active_sandboxes(context)
-            spec = await self._resolve_spec(
-                OpenSandboxCreateContext(
-                    session=context,
-                    active_sandboxes=active_sandboxes,
-                )
-            )
             credential_proxy = spec.credential_proxy
             sandbox = await Sandbox.create(
                 spec.image,
@@ -266,6 +277,7 @@ class OpenSandboxProvider:
                     _CPU_METADATA_KEY: spec.cpu_limit,
                     _MEMORY_METADATA_KEY: spec.memory_limit,
                     _VOLUME_SIZE_METADATA_KEY: spec.session_volume_size,
+                    _LAYOUT_METADATA_KEY: _layout_fingerprint(layout),
                 },
                 resource={
                     "cpu": spec.cpu_limit,
@@ -285,7 +297,7 @@ class OpenSandboxProvider:
                             delete_on_sandbox_termination=False,
                             storage=spec.session_volume_size,
                         ),
-                        mount_path=self._layout.session_volume_path,
+                        mount_path=layout.identity.home_path,
                     )
                 ],
                 connection_config=self._connection_config(),
@@ -309,7 +321,7 @@ class OpenSandboxProvider:
             session_id=context.session_id,
             state={"credentialProxy": credential_proxy_active},
         )
-        return handle, runtime
+        return handle, runtime, layout
 
     async def close(self) -> None:
         for runtime in tuple(self._runtimes.values()):
@@ -405,3 +417,19 @@ class OpenSandboxProvider:
                 }
             ],
         )
+
+
+def _layout_fingerprint(layout: SandboxLayout) -> str:
+    identity = layout.identity
+    value = "\0".join(
+        (
+            identity.username or "",
+            str(identity.uid),
+            str(identity.gid),
+            identity.home_path,
+            layout.workspace_path,
+            layout.codex_home_path,
+            layout.codex_runtime_dir,
+        )
+    )
+    return sha256(value.encode()).hexdigest()[:32]

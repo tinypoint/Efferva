@@ -391,7 +391,7 @@ export class CodexAgent extends AbstractAgent {
 
     try {
       if (threadId === "new") {
-        const workspace = config.workspace || "/home/sandbox/workspace";
+        const workspace = config.workspace || "/home/node/workspace";
         await this.client.request("fs/createDirectory", {
           path: workspace,
           recursive: true,

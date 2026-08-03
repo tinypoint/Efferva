@@ -103,6 +103,18 @@ spec:
               value: postgresql://efferva:efferva@postgres:5432/efferva
             - name: EFFERVA_SANDBOX_IMAGE
               value: mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm
+            - name: EFFERVA_SANDBOX_USERNAME
+              value: node
+            - name: EFFERVA_SANDBOX_UID
+              value: "1000"
+            - name: EFFERVA_SANDBOX_GID
+              value: "1000"
+            - name: EFFERVA_SANDBOX_HOME
+              value: /home/node
+            - name: EFFERVA_WORKSPACE_PATH
+              value: /home/node/workspace
+            - name: EFFERVA_CODEX_HOME_PATH
+              value: /home/node/.codex
             - name: EFFERVA_SANDBOX_MEMORY_LIMIT
               value: 2Gi
             - name: EFFERVA_OPENSANDBOX_SERVER_URL

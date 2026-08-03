@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import os
 from urllib.parse import urlparse
 
-from efferva import CodexConfig, EffervaConfig, SandboxLayout
+from efferva import CodexConfig, EffervaConfig, SandboxIdentity, SandboxLayout
 from efferva.sandbox.providers.opensandbox import (
     OpenSandboxConnectionConfig,
     OpenSandboxCreateSpec,
@@ -19,9 +19,11 @@ class ApplicationConfig:
 
 def load_config() -> ApplicationConfig:
     layout = SandboxLayout(
-        session_volume_path=_value(
-            "EFFERVA_SESSION_VOLUME_PATH",
-            "/home/sandbox",
+        identity=SandboxIdentity(
+            username=os.environ.get("EFFERVA_SANDBOX_USERNAME") or None,
+            uid=int(_value("EFFERVA_SANDBOX_UID", "1000")),
+            gid=int(_value("EFFERVA_SANDBOX_GID", "1000")),
+            home_path=_value("EFFERVA_SANDBOX_HOME", "/home/sandbox"),
         ),
         workspace_path=_value(
             "EFFERVA_WORKSPACE_PATH",
@@ -35,8 +37,6 @@ def load_config() -> ApplicationConfig:
             "EFFERVA_CODEX_RUNTIME_DIR",
             "/opt/efferva/runtimes",
         ),
-        uid=int(_value("EFFERVA_SANDBOX_UID", "1000")),
-        gid=int(_value("EFFERVA_SANDBOX_GID", "1000")),
     )
     api_key = os.environ.get("OPENAI_API_KEY") or None
     base_url = os.environ.get("EFFERVA_CODEX_OPENAI_BASE_URL") or None
@@ -77,6 +77,7 @@ def load_config() -> ApplicationConfig:
             memory_limit=_value("EFFERVA_SANDBOX_MEMORY_LIMIT", "2g"),
             session_volume_size=_value("EFFERVA_SESSION_VOLUME_SIZE", "10Gi"),
             credential_proxy=credential_proxy,
+            layout=layout,
         ),
     )
 

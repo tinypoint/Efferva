@@ -13,7 +13,7 @@ from uuid import UUID
 
 from websockets.asyncio.client import ClientConnection, connect as connect_websocket
 
-from efferva.config import CodexConfig, SandboxLayout
+from efferva.config import CodexConfig
 from efferva.db import Database
 from efferva.sandbox.protocol import SandboxEnvironment
 from efferva.sandbox.service import SessionSandboxService
@@ -37,12 +37,10 @@ class CodexAppServerManager:
     def __init__(
         self,
         config: CodexConfig,
-        layout: SandboxLayout,
         sandboxes: SessionSandboxService,
         database: Database,
     ) -> None:
         self._config = config
-        self._layout = layout
         self._sandboxes = sandboxes
         self._database = database
 
@@ -96,7 +94,7 @@ class CodexAppServerManager:
             (
                 await sandbox.runtime.read_file(
                     posixpath.join(
-                        self._layout.codex_home_path,
+                        sandbox.layout.codex_home_path,
                         "app-server.token",
                     )
                 )
@@ -182,13 +180,20 @@ class CodexAppServerManager:
                 if sandbox.sandbox.state.get("credentialProxy")
                 else api_key
             )
+        layout = sandbox.layout
+        identity = layout.identity
         launch_sha256 = sha256(
             json.dumps(
                 {
                     "codexVersion": _CODEX_VERSION,
                     "config": config_args,
-                    "uid": self._layout.uid,
-                    "gid": self._layout.gid,
+                    "username": identity.username,
+                    "uid": identity.uid,
+                    "gid": identity.gid,
+                    "homePath": identity.home_path,
+                    "workspacePath": layout.workspace_path,
+                    "codexHomePath": layout.codex_home_path,
+                    "codexRuntimeDir": layout.codex_runtime_dir,
                     "openaiApiKeySha256": (
                         sha256(effective_api_key.encode()).hexdigest()
                         if effective_api_key
@@ -208,9 +213,11 @@ class CodexAppServerManager:
         effective_api_key: str | None,
         launch_sha256: str,
     ) -> None:
+        layout = sandbox.layout
+        identity = layout.identity
         target, archive_sha256 = await self._codex_release_for_sandbox(sandbox)
         runtime_root = posixpath.join(
-            self._layout.codex_runtime_dir,
+            layout.codex_runtime_dir,
             _CODEX_VERSION,
             target,
         )
@@ -226,33 +233,37 @@ class CodexAppServerManager:
                 archive_sha256=archive_sha256,
             )
 
-        codex_home = self._layout.codex_home_path
+        codex_home = layout.codex_home_path
         websocket_token_file = posixpath.join(codex_home, "app-server.token")
         websocket_token = secrets.token_urlsafe(32)
         pid_file = "/tmp/efferva-app-server.pid"
         log_file = posixpath.join(codex_home, "app-server.log")
         listen = f"ws://0.0.0.0:{self._config.appserver_port}"
+        identity_check = ""
+        if identity.username is not None:
+            username = shlex.quote(identity.username)
+            home_path = shlex.quote(identity.home_path)
+            identity_check = (
+                f"id {username} >/dev/null 2>&1 || "
+                "{ echo 'configured sandbox user does not exist' >&2; exit 1; }; "
+                f'[ "$(id -u {username})" = {identity.uid} ] || '
+                "{ echo 'configured sandbox user has an unexpected UID' >&2; exit 1; }; "
+                f'[ "$(id -g {username})" = {identity.gid} ] || '
+                "{ echo 'configured sandbox user has an unexpected GID' >&2; exit 1; }; "
+                "if command -v getent >/dev/null 2>&1; then "
+                f'[ "$(getent passwd {username} | cut -d: -f6)" = {home_path} ] || '
+                "{ echo 'configured sandbox user has an unexpected home' >&2; exit 1; }; "
+                "fi; "
+            )
         privileged_bootstrap = (
-            "if id sandbox >/dev/null 2>&1; then "
-            f'[ "$(id -u sandbox)" = {self._layout.uid} ] || '
-            "{ echo 'sandbox user has an unexpected UID' >&2; exit 1; }; "
-            "elif command -v useradd >/dev/null 2>&1; then "
-            f"useradd -u {self._layout.uid} "
-            f"-d {shlex.quote(self._layout.session_volume_path)} "
-            "-M -s /bin/sh sandbox; "
-            "elif command -v adduser >/dev/null 2>&1; then "
-            f"adduser -D -u {self._layout.uid} "
-            f"-h {shlex.quote(self._layout.session_volume_path)} "
-            "sandbox; "
-            "else echo 'sandbox image cannot create users' >&2; exit 1; fi; "
-            f"chmod 755 {shlex.quote(sandbox_binary)} && "
-            f"chown {self._layout.uid}:{self._layout.gid} "
-            f"{shlex.quote(self._layout.session_volume_path)}"
+            identity_check + f"chmod 755 {shlex.quote(sandbox_binary)} && "
+            f"chown {identity.uid}:{identity.gid} "
+            f"{shlex.quote(identity.home_path)}"
         )
         await self._run_command(sandbox, ("sh", "-lc", privileged_bootstrap))
         sandbox_bootstrap = (
             f"mkdir -p {shlex.quote(codex_home)} "
-            f"{shlex.quote(self._layout.workspace_path)} && "
+            f"{shlex.quote(layout.workspace_path)} && "
             f"if [ ! -s {shlex.quote(websocket_token_file)} ]; then "
             "umask 077; "
             f"printf '%s\\n' {shlex.quote(websocket_token)} "
@@ -264,8 +275,8 @@ class CodexAppServerManager:
         await self._run_command(
             sandbox,
             ("sh", "-lc", sandbox_bootstrap),
-            uid=self._layout.uid,
-            gid=self._layout.gid,
+            uid=identity.uid,
+            gid=identity.gid,
         )
         app_server_cli_config = "".join(
             f"-c {shlex.quote(argument)} " for argument in config_args
@@ -282,7 +293,7 @@ class CodexAppServerManager:
         await self._run_command(sandbox, ("sh", "-lc", reconcile_command))
         command = (
             f"if [ -s {shlex.quote(pid_file)} ]; then exit 0; fi; "
-            f"cd {shlex.quote(self._layout.workspace_path)} && "
+            f"cd {shlex.quote(layout.workspace_path)} && "
             f"{shlex.quote(sandbox_binary)} app-server "
             f"{app_server_cli_config}"
             f"--listen {shlex.quote(listen)} "
@@ -293,7 +304,7 @@ class CodexAppServerManager:
         )
         environment = {
             "CODEX_HOME": codex_home,
-            "HOME": self._layout.session_volume_path,
+            "HOME": identity.home_path,
         }
         if effective_api_key:
             environment["OPENAI_API_KEY"] = effective_api_key
@@ -301,8 +312,8 @@ class CodexAppServerManager:
             sandbox,
             ("sh", "-lc", command),
             env=environment,
-            uid=self._layout.uid,
-            gid=self._layout.gid,
+            uid=identity.uid,
+            gid=identity.gid,
         )
 
     async def _codex_release_for_sandbox(

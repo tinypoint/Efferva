@@ -56,7 +56,6 @@ class Efferva:
         )
         codex = CodexAppServerManager(
             self.config.codex,
-            self.config.sandbox,
             sandboxes,
             database,
         )

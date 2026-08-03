@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from efferva.config import SandboxLayout
+
 JsonObject = Mapping[str, Any]
 
 
@@ -108,6 +110,7 @@ class SandboxEnvironment:
     environment_id: str
     endpoint: str
     workspace_path: str
+    layout: SandboxLayout
     sandbox: SandboxHandle
     runtime: SandboxRuntime = field(repr=False, compare=False)
 

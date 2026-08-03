@@ -59,6 +59,12 @@ services:
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
       EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm}
+      EFFERVA_SANDBOX_USERNAME: ${EFFERVA_SANDBOX_USERNAME:-node}
+      EFFERVA_SANDBOX_UID: ${EFFERVA_SANDBOX_UID:-1000}
+      EFFERVA_SANDBOX_GID: ${EFFERVA_SANDBOX_GID:-1000}
+      EFFERVA_SANDBOX_HOME: ${EFFERVA_SANDBOX_HOME:-/home/node}
+      EFFERVA_WORKSPACE_PATH: ${EFFERVA_WORKSPACE_PATH:-/home/node/workspace}
+      EFFERVA_CODEX_HOME_PATH: ${EFFERVA_CODEX_HOME_PATH:-/home/node/.codex}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"
