@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -28,9 +29,23 @@ class SandboxCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionSummary:
+    id: UUID
+    name: str
+    status: str
+    last_active_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxContext:
     session_id: UUID
-    workspace_path: str = "/home/sandbox/workspace"
+    tenant_id: str
+    owner_issuer: str
+    owner_subject: str
+    workspace_path: str
+    owner_sessions: tuple[SessionSummary, ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
 
 

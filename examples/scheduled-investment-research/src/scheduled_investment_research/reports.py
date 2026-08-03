@@ -259,6 +259,9 @@ async def execute_report(
         await _set_run_stage(database, run_id, "reading_report")
         context = SandboxContext(
             session_id=session_id,
+            tenant_id="local",
+            owner_issuer="scheduled-investment-research",
+            owner_subject="developer",
             workspace_path=_WORKSPACE,
         )
         environment = await sandbox.ensure(context)

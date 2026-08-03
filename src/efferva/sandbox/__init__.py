@@ -7,6 +7,7 @@ from efferva.sandbox.protocol import (
     SandboxHandle,
     SandboxProvider,
     SandboxRuntime,
+    SessionSummary,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
+    "SessionSummary",
 ]

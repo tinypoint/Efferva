@@ -13,7 +13,12 @@ Efferva 目前处于内部预览阶段。Python Wheel 和完整安装指南将�
 ```python
 from fastapi import FastAPI, Request
 
-from efferva import Efferva, Principal
+from efferva import CodexConfig, Efferva, EffervaConfig, Principal, SandboxLayout
+from efferva.sandbox.providers.opensandbox import (
+    OpenSandboxConnectionConfig,
+    OpenSandboxCreateSpec,
+    OpenSandboxProvider,
+)
 
 
 async def resolve_principal(request: Request) -> Principal:
@@ -25,11 +30,36 @@ async def resolve_principal(request: Request) -> Principal:
     )
 
 
+async def resolve_sandbox_spec(context) -> OpenSandboxCreateSpec:
+    plan = await billing.plan_for(
+        context.session.tenant_id,
+        context.session.owner_subject,
+    )
+    if len(context.active_sandboxes) >= plan.max_active_sandboxes:
+        raise SandboxQuotaExceeded()
+    if plan.name == "pro":
+        return OpenSandboxCreateSpec(image="product/sandbox", cpu_limit="4")
+    return OpenSandboxCreateSpec(image="product/sandbox", cpu_limit="1")
+
+
 app = FastAPI()
-Efferva(identity=resolve_principal).install(app, prefix="/agent")
+layout = SandboxLayout()
+Efferva(
+    config=EffervaConfig(
+        database_url=database_url,
+        sandbox=layout,
+        codex=CodexConfig(api_key=openai_api_key),
+    ),
+    identity=resolve_principal,
+    sandbox=OpenSandboxProvider(
+        OpenSandboxConnectionConfig(server_url=opensandbox_server_url),
+        layout=layout,
+        resolve_spec=resolve_sandbox_spec,
+    ),
+).install(app, prefix="/agent")
 ```
 
-身份解析器是唯一必需的产品接入边界。Efferva 会复用宿主应用的生命周期和中间件。
+产品拥有身份、配置来源和逐 Session 的沙箱策略。Efferva 只接收显式值，不读取环境变量或 `.env` 文件。resolver 可以看到该 Owner 的 Sessions 和仍处于活动状态的 Sandboxes，再结合实时套餐和余量决定镜像与资源。
 
 :::caution[预览契约]
 目前不要把本页当成稳定安装契约。v0.1 的打包与发布流程仍在定稿。

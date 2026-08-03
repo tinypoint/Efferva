@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import os.path
 import shlex
-from collections.abc import Mapping
-from typing import Any
-from urllib.parse import urlparse
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
 
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
@@ -19,7 +22,7 @@ from opensandbox.models.sandboxes import (
     Volume,
 )
 
-from efferva.config import Settings, get_settings
+from efferva.config import SandboxLayout
 from efferva.sandbox.protocol import (
     CommandResult,
     DirectoryEntry,
@@ -31,7 +34,60 @@ from efferva.sandbox.protocol import (
 )
 
 _SESSION_METADATA_KEY = "efferva.session"
+_TENANT_METADATA_KEY = "efferva.tenant"
+_OWNER_ISSUER_METADATA_KEY = "efferva.owner-issuer"
+_OWNER_SUBJECT_METADATA_KEY = "efferva.owner-subject"
 _CREDENTIAL_PROXY_METADATA_KEY = "efferva.credential-proxy"
+_CPU_METADATA_KEY = "efferva.cpu-limit"
+_MEMORY_METADATA_KEY = "efferva.memory-limit"
+_VOLUME_SIZE_METADATA_KEY = "efferva.session-volume-size"
+
+
+@dataclass(frozen=True, slots=True)
+class OpenSandboxCredentialProxy:
+    bearer_token: str
+    host: str
+    scheme: Literal["http", "https"]
+
+
+@dataclass(frozen=True, slots=True)
+class OpenSandboxConnectionConfig:
+    server_url: str
+    api_key: str | None = None
+    use_server_proxy: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class OpenSandboxCreateSpec:
+    image: str = "python:3.13-slim-bookworm"
+    cpu_limit: str = "2"
+    memory_limit: str = "2g"
+    session_volume_size: str = "10Gi"
+    credential_proxy: OpenSandboxCredentialProxy | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenSandboxInventoryItem:
+    id: str
+    session_id: UUID
+    state: str
+    image: str | None
+    cpu_limit: str | None
+    memory_limit: str | None
+    session_volume_size: str | None
+    credential_proxy_enabled: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OpenSandboxCreateContext:
+    session: SandboxContext
+    active_sandboxes: tuple[OpenSandboxInventoryItem, ...]
+
+
+OpenSandboxCreateSpecResolver = Callable[
+    [OpenSandboxCreateContext], Awaitable[OpenSandboxCreateSpec]
+]
 
 
 class OpenSandboxRuntime:
@@ -138,13 +194,16 @@ class OpenSandboxProvider:
         network_policy=True,
     )
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        settings = settings or get_settings()
-        if not settings.opensandbox_server_url:
-            raise ValueError(
-                "EFFERVA_OPENSANDBOX_SERVER_URL is required for the OpenSandbox provider"
-            )
-        self._settings = settings
+    def __init__(
+        self,
+        connection: OpenSandboxConnectionConfig,
+        *,
+        layout: SandboxLayout,
+        resolve_spec: OpenSandboxCreateSpecResolver,
+    ) -> None:
+        self._connection = connection
+        self._layout = layout
+        self._resolve_spec = resolve_spec
         self._manager: SandboxManager | None = None
         self._runtimes: dict[str, OpenSandboxRuntime] = {}
 
@@ -166,8 +225,7 @@ class OpenSandboxProvider:
         self,
         context: SandboxContext,
     ) -> tuple[SandboxHandle, OpenSandboxRuntime]:
-        info = await self._find_sandbox(context)
-        credential_proxy = self._credential_proxy_target()
+        info = await self._find_sandbox(context.session_id)
         credential_proxy_active = False
         if info is not None:
             credential_proxy_active = (info.metadata or {}).get(
@@ -186,18 +244,32 @@ class OpenSandboxProvider:
                 self._runtimes[info.id] = runtime
             sandbox_id = info.id
         else:
+            active_sandboxes = await self._list_active_sandboxes(context)
+            spec = await self._resolve_spec(
+                OpenSandboxCreateContext(
+                    session=context,
+                    active_sandboxes=active_sandboxes,
+                )
+            )
+            credential_proxy = spec.credential_proxy
             sandbox = await Sandbox.create(
-                self._settings.sandbox_image,
+                spec.image,
                 timeout=None,
                 metadata={
                     _SESSION_METADATA_KEY: str(context.session_id),
+                    _TENANT_METADATA_KEY: context.tenant_id,
+                    _OWNER_ISSUER_METADATA_KEY: context.owner_issuer,
+                    _OWNER_SUBJECT_METADATA_KEY: context.owner_subject,
                     _CREDENTIAL_PROXY_METADATA_KEY: str(
                         credential_proxy is not None
                     ).lower(),
+                    _CPU_METADATA_KEY: spec.cpu_limit,
+                    _MEMORY_METADATA_KEY: spec.memory_limit,
+                    _VOLUME_SIZE_METADATA_KEY: spec.session_volume_size,
                 },
                 resource={
-                    "cpu": self._settings.sandbox_cpu_limit,
-                    "memory": self._settings.sandbox_memory_limit,
+                    "cpu": spec.cpu_limit,
+                    "memory": spec.memory_limit,
                 },
                 credential_proxy=(
                     CredentialProxyConfig(enabled=True)
@@ -211,9 +283,9 @@ class OpenSandboxProvider:
                             claim_name=f"efferva-session-{context.session_id.hex}",
                             create_if_not_exists=True,
                             delete_on_sandbox_termination=False,
-                            storage=self._settings.session_volume_size,
+                            storage=spec.session_volume_size,
                         ),
-                        mount_path=self._settings.session_volume_path,
+                        mount_path=self._layout.session_volume_path,
                     )
                 ],
                 connection_config=self._connection_config(),
@@ -222,8 +294,7 @@ class OpenSandboxProvider:
                 if credential_proxy is not None:
                     await self._configure_credential_proxy(
                         sandbox,
-                        host=credential_proxy[0],
-                        scheme=credential_proxy[1],
+                        credential_proxy,
                     )
                     credential_proxy_active = True
             except BaseException:
@@ -248,11 +319,28 @@ class OpenSandboxProvider:
             await self._manager.close()
             self._manager = None
 
-    async def _find_sandbox(self, context: SandboxContext) -> Any | None:
+    async def _list_active_sandboxes(
+        self,
+        context: SandboxContext,
+    ) -> tuple[OpenSandboxInventoryItem, ...]:
+        infos = await asyncio.gather(
+            *(
+                self._find_sandbox(session.id)
+                for session in context.owner_sessions
+                if session.id != context.session_id
+            )
+        )
+        return tuple(
+            self._inventory_item(info)
+            for info in infos
+            if info is not None
+        )
+
+    async def _find_sandbox(self, session_id: UUID) -> Any | None:
         result = await self._require_manager().list_sandbox_infos(
             SandboxFilter(
                 states=["RUNNING", "PAUSED"],
-                metadata={_SESSION_METADATA_KEY: str(context.session_id)},
+                metadata={_SESSION_METADATA_KEY: str(session_id)},
                 page_size=10,
                 page=1,
             )
@@ -261,56 +349,55 @@ class OpenSandboxProvider:
             return None
         return max(result.sandbox_infos, key=lambda item: item.created_at)
 
+    @staticmethod
+    def _inventory_item(info: Any) -> OpenSandboxInventoryItem:
+        metadata = info.metadata or {}
+        return OpenSandboxInventoryItem(
+            id=info.id,
+            session_id=UUID(metadata[_SESSION_METADATA_KEY]),
+            state=info.status.state.upper(),
+            image=getattr(info.image, "image", None),
+            cpu_limit=metadata.get(_CPU_METADATA_KEY),
+            memory_limit=metadata.get(_MEMORY_METADATA_KEY),
+            session_volume_size=metadata.get(_VOLUME_SIZE_METADATA_KEY),
+            credential_proxy_enabled=(
+                metadata.get(_CREDENTIAL_PROXY_METADATA_KEY) == "true"
+            ),
+            created_at=info.created_at,
+        )
+
     def _require_manager(self) -> SandboxManager:
         if self._manager is None:
             raise RuntimeError("OpenSandboxProvider is not open")
         return self._manager
 
     def _connection_config(self) -> ConnectionConfig:
-        assert self._settings.opensandbox_server_url is not None
         return ConnectionConfig(
-            domain=self._settings.opensandbox_server_url,
-            api_key=self._settings.opensandbox_api_key,
-            use_server_proxy=self._settings.opensandbox_use_server_proxy,
+            domain=self._connection.server_url,
+            api_key=self._connection.api_key,
+            use_server_proxy=self._connection.use_server_proxy,
             disable_metrics=True,
         )
-
-    def _credential_proxy_target(self) -> tuple[str, str] | None:
-        if not self._settings.opensandbox_credential_proxy_enabled:
-            return None
-        if not os.environ.get("OPENAI_API_KEY"):
-            return None
-        parsed = urlparse(
-            self._settings.codex_openai_base_url or "https://api.openai.com/v1"
-        )
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return None
-        default_port = 443 if parsed.scheme == "https" else 80
-        if parsed.port not in {None, default_port}:
-            return None
-        return parsed.hostname, parsed.scheme
 
     async def _configure_credential_proxy(
         self,
         sandbox: Sandbox,
-        *,
-        host: str,
-        scheme: str,
+        config: OpenSandboxCredentialProxy,
     ) -> None:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            return
         await sandbox.credential_vault.create(
             credentials=[
                 {
                     "name": "efferva-openai-api-key",
-                    "source": {"type": "inline", "value": api_key},
+                    "source": {"type": "inline", "value": config.bearer_token},
                 }
             ],
             bindings=[
                 {
                     "name": "efferva-openai-bearer",
-                    "match": {"schemes": [scheme], "hosts": [host]},
+                    "match": {
+                        "schemes": [config.scheme],
+                        "hosts": [config.host],
+                    },
                     "auth": {
                         "type": "bearer",
                         "credential": "efferva-openai-api-key",

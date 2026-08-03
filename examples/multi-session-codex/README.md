@@ -75,11 +75,13 @@ docker compose --file examples/multi-session-codex/compose.yaml down --volumes
 OpenSandbox 相关参数由 Compose 通过环境变量提供：
 
 ```text
-EFFERVA_SANDBOX_PROVIDER=opensandbox
 EFFERVA_OPENSANDBOX_SERVER_URL=http://opensandbox-server:8090
 EFFERVA_OPENSANDBOX_API_KEY=local-dev-key
 EFFERVA_OPENSANDBOX_USE_SERVER_PROXY=true
 ```
+
+环境变量只由产品自己的 `configuration.py` 读取，再转换成 `EffervaConfig` 和
+`OpenSandboxConnectionConfig` 和示例的固定 `OpenSandboxCreateSpec`；Efferva 框架本身不读取部署环境。真实产品可以把 resolver 换成按用户套餐、余量查询产品数据库的异步函数。
 
 标准 HTTP/HTTPS 模型端点默认启用 OpenSandbox Credential Proxy，真实 API Key 不进入
 sandbox 环境变量。像本地 `cliproxyapi` 这类非 80/443 端口会自动退回开发凭证环境变量；

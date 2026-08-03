@@ -102,6 +102,26 @@ class SessionRepository:
             )
             return list(await cursor.fetchall())
 
+    async def list_owner_sessions(
+        self,
+        *,
+        tenant_id: str,
+        owner_issuer: str,
+        owner_subject: str,
+    ) -> list[dict[str, Any]]:
+        async with self._database.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM app_sessions
+                WHERE tenant_id = %s
+                  AND owner_issuer = %s
+                  AND owner_subject = %s
+                ORDER BY last_active_at DESC, created_at DESC
+                """,
+                (tenant_id, owner_issuer, owner_subject),
+            )
+            return list(await cursor.fetchall())
+
     async def get_session(
         self,
         principal: Principal,

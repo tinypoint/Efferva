@@ -7,9 +7,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from efferva import Efferva, Principal
-from efferva.config import get_settings
 from efferva.db import Database
-from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
+from efferva.sandbox.providers.opensandbox import (
+    OpenSandboxCreateContext,
+    OpenSandboxCreateSpec,
+    OpenSandboxProvider,
+)
+from scheduled_investment_research.configuration import load_config
 from scheduled_investment_research.reports import create_report_runs_router
 from scheduled_investment_research.scheduling import (
     ReportScheduler,
@@ -27,7 +31,7 @@ async def resolve_local_principal(_: Request) -> Principal:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    database = Database(get_settings().database_url)
+    database = Database(config.efferva.database_url)
     await database.open()
     scheduler: ReportScheduler | None = None
     try:
@@ -66,11 +70,23 @@ app.mount(
 )
 
 
-sandbox_provider = OpenSandboxProvider(get_settings())
+config = load_config()
+
+
+async def resolve_sandbox_spec(_: OpenSandboxCreateContext) -> OpenSandboxCreateSpec:
+    return config.sandbox_spec
+
+
+sandbox_provider = OpenSandboxProvider(
+    config.opensandbox_connection,
+    layout=config.efferva.sandbox,
+    resolve_spec=resolve_sandbox_spec,
+)
 app.include_router(create_report_runs_router())
 app.include_router(create_report_tasks_router())
 
 Efferva(
+    config=config.efferva,
     identity=resolve_local_principal,
     sandbox=sandbox_provider,
 ).install(app, prefix="/agent")

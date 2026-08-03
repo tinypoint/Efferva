@@ -2,118 +2,134 @@
 
 ## 稳定边界
 
-Efferva 的 Sandbox 扩展点分成生命周期与运行时两层：
+Efferva 的 Sandbox 扩展点只有两层：
 
 ```text
 SandboxProvider
-  ├── ensure_workspace(context) -> WorkspaceHandle
-  ├── start(context, workspace) -> SandboxHandle
-  ├── connect(sandbox) -> SandboxRuntime
-  ├── stop(sandbox)
-  └── destroy(sandbox)
+  ├── open()
+  ├── ensure(context) -> SandboxEnvironment
+  └── close()
 
 SandboxRuntime
-  ├── process: start / read(cursor) / stdin / resize / terminate
-  └── filesystem: read / write / list / stat
+  ├── run_command(...)
+  ├── read_file(...) / write_file(...)
+  ├── list_directory(...) / stat(...)
+  └── get_endpoint(port)
 ```
 
-Provider 负责厂商资源的创建和连接，Runtime 负责一个已启动沙盒内的执行语义。两者都不依赖
-Codex、FastAPI、Session 授权或 PostgreSQL。
+Provider 负责厂商资源的创建、恢复和连接，Runtime 负责已启动 Sandbox 内的命令、文件与
+端口语义。两者不依赖 FastAPI、Session 授权或 PostgreSQL。
 
-`WorkspaceHandle.external_ref/state` 与 `SandboxHandle.external_ref/state` 是 Provider 的
-不透明状态。Efferva 只持久化和原样交还，不从中解析 Docker、Kubernetes 或厂商字段。
+## 连接配置与创建决策
+
+Efferva 不读取环境变量、`.env` 或 Secret Manager。产品应用决定配置来源，再把普通配置
+对象传给框架和 Provider：
+
+```python
+from efferva import CodexConfig, Efferva, EffervaConfig, SandboxLayout
+from efferva.sandbox.providers.opensandbox import (
+    OpenSandboxConnectionConfig,
+    OpenSandboxCreateSpec,
+    OpenSandboxProvider,
+)
+
+layout = SandboxLayout()
+config = EffervaConfig(
+    database_url=database_url,
+    sandbox=layout,
+    codex=CodexConfig(
+        api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+    ),
+)
+connection = OpenSandboxConnectionConfig(
+    server_url=opensandbox_server_url,
+    api_key=opensandbox_api_key,
+)
+
+async def resolve_sandbox_spec(context):
+    account = await billing.get_account(
+        tenant_id=context.session.tenant_id,
+        user_id=context.session.owner_subject,
+    )
+    if len(context.active_sandboxes) >= account.max_active_sandboxes:
+        raise SandboxQuotaExceeded()
+    if account.plan == "pro" and account.remaining_compute > 0:
+        return OpenSandboxCreateSpec(
+            image="my-product/coding-sandbox:latest",
+            cpu_limit="4",
+            memory_limit="8Gi",
+        )
+    return OpenSandboxCreateSpec(
+        image="my-product/coding-sandbox:latest",
+        cpu_limit="1",
+        memory_limit="2Gi",
+    )
+
+sandbox = OpenSandboxProvider(
+    connection,
+    layout=layout,
+    resolve_spec=resolve_sandbox_spec,
+)
+
+Efferva(
+    config=config,
+    identity=resolve_principal,
+    sandbox=sandbox,
+).install(app, prefix="/agent")
+```
+
+`context.session` 提供当前 Session 的稳定身份、运行目录以及 `owner_sessions`；
+`context.active_sandboxes` 是同一 Owner 当前仍在运行或暂停的 OpenSandbox 库存。库存包含
+Session、状态、镜像和创建时资源规格，但不暴露 Credential Proxy 的 bearer token。
+产品 resolver 可以结合这些信息查询自己的数据库或计费服务，再返回 OpenSandbox 原生的
+创建规格。
+
+resolver 只在没有现成 Sandbox、确实需要创建时执行；恢复或复用已有 Sandbox 不会重新
+决策。框架以 Tenant + Owner 为键持有 PostgreSQL advisory lock，因此同一用户的两次
+Sandbox 创建不会同时读取到相同库存。产品仍然拥有套餐和计费语义。
+
+如果产品选择环境变量，读取逻辑属于自己的启动层；完整例子见
+[`examples/multi-session-codex`](../examples/multi-session-codex)。
 
 ## 最低能力
 
-Provider 必须声明 `SandboxCapabilities`。Coding Agent 控制面要求：
+Provider 必须声明 `SandboxCapabilities`。Coding Agent 要求：
 
-- 流式进程输出与稳定 cursor；
-- stdin；
-- 进程终止；
-- 文件读写；
-- 持久工作区；
-- 并发进程。
+- 持久 Session Volume；
+- 端口连接；
+- 文件操作。
 
-PTY、快照、暂停恢复、端口转发和网络策略是独立能力，不允许尚未实现的 Provider 声明为
-`True`。控制面在启动时拒绝不满足最低能力的 Provider。
+暂停恢复和网络策略是独立能力。控制面启动时会拒绝不满足最低能力的 Provider。
 
-## 注册与配置
+## Credential Proxy
 
-第三方包可在应用启动前注册零参数 Provider factory 或类：
+Credential Proxy 也是显式配置，不会从 `OPENAI_API_KEY` 或 Base URL 隐式推导：
 
 ```python
-from efferva import Efferva
+from efferva.sandbox.providers.opensandbox import OpenSandboxCredentialProxy
 
-Efferva.register_sandbox_provider(
-    "company-sandbox",
-    CompanySandboxProvider,
+proxy = OpenSandboxCredentialProxy(
+    bearer_token=openai_api_key,
+    scheme="https",
+    host="api.openai.com",
 )
 ```
 
-部署环境再选择实现：
-
-```bash
-EFFERVA_SANDBOX_PROVIDER=company-sandbox
-```
-
-`opensandbox` 是保留的一方名称。自定义 Provider 不应要求产品把 API key 或厂商参数写入
-`Efferva(...)`；它应从自己的部署配置读取。
-
-OpenSandbox Provider 通过官方 Python SDK 连接 OpenSandbox Server。基础本地示例让
-OpenSandbox Server 使用 Docker runtime：
-
-```bash
-pip install "efferva[opensandbox]"
-export EFFERVA_SANDBOX_PROVIDER=opensandbox
-export EFFERVA_OPENSANDBOX_SERVER_URL=http://localhost:8090
-export EFFERVA_OPENSANDBOX_API_KEY=...
-```
-
-完整 Compose 见
-[`examples/multi-session-codex`](../examples/multi-session-codex)。
+产品把它放进 resolver 返回的 `OpenSandboxCreateSpec(credential_proxy=proxy)`；传 `None`
+就是不启用。这样不同用户也可以使用不同的凭证策略。
 
 ## Codex 适配
 
-Codex 不直接依赖 Provider。Efferva 通过 `SandboxRuntime` 将经过 SHA-256 校验的 OpenAI
-官方 Codex CLI 注入 Session sandbox，并启动本地 app-server：
+Codex 不直接依赖 OpenSandbox。Efferva 通过 `SandboxRuntime` 下载并校验固定版本的官方
+Codex CLI，然后在每个 Session Sandbox 内启动 app-server：
 
 ```text
 Efferva App
-  -> SandboxRuntime process channel
-  -> Session sandbox / Codex app-server
+  -> SandboxRuntime
+  -> Session Sandbox / Codex app-server
   -> persistent workspace + CODEX_HOME
 ```
 
-App-server 不暴露给浏览器或负载均衡器。每次 Session owner 变化都由数据库 fencing
-约束；进程丢失后从持久化 `CODEX_HOME` 恢复 Thread。
-
-## Conformance
-
-共享认证入口：
-
-```bash
-uv run python -m efferva.sandbox.conformance_cli --provider opensandbox
-```
-
-Python 适配包也可以直接调用 `run_provider_conformance(provider)`。认证检查：
-
-1. Workspace 与 Sandbox 幂等；
-2. capability negotiation；
-3. 文件写入、读取、目录列表和 metadata；
-4. stdout/stderr 流式执行；
-5. stdin；
-6. 并发进程；
-7. PTY（声明支持时）；
-8. 进程组终止；
-9. stop/start 后 Workspace 持久。
-
-只有通过这套认证和同一套 Codex E2E 的实现，才应声明 Efferva Coding Agent 兼容。
-
-## 第一方 Provider
-
-| Provider | 执行通道 | Workspace | Sandbox 内组件 |
-|---|---|---|---|
-| OpenSandbox | OpenSandbox execd API | 由 OpenSandbox runtime 管理 | OpenSandbox execd |
-
-Docker 或 Kubernetes 是 OpenSandbox Server 的部署/runtime 选择，不是 Efferva 内的另一套
-Provider。E2B 等外部 Provider 应新增独立适配包并复用本契约，不修改控制面核心。
+Docker 或 Kubernetes 是 OpenSandbox Server 的 runtime 选择，不是 Efferva 内的另一套
+Provider。

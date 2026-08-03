@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from efferva.api import create_api_router
 from efferva.codex_appserver import CodexAppServerManager
-from efferva.config import Settings, get_settings
+from efferva.config import EffervaConfig
 from efferva.db import Database
 from efferva.identity import (
     ForbiddenError,
@@ -28,13 +28,13 @@ class Efferva:
     def __init__(
         self,
         *,
+        config: EffervaConfig,
         identity: IdentityResolver,
         sandbox: SandboxProvider,
-        settings: Settings | None = None,
     ) -> None:
+        self.config = config
         self.identity = identity
         self.sandbox = sandbox
-        self.settings = settings or get_settings()
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
         normalized_prefix = self._normalize_prefix(prefix)
@@ -45,14 +45,21 @@ class Efferva:
             )
         app.state._efferva_prefixes = {*installed_prefixes, normalized_prefix}
 
-        settings = self.settings
-        if settings.database_url is None:
-            raise ValueError("EFFERVA_DATABASE_URL is required by the API")
         schema = files("efferva").joinpath("schema.sql").read_text()
-        database = Database(settings.database_url)
-        sandboxes = SessionSandboxService(settings, self.sandbox, database)
+        database = Database(self.config.database_url)
         repository = SessionRepository(database)
-        codex = CodexAppServerManager(settings, sandboxes, database)
+        sandboxes = SessionSandboxService(
+            self.config.sandbox.workspace_path,
+            self.sandbox,
+            database,
+            repository,
+        )
+        codex = CodexAppServerManager(
+            self.config.codex,
+            self.config.sandbox,
+            sandboxes,
+            database,
+        )
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:

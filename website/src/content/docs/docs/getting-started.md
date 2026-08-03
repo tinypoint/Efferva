@@ -13,7 +13,12 @@ Efferva is currently in private preview. The Python wheel and complete installat
 ```python
 from fastapi import FastAPI, Request
 
-from efferva import Efferva, Principal
+from efferva import CodexConfig, Efferva, EffervaConfig, Principal, SandboxLayout
+from efferva.sandbox.providers.opensandbox import (
+    OpenSandboxConnectionConfig,
+    OpenSandboxCreateSpec,
+    OpenSandboxProvider,
+)
 
 
 async def resolve_principal(request: Request) -> Principal:
@@ -25,11 +30,36 @@ async def resolve_principal(request: Request) -> Principal:
     )
 
 
+async def resolve_sandbox_spec(context) -> OpenSandboxCreateSpec:
+    plan = await billing.plan_for(
+        context.session.tenant_id,
+        context.session.owner_subject,
+    )
+    if len(context.active_sandboxes) >= plan.max_active_sandboxes:
+        raise SandboxQuotaExceeded()
+    if plan.name == "pro":
+        return OpenSandboxCreateSpec(image="product/sandbox", cpu_limit="4")
+    return OpenSandboxCreateSpec(image="product/sandbox", cpu_limit="1")
+
+
 app = FastAPI()
-Efferva(identity=resolve_principal).install(app, prefix="/agent")
+layout = SandboxLayout()
+Efferva(
+    config=EffervaConfig(
+        database_url=database_url,
+        sandbox=layout,
+        codex=CodexConfig(api_key=openai_api_key),
+    ),
+    identity=resolve_principal,
+    sandbox=OpenSandboxProvider(
+        OpenSandboxConnectionConfig(server_url=opensandbox_server_url),
+        layout=layout,
+        resolve_spec=resolve_sandbox_spec,
+    ),
+).install(app, prefix="/agent")
 ```
 
-The identity resolver is the only required product-specific boundary. Efferva reuses the host application lifecycle and middleware.
+The product owns identity, configuration sources, and per-session sandbox policy. Efferva receives explicit values and never reads environment variables or `.env` files. The sandbox resolver receives the owner's Sessions and active Sandboxes, and can combine that inventory with current plan or quota data to choose an image and resources.
 
 :::caution[Preview contract]
 Do not treat this page as a stable installation contract yet. Packaging and release instructions are being finalized for v0.1.

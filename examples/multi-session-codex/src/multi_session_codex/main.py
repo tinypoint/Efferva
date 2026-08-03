@@ -5,7 +5,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from efferva import Efferva, Principal
-from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
+from efferva.sandbox.providers.opensandbox import (
+    OpenSandboxCreateContext,
+    OpenSandboxCreateSpec,
+    OpenSandboxProvider,
+)
+from multi_session_codex.configuration import load_config
 
 
 async def resolve_local_principal(_: Request) -> Principal:
@@ -31,10 +36,23 @@ app.mount(
     name="assets",
 )
 
+config = load_config()
+
+
+async def resolve_sandbox_spec(_: OpenSandboxCreateContext) -> OpenSandboxCreateSpec:
+    return config.sandbox_spec
+
+
+sandbox_provider = OpenSandboxProvider(
+    config.opensandbox_connection,
+    layout=config.efferva.sandbox,
+    resolve_spec=resolve_sandbox_spec,
+)
 
 Efferva(
+    config=config.efferva,
     identity=resolve_local_principal,
-    sandbox=OpenSandboxProvider(),
+    sandbox=sandbox_provider,
 ).install(app, prefix="/agent")
 
 

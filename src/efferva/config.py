@@ -1,35 +1,25 @@
-from functools import lru_cache
-
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from dataclasses import dataclass, field
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_prefix="EFFERVA_",
-        extra="ignore",
-    )
-
-    database_url: str | None = None
-    codex_openai_base_url: str | None = None
-    sandbox_image: str = "python:3.13-slim-bookworm"
-    sandbox_cpu_limit: str = "2"
-    sandbox_memory_limit: str = "2g"
-    sandbox_uid: int = 1000
-    sandbox_gid: int = 1000
-    opensandbox_server_url: str | None = None
-    opensandbox_api_key: str | None = None
-    opensandbox_use_server_proxy: bool = True
-    opensandbox_credential_proxy_enabled: bool = True
+@dataclass(frozen=True, slots=True)
+class SandboxLayout:
     session_volume_path: str = "/home/sandbox"
     workspace_path: str = "/home/sandbox/workspace"
     codex_home_path: str = "/home/sandbox/.codex"
     codex_runtime_dir: str = "/opt/efferva/runtimes"
-    codex_appserver_port: int = 4500
-    session_volume_size: str = "10Gi"
-    sandbox_idle_timeout_seconds: int = 12 * 60 * 60
+    uid: int = 1000
+    gid: int = 1000
 
 
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
+@dataclass(frozen=True, slots=True)
+class CodexConfig:
+    api_key: str | None = None
+    openai_base_url: str | None = None
+    appserver_port: int = 4500
+
+
+@dataclass(frozen=True, slots=True)
+class EffervaConfig:
+    database_url: str
+    sandbox: SandboxLayout = field(default_factory=SandboxLayout)
+    codex: CodexConfig = field(default_factory=CodexConfig)
