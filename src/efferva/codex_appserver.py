@@ -130,10 +130,8 @@ class CodexAppServerManager:
         codex_home = self._settings.codex_home_path
         websocket_token_file = posixpath.join(codex_home, "app-server.token")
         websocket_token = secrets.token_urlsafe(32)
-        temporary_token_file = f"{websocket_token_file}.{websocket_token[:16]}.tmp"
         pid_file = "/tmp/efferva-app-server.pid"
         log_file = posixpath.join(codex_home, "app-server.log")
-        start_lock = "/tmp/efferva-app-server-start.lock"
         listen = f"ws://0.0.0.0:{self._settings.codex_appserver_port}"
         app_server_overrides: dict[str, str] = {}
         if self._settings.codex_openai_base_url:
@@ -162,6 +160,8 @@ class CodexAppServerManager:
                 {
                     "binary": self._binary_sha256,
                     "config": app_server_config_args,
+                    "uid": self._settings.sandbox_uid,
+                    "gid": self._settings.sandbox_gid,
                     "openaiApiKeySha256": (
                         sha256(effective_api_key.encode()).hexdigest()
                         if effective_api_key
@@ -171,48 +171,56 @@ class CodexAppServerManager:
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()
-        bootstrap = (
-            f"if [ -d {shlex.quote(posixpath.join(self._settings.session_volume_path, 'codex-home'))} ] "
-            f"&& [ ! -e {shlex.quote(codex_home)} ]; then "
-            f"mv {shlex.quote(posixpath.join(self._settings.session_volume_path, 'codex-home'))} "
-            f"{shlex.quote(codex_home)}; fi; "
-            "if ! id sandbox >/dev/null 2>&1; then "
-            "if command -v useradd >/dev/null 2>&1; then "
+        privileged_bootstrap = (
+            "if id sandbox >/dev/null 2>&1; then "
+            f'[ "$(id -u sandbox)" = {self._settings.sandbox_uid} ] || '
+            "{ echo 'sandbox user has an unexpected UID' >&2; exit 1; }; "
+            "elif command -v useradd >/dev/null 2>&1; then "
             f"useradd -u {self._settings.sandbox_uid} "
             f"-d {shlex.quote(self._settings.session_volume_path)} "
-            "-M -s /bin/sh sandbox 2>/dev/null || true; "
+            "-M -s /bin/sh sandbox; "
             "elif command -v adduser >/dev/null 2>&1; then "
             f"adduser -D -u {self._settings.sandbox_uid} "
             f"-h {shlex.quote(self._settings.session_volume_path)} "
-            "sandbox 2>/dev/null || true; fi; fi; "
+            "sandbox; "
+            "else echo 'sandbox image cannot create users' >&2; exit 1; fi; "
+            f"chmod 755 {shlex.quote(sandbox_binary)} && "
+            f"chown {self._settings.sandbox_uid}:{self._settings.sandbox_gid} "
+            f"{shlex.quote(self._settings.session_volume_path)}"
+        )
+        await self._run_command(sandbox, ("sh", "-lc", privileged_bootstrap))
+        sandbox_bootstrap = (
             f"mkdir -p {shlex.quote(codex_home)} "
             f"{shlex.quote(self._settings.workspace_path)} && "
             f"if [ ! -s {shlex.quote(websocket_token_file)} ]; then "
+            "umask 077; "
             f"printf '%s\\n' {shlex.quote(websocket_token)} "
-            f">{shlex.quote(temporary_token_file)} && "
-            f"chmod 600 {shlex.quote(temporary_token_file)} && "
-            f"ln {shlex.quote(temporary_token_file)} "
-            f"{shlex.quote(websocket_token_file)} 2>/dev/null || true; "
-            f"rm -f {shlex.quote(temporary_token_file)}; fi && "
-            f"chmod 755 {shlex.quote(sandbox_binary)} && "
-            f"chown {self._settings.sandbox_uid}:{self._settings.sandbox_gid} "
-            f"{shlex.quote(self._settings.session_volume_path)} "
-            f"{shlex.quote(codex_home)} "
-            f"{shlex.quote(self._settings.workspace_path)}"
+            f">{shlex.quote(websocket_token_file)}; fi && "
+            f"touch {shlex.quote(log_file)} && "
+            f"chmod 600 {shlex.quote(websocket_token_file)} "
+            f"{shlex.quote(log_file)}"
         )
-        await self._run_command(sandbox, ("sh", "-lc", bootstrap))
+        await self._run_command(
+            sandbox,
+            ("sh", "-lc", sandbox_bootstrap),
+            uid=self._settings.sandbox_uid,
+            gid=self._settings.sandbox_gid,
+        )
         app_server_cli_config = "".join(
             f"-c {shlex.quote(argument)} " for argument in app_server_config_args
         )
-        command = (
-            f"if ! mkdir {shlex.quote(start_lock)} 2>/dev/null; then exit 0; fi; "
-            f"trap 'rmdir {shlex.quote(start_lock)} 2>/dev/null || true' EXIT; "
+        reconcile_command = (
             f"if [ -s {shlex.quote(pid_file)} ]; then "
             f"read -r efferva_pid efferva_sha <{shlex.quote(pid_file)}; "
             f'if kill -0 "$efferva_pid" 2>/dev/null && '
             f'[ "$efferva_sha" = {shlex.quote(app_server_launch_sha256)} ]; then '
             "exit 0; fi; "
-            f'kill "$efferva_pid" 2>/dev/null || true; fi; '
+            f'kill "$efferva_pid" 2>/dev/null || true; '
+            f"rm -f {shlex.quote(pid_file)}; fi"
+        )
+        await self._run_command(sandbox, ("sh", "-lc", reconcile_command))
+        command = (
+            f"if [ -s {shlex.quote(pid_file)} ]; then exit 0; fi; "
             f"cd {shlex.quote(self._settings.workspace_path)} && "
             f"{shlex.quote(sandbox_binary)} app-server "
             f"{app_server_cli_config}"
@@ -232,6 +240,8 @@ class CodexAppServerManager:
             sandbox,
             ("sh", "-lc", command),
             env=environment,
+            uid=self._settings.sandbox_uid,
+            gid=self._settings.sandbox_gid,
         )
 
     @staticmethod
