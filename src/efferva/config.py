@@ -1,5 +1,4 @@
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,10 +11,6 @@ class Settings(BaseSettings):
     )
 
     database_url: str | None = None
-    codex_version: str = "0.146.0"
-    codex_release_target: str | None = None
-    codex_archive_sha256: str | None = None
-    codex_release_cache_dir: Path = Path("/tmp/efferva-codex")
     codex_openai_base_url: str | None = None
     sandbox_image: str = "python:3.13-slim-bookworm"
     sandbox_cpu_limit: str = "2"

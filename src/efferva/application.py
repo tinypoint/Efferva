@@ -8,7 +8,6 @@ from fastapi.responses import JSONResponse
 
 from efferva.api import create_api_router
 from efferva.codex_appserver import CodexAppServerManager
-from efferva.codex_release import prepare_official_codex
 from efferva.config import Settings, get_settings
 from efferva.db import Database
 from efferva.identity import (
@@ -71,7 +70,6 @@ class Efferva:
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-            codex_release = await prepare_official_codex(settings)
             database = Database(settings.database_url)
             sandboxes = create_session_sandbox_service(
                 settings,
@@ -82,14 +80,9 @@ class Efferva:
             try:
                 await sandboxes.open()
                 await database.initialize(schema)
-                repository = SessionRepository(
-                    database,
-                    codex_version=codex_release.version,
-                    codex_runtime_sha256=codex_release.binary_sha256,
-                )
+                repository = SessionRepository(database)
                 resources.repository = repository
                 resources.codex = CodexAppServerManager(
-                    codex_release.binary,
                     settings,
                     sandboxes,
                     database,

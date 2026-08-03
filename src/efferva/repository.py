@@ -20,16 +20,8 @@ class AccessMode(StrEnum):
 class SessionRepository:
     """PostgreSQL access for Principal-scoped Session metadata."""
 
-    def __init__(
-        self,
-        database: Database,
-        *,
-        codex_version: str,
-        codex_runtime_sha256: str,
-    ) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
-        self._codex_version = codex_version
-        self._codex_runtime_sha256 = codex_runtime_sha256
 
     @staticmethod
     def _scope(
@@ -65,10 +57,9 @@ class SessionRepository:
             cursor = await connection.execute(
                 """
                 INSERT INTO app_sessions(
-                    id, tenant_id, owner_issuer, owner_subject, name,
-                    codex_version, codex_runtime_sha256, last_active_at
+                    id, tenant_id, owner_issuer, owner_subject, name, last_active_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, now())
                 RETURNING *
                 """,
                 (
@@ -77,8 +68,6 @@ class SessionRepository:
                     principal.issuer,
                     principal.subject,
                     name,
-                    self._codex_version,
-                    self._codex_runtime_sha256,
                 ),
             )
             row = await cursor.fetchone()

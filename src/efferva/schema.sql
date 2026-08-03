@@ -5,12 +5,13 @@ CREATE TABLE IF NOT EXISTS app_sessions (
     owner_subject text NOT NULL,
     name text NOT NULL,
     status text NOT NULL DEFAULT 'active',
-    codex_version text NOT NULL,
-    codex_runtime_sha256 text NOT NULL,
     last_active_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE app_sessions DROP COLUMN IF EXISTS codex_version;
+ALTER TABLE app_sessions DROP COLUMN IF EXISTS codex_runtime_sha256;
 
 CREATE INDEX IF NOT EXISTS app_sessions_owner_updated_idx
     ON app_sessions(

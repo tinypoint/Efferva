@@ -9,7 +9,6 @@ import shlex
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from hashlib import sha256
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -20,19 +19,28 @@ from efferva.db import Database
 from efferva.sandbox.protocol import SandboxEnvironment
 from efferva.sandbox.service import SessionSandboxService
 
+_CODEX_VERSION = "0.146.0"
+_CODEX_RELEASES = {
+    "aarch64": (
+        "aarch64-unknown-linux-musl",
+        "975bac91562abeedeb8f79636d51a86649b31f34a9de6a3bcb059565b6cf1f87",
+    ),
+    "x86_64": (
+        "x86_64-unknown-linux-musl",
+        "5ba3b9405543953081f661d0854d266f76e2abbe51d41349355a36de7673776a",
+    ),
+}
+
 
 class CodexAppServerManager:
     """Installs and starts one Codex app-server per Efferva Session."""
 
     def __init__(
         self,
-        binary: Path,
         settings: Settings,
         sandboxes: SessionSandboxService,
         database: Database,
     ) -> None:
-        self._binary_bytes = binary.read_bytes()
-        self._binary_sha256 = sha256(self._binary_bytes).hexdigest()
         self._settings = settings
         self._sandboxes = sandboxes
         self._database = database
@@ -109,23 +117,23 @@ class CodexAppServerManager:
         return sandbox
 
     async def _install_and_start(self, sandbox: SandboxEnvironment) -> None:
+        target, archive_sha256 = await self._codex_release_for_sandbox(sandbox)
         runtime_root = posixpath.join(
             self._settings.codex_runtime_dir,
-            self._binary_sha256,
+            _CODEX_VERSION,
+            target,
         )
         sandbox_binary = posixpath.join(runtime_root, "codex")
         try:
             await sandbox.runtime.stat(sandbox_binary)
         except FileNotFoundError:
-            await self._run_command(
+            await self._download_codex(
                 sandbox,
-                (
-                    "sh",
-                    "-lc",
-                    f"mkdir -p {shlex.quote(runtime_root)}",
-                ),
+                runtime_root=runtime_root,
+                sandbox_binary=sandbox_binary,
+                target=target,
+                archive_sha256=archive_sha256,
             )
-            await sandbox.runtime.write_file(sandbox_binary, self._binary_bytes)
 
         codex_home = self._settings.codex_home_path
         websocket_token_file = posixpath.join(codex_home, "app-server.token")
@@ -158,7 +166,7 @@ class CodexAppServerManager:
         app_server_launch_sha256 = sha256(
             json.dumps(
                 {
-                    "binary": self._binary_sha256,
+                    "binary": archive_sha256,
                     "config": app_server_config_args,
                     "uid": self._settings.sandbox_uid,
                     "gid": self._settings.sandbox_gid,
@@ -243,6 +251,92 @@ class CodexAppServerManager:
             uid=self._settings.sandbox_uid,
             gid=self._settings.sandbox_gid,
         )
+
+    async def _codex_release_for_sandbox(
+        self,
+        sandbox: SandboxEnvironment,
+    ) -> tuple[str, str]:
+        result = await sandbox.runtime.run_command(("uname", "-m"), cwd="/")
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout).decode(errors="replace")
+            raise RuntimeError(detail or "could not determine sandbox architecture")
+        architecture = result.stdout.decode().strip().lower()
+        architecture = {
+            "amd64": "x86_64",
+            "arm64": "aarch64",
+        }.get(architecture, architecture)
+        release = _CODEX_RELEASES.get(architecture)
+        if release is None:
+            raise RuntimeError(f"unsupported sandbox architecture: {architecture}")
+        return release
+
+    async def _download_codex(
+        self,
+        sandbox: SandboxEnvironment,
+        *,
+        runtime_root: str,
+        sandbox_binary: str,
+        target: str,
+        archive_sha256: str,
+    ) -> None:
+        asset_name = f"codex-{target}.tar.gz"
+        url = (
+            "https://github.com/openai/codex/releases/download/"
+            f"rust-v{_CODEX_VERSION}/{asset_name}"
+        )
+        archive = posixpath.join(runtime_root, f".{asset_name}.tmp")
+        temporary_binary = posixpath.join(runtime_root, ".codex.tmp")
+        python_download = (
+            "import sys,urllib.request;"
+            "urllib.request.urlretrieve(sys.argv[1],sys.argv[2])"
+        )
+        python_sha256 = (
+            "import hashlib,sys;"
+            "print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())"
+        )
+        expected_member = f"codex-{target}"
+        command = (
+            f"mkdir -p {shlex.quote(runtime_root)} && "
+            f"rm -f {shlex.quote(archive)} {shlex.quote(temporary_binary)} && "
+            "if command -v curl >/dev/null 2>&1; then "
+            f"curl -fsSL {shlex.quote(url)} -o {shlex.quote(archive)}; "
+            "elif command -v wget >/dev/null 2>&1; then "
+            f"wget -qO {shlex.quote(archive)} {shlex.quote(url)}; "
+            "elif command -v python3 >/dev/null 2>&1; then "
+            f"python3 -c {shlex.quote(python_download)} "
+            f"{shlex.quote(url)} {shlex.quote(archive)}; "
+            "elif command -v python >/dev/null 2>&1; then "
+            f"python -c {shlex.quote(python_download)} "
+            f"{shlex.quote(url)} {shlex.quote(archive)}; "
+            "else echo 'sandbox needs curl, wget, or Python to download Codex' >&2; "
+            "exit 1; fi && "
+            "if command -v sha256sum >/dev/null 2>&1; then "
+            f"actual_sha256=$(sha256sum {shlex.quote(archive)} | awk '{{print $1}}'); "
+            "elif command -v shasum >/dev/null 2>&1; then "
+            f"actual_sha256=$(shasum -a 256 {shlex.quote(archive)} | awk '{{print $1}}'); "
+            "elif command -v python3 >/dev/null 2>&1; then "
+            f"actual_sha256=$(python3 -c {shlex.quote(python_sha256)} "
+            f"{shlex.quote(archive)}); "
+            "elif command -v python >/dev/null 2>&1; then "
+            f"actual_sha256=$(python -c {shlex.quote(python_sha256)} "
+            f"{shlex.quote(archive)}); "
+            "else echo 'sandbox cannot calculate SHA-256' >&2; exit 1; fi; "
+            f'if [ "$actual_sha256" != {shlex.quote(archive_sha256)} ]; then '
+            f"echo 'checksum mismatch for {asset_name}' >&2; exit 1; fi; "
+            "command -v tar >/dev/null 2>&1 || "
+            "{ echo 'sandbox needs tar to extract Codex' >&2; exit 1; }; "
+            f"member=$(tar -tzf {shlex.quote(archive)} | "
+            f"awk -F/ -v expected={shlex.quote(expected_member)} "
+            '\'$NF == "codex" || $NF == expected '
+            "{ count++; found=$0 } END { if (count == 1) print found; else exit 1 }') "
+            f"|| {{ echo 'invalid Codex archive {asset_name}' >&2; exit 1; }}; "
+            f'tar -xOzf {shlex.quote(archive)} "$member" '
+            f">{shlex.quote(temporary_binary)} && "
+            f"chmod 755 {shlex.quote(temporary_binary)} && "
+            f"mv {shlex.quote(temporary_binary)} {shlex.quote(sandbox_binary)} && "
+            f"rm -f {shlex.quote(archive)}"
+        )
+        await self._run_command(sandbox, ("sh", "-lc", command))
 
     @staticmethod
     async def _run_command(

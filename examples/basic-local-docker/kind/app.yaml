@@ -67,17 +67,6 @@ spec:
             storage: 5Gi
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: codex-cache
-  namespace: efferva
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: v1
 kind: Service
 metadata:
   name: efferva
@@ -120,8 +109,6 @@ spec:
               value: local-dev-key
             - name: EFFERVA_OPENSANDBOX_USE_SERVER_PROXY
               value: "false"
-            - name: EFFERVA_CODEX_RELEASE_CACHE_DIR
-              value: /var/cache/efferva/codex
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -142,10 +129,3 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-          volumeMounts:
-            - name: codex-cache
-              mountPath: /var/cache/efferva/codex
-      volumes:
-        - name: codex-cache
-          persistentVolumeClaim:
-            claimName: codex-cache
