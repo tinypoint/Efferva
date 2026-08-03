@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -199,8 +199,19 @@ export function SessionWorkspace({
       ),
     [skills.data],
   );
+  const opening =
+    threads.isLoading || !threads.data || models.isLoading || !models.data;
+  const openingDurationLogged = useRef(false);
 
-  if (threads.isLoading || !threads.data || models.isLoading || !models.data) {
+  useEffect(() => {
+    if (opening || openingDurationLogged.current) return;
+    openingDurationLogged.current = true;
+    console.info(
+      `[Efferva] Opening Efferva… disappeared ${performance.now().toFixed(0)} ms after navigation started`,
+    );
+  }, [opening]);
+
+  if (opening) {
     return <OpeningWorkspace />;
   }
 

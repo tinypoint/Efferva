@@ -82,6 +82,12 @@ class CodexAppServerManager:
         session: Mapping[str, Any],
     ) -> tuple[str, dict[str, str]]:
         sandbox = await self._ensure(session)
+        return await self._sandbox_connection_target(sandbox)
+
+    async def _sandbox_connection_target(
+        self,
+        sandbox: SandboxEnvironment,
+    ) -> tuple[str, dict[str, str]]:
         endpoint, headers = await sandbox.runtime.get_endpoint(
             self._settings.codex_appserver_port
         )
@@ -111,12 +117,96 @@ class CodexAppServerManager:
     ) -> SandboxEnvironment:
         session_id = UUID(str(session["id"]))
         sandbox = await self._sandboxes.ensure(session_id)
+        config_args, effective_api_key, launch_sha256 = (
+            self._launch_configuration(sandbox)
+        )
         advisory_lock_key = f"efferva:codex-appserver-session:{session_id}"
         async with self._database.advisory_lock(advisory_lock_key):
-            await self._install_and_start(sandbox)
+            if not await self._is_running(sandbox, launch_sha256):
+                await self._install_and_start(
+                    sandbox,
+                    config_args=config_args,
+                    effective_api_key=effective_api_key,
+                    launch_sha256=launch_sha256,
+                )
         return sandbox
 
-    async def _install_and_start(self, sandbox: SandboxEnvironment) -> None:
+    async def _is_running(
+        self,
+        sandbox: SandboxEnvironment,
+        launch_sha256: str,
+    ) -> bool:
+        try:
+            pid_file = "/tmp/efferva-app-server.pid"
+            await sandbox.runtime.stat(pid_file)
+            pid_record = (await sandbox.runtime.read_file(pid_file)).decode().split()
+            if len(pid_record) != 2 or pid_record[1] != launch_sha256:
+                return False
+            url, headers = await self._sandbox_connection_target(sandbox)
+            websocket = await connect_websocket(
+                url,
+                additional_headers=headers,
+                open_timeout=1,
+                ping_interval=None,
+                max_size=128 * 1024 * 1024,
+            )
+            await websocket.close()
+            return True
+        except Exception:
+            return False
+
+    def _launch_configuration(
+        self,
+        sandbox: SandboxEnvironment,
+    ) -> tuple[tuple[str, ...], str | None, str]:
+        app_server_overrides: dict[str, str] = {}
+        if self._settings.codex_openai_base_url:
+            app_server_overrides = {
+                "model_providers.efferva_proxy.name": "Efferva LLM proxy",
+                "model_providers.efferva_proxy.base_url": (
+                    self._settings.codex_openai_base_url
+                ),
+                "model_providers.efferva_proxy.env_key": "OPENAI_API_KEY",
+                "model_providers.efferva_proxy.wire_api": "responses",
+                "model_provider": "efferva_proxy",
+            }
+        config_args = tuple(
+            f"{key}={json.dumps(value)}" for key, value in app_server_overrides.items()
+        )
+        api_key = os.environ.get("OPENAI_API_KEY")
+        effective_api_key = None
+        if api_key:
+            effective_api_key = (
+                "efferva-credential-proxy"
+                if sandbox.sandbox.state.get("credentialProxy")
+                else api_key
+            )
+        launch_sha256 = sha256(
+            json.dumps(
+                {
+                    "codexVersion": _CODEX_VERSION,
+                    "config": config_args,
+                    "uid": self._settings.sandbox_uid,
+                    "gid": self._settings.sandbox_gid,
+                    "openaiApiKeySha256": (
+                        sha256(effective_api_key.encode()).hexdigest()
+                        if effective_api_key
+                        else None
+                    ),
+                },
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return config_args, effective_api_key, launch_sha256
+
+    async def _install_and_start(
+        self,
+        sandbox: SandboxEnvironment,
+        *,
+        config_args: tuple[str, ...],
+        effective_api_key: str | None,
+        launch_sha256: str,
+    ) -> None:
         target, archive_sha256 = await self._codex_release_for_sandbox(sandbox)
         runtime_root = posixpath.join(
             self._settings.codex_runtime_dir,
@@ -141,44 +231,6 @@ class CodexAppServerManager:
         pid_file = "/tmp/efferva-app-server.pid"
         log_file = posixpath.join(codex_home, "app-server.log")
         listen = f"ws://0.0.0.0:{self._settings.codex_appserver_port}"
-        app_server_overrides: dict[str, str] = {}
-        if self._settings.codex_openai_base_url:
-            app_server_overrides = {
-                "model_providers.efferva_proxy.name": "Efferva LLM proxy",
-                "model_providers.efferva_proxy.base_url": (
-                    self._settings.codex_openai_base_url
-                ),
-                "model_providers.efferva_proxy.env_key": "OPENAI_API_KEY",
-                "model_providers.efferva_proxy.wire_api": "responses",
-                "model_provider": "efferva_proxy",
-            }
-        app_server_config_args = tuple(
-            f"{key}={json.dumps(value)}" for key, value in app_server_overrides.items()
-        )
-        api_key = os.environ.get("OPENAI_API_KEY")
-        effective_api_key = None
-        if api_key:
-            effective_api_key = (
-                "efferva-credential-proxy"
-                if sandbox.sandbox.state.get("credentialProxy")
-                else api_key
-            )
-        app_server_launch_sha256 = sha256(
-            json.dumps(
-                {
-                    "binary": archive_sha256,
-                    "config": app_server_config_args,
-                    "uid": self._settings.sandbox_uid,
-                    "gid": self._settings.sandbox_gid,
-                    "openaiApiKeySha256": (
-                        sha256(effective_api_key.encode()).hexdigest()
-                        if effective_api_key
-                        else None
-                    ),
-                },
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
         privileged_bootstrap = (
             "if id sandbox >/dev/null 2>&1; then "
             f'[ "$(id -u sandbox)" = {self._settings.sandbox_uid} ] || '
@@ -215,13 +267,13 @@ class CodexAppServerManager:
             gid=self._settings.sandbox_gid,
         )
         app_server_cli_config = "".join(
-            f"-c {shlex.quote(argument)} " for argument in app_server_config_args
+            f"-c {shlex.quote(argument)} " for argument in config_args
         )
         reconcile_command = (
             f"if [ -s {shlex.quote(pid_file)} ]; then "
             f"read -r efferva_pid efferva_sha <{shlex.quote(pid_file)}; "
             f'if kill -0 "$efferva_pid" 2>/dev/null && '
-            f'[ "$efferva_sha" = {shlex.quote(app_server_launch_sha256)} ]; then '
+            f'[ "$efferva_sha" = {shlex.quote(launch_sha256)} ]; then '
             "exit 0; fi; "
             f'kill "$efferva_pid" 2>/dev/null || true; '
             f"rm -f {shlex.quote(pid_file)}; fi"
@@ -236,7 +288,7 @@ class CodexAppServerManager:
             f"--ws-auth capability-token "
             f"--ws-token-file {shlex.quote(websocket_token_file)} "
             f"</dev/null >>{shlex.quote(log_file)} 2>&1 & "
-            f'echo "$! {app_server_launch_sha256}" >{shlex.quote(pid_file)}'
+            f'echo "$! {launch_sha256}" >{shlex.quote(pid_file)}'
         )
         environment = {
             "CODEX_HOME": codex_home,

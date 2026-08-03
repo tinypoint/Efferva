@@ -9,16 +9,24 @@ export function useCodexConnection(sessionId: string) {
     return {
       client,
       events: new CodexEvents(client),
+      closeTimer: undefined as ReturnType<typeof setTimeout> | undefined,
     };
   }, [sessionId]);
 
   useEffect(() => {
+    if (connection.closeTimer !== undefined) {
+      clearTimeout(connection.closeTimer);
+      connection.closeTimer = undefined;
+    }
     connection.events.open();
     return () => {
-      connection.events.close();
-      connection.client.close();
+      connection.closeTimer = setTimeout(() => {
+        connection.events.close();
+        connection.client.close();
+        connection.closeTimer = undefined;
+      });
     };
   }, [connection]);
 
-  return connection;
+  return { client: connection.client, events: connection.events };
 }
