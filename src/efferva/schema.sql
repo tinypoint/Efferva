@@ -10,9 +10,6 @@ CREATE TABLE IF NOT EXISTS app_sessions (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-ALTER TABLE app_sessions DROP COLUMN IF EXISTS codex_version;
-ALTER TABLE app_sessions DROP COLUMN IF EXISTS codex_runtime_sha256;
-
 CREATE INDEX IF NOT EXISTS app_sessions_owner_updated_idx
     ON app_sessions(
         tenant_id,
