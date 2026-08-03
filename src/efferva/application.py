@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from efferva.api import create_api_router
 from efferva.codex_appserver import CodexAppServerManager
 from efferva.codex_release import prepare_official_codex
-from efferva.codex_transport import CodexTransport
 from efferva.config import Settings, get_settings
 from efferva.db import Database
 from efferva.identity import (
@@ -28,14 +27,14 @@ from efferva.sandbox.service import create_session_sandbox_service
 @dataclass(slots=True)
 class _RuntimeResources:
     repository: SessionRepository | None = None
-    codex: CodexTransport | None = None
+    codex: CodexAppServerManager | None = None
 
     def require_repository(self) -> SessionRepository:
         if self.repository is None:
             raise RuntimeError("Efferva application has not started")
         return self.repository
 
-    def require_codex(self) -> CodexTransport:
+    def require_codex(self) -> CodexAppServerManager:
         if self.codex is None:
             raise RuntimeError("Efferva application has not started")
         return self.codex
@@ -89,12 +88,10 @@ class Efferva:
                     codex_runtime_sha256=codex_release.binary_sha256,
                 )
                 resources.repository = repository
-                resources.codex = CodexTransport(
-                    CodexAppServerManager(
-                        codex_release.binary,
-                        settings,
-                        sandboxes,
-                    )
+                resources.codex = CodexAppServerManager(
+                    codex_release.binary,
+                    settings,
+                    sandboxes,
                 )
                 yield
             finally:

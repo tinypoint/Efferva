@@ -6,11 +6,14 @@ import os
 import posixpath
 import secrets
 import shlex
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+
+from websockets.asyncio.client import ClientConnection, connect as connect_websocket
 
 from efferva.config import Settings
 from efferva.sandbox.protocol import SandboxEnvironment
@@ -34,7 +37,39 @@ class CodexAppServerManager:
         self._sessions: dict[UUID, SandboxEnvironment] = {}
         self._connection_targets: dict[str, tuple[str, dict[str, str]]] = {}
 
-    async def connection_target(
+    @asynccontextmanager
+    async def connect(
+        self,
+        session: Mapping[str, Any],
+    ) -> AsyncIterator[ClientConnection]:
+        url, headers = await self._connection_target(session)
+        last_error: Exception | None = None
+        for attempt in range(8):
+            try:
+                websocket = await connect_websocket(
+                    url,
+                    additional_headers=headers,
+                    open_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=128 * 1024 * 1024,
+                )
+                break
+            except Exception as error:
+                last_error = error
+                if attempt == 7:
+                    raise RuntimeError(
+                        f"Codex app-server is not reachable at {url}: {error}"
+                    ) from error
+                await asyncio.sleep(0.1 * (2**attempt))
+        else:
+            raise RuntimeError(str(last_error))
+        try:
+            yield websocket
+        finally:
+            await websocket.close()
+
+    async def _connection_target(
         self,
         session: Mapping[str, Any],
     ) -> tuple[str, dict[str, str]]:

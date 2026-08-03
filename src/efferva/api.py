@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.exceptions import ConnectionClosed
 
-from efferva.codex_transport import CodexTransport
+from efferva.codex_appserver import CodexAppServerManager
 from efferva.identity import (
     ForbiddenError,
     IdentityResolver,
@@ -41,7 +41,7 @@ def create_api_router(
     *,
     identity: IdentityResolver,
     repository: Callable[[], SessionRepository],
-    codex: Callable[[], CodexTransport],
+    codex: Callable[[], CodexAppServerManager],
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
