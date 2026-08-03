@@ -24,6 +24,7 @@ export type CodexRunConfig = {
   workspace?: string | null;
   skills: SkillMetadata[];
   collaborationMode: "default" | "plan";
+  setGoalFromPrompt: boolean;
 };
 
 type ResumeSource = {
@@ -431,6 +432,16 @@ export class CodexAgent extends AbstractAgent {
           threadId,
           excludeTurns: true,
         });
+      }
+
+      if (config.setGoalFromPrompt) {
+        await this.client.request("thread/goal/set", {
+          threadId,
+          objective: prompt,
+          status: "active",
+        });
+        subscriber.next(event({ type: "RUN_FINISHED", runId, threadId }));
+        return;
       }
 
       await this.waitForTurn(

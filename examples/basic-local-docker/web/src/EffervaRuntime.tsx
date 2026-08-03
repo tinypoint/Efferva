@@ -9,10 +9,12 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type KeyboardEvent,
   type ReactNode,
   type UIEvent,
 } from "react";
 import { type Message } from "@ag-ui/client";
+import { Plus } from "lucide-react";
 import {
   CopilotChatConfigurationProvider,
   CopilotChatAssistantMessage,
@@ -27,7 +29,6 @@ import {
   useCopilotKit,
   useDefaultRenderTool,
   type CopilotChatInputProps,
-  type ToolsMenuItem,
 } from "@copilotkit/react-core/v2";
 import { CodexRpcError, type CodexClient } from "@efferva/codex-client";
 
@@ -557,6 +558,9 @@ type RuntimeContextValue = {
   onReasoningEffortChange: (
     effort: string,
   ) => void;
+  setCollaborationMode: (mode: CollaborationMode) => Promise<boolean>;
+  goalMode: boolean;
+  setGoalMode: (enabled: boolean) => Promise<boolean>;
   runControl: (control: CodexControl) => Promise<CodexControlResult | null>;
 };
 
@@ -618,6 +622,9 @@ export function EffervaRuntime({
     desiredThreadId === "new" ? "new" : null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [goalState, setGoalState] = useState<"off" | "pending" | "active">(
+    "off",
+  );
   const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyRevision, setHistoryRevision] = useState(0);
@@ -631,6 +638,7 @@ export function EffervaRuntime({
     workspace,
     skills,
     collaborationMode,
+    setGoalFromPrompt: goalState === "pending",
   });
   const onThreadCreatedRef = useRef(onThreadCreated);
   const onThreadNameUpdatedRef = useRef(onThreadNameUpdated);
@@ -646,6 +654,7 @@ export function EffervaRuntime({
     workspace,
     skills,
     collaborationMode,
+    setGoalFromPrompt: goalState === "pending",
   };
   onThreadCreatedRef.current = onThreadCreated;
   onThreadNameUpdatedRef.current = onThreadNameUpdated;
@@ -685,6 +694,13 @@ export function EffervaRuntime({
               ? "plan"
               : "default",
         });
+      }
+      if (notifiedThreadId === desiredThreadIdRef.current) {
+        if (notification.method === "thread/goal/updated") {
+          setGoalState("active");
+        } else if (notification.method === "thread/goal/cleared") {
+          setGoalState("off");
+        }
       }
       if (
         notification.method !== "turn/started" ||
@@ -780,9 +796,121 @@ export function EffervaRuntime({
     }
   }, [client, historyCursor]);
 
+  const setCollaborationMode = useCallback(
+    async (target: CollaborationMode): Promise<boolean> => {
+      const currentThreadId = desiredThreadIdRef.current;
+      if (currentThreadId === "new") {
+        onCollaborationModeChange(currentThreadId, target);
+        setError(null);
+        return true;
+      }
+      if (agent.isRunning) {
+        setError("Wait for the active turn to finish before changing thread state.");
+        return false;
+      }
+      try {
+        const response = await agent.client.request<{
+          data: Array<{
+            name: string;
+            mode?: string | null;
+            model?: string | null;
+            reasoning_effort?: string | null;
+          }>;
+        }>("collaborationMode/list", {});
+        const preset = response.data.find(
+          (item) =>
+            item.name.toLocaleLowerCase() === target ||
+            item.mode?.toLocaleLowerCase() === target,
+        );
+        if (!preset) throw new Error(`Codex does not provide ${target} mode`);
+        const selectedModel =
+          settingsRef.current.model || preset.model || undefined;
+        if (!selectedModel) throw new Error(`${target} mode has no model`);
+        await agent.client.request("thread/settings/update", {
+          threadId: currentThreadId,
+          collaborationMode: {
+            mode: target,
+            settings: {
+              model: selectedModel,
+              reasoning_effort:
+                settingsRef.current.reasoningEffort ||
+                preset.reasoning_effort ||
+                null,
+              developer_instructions: null,
+            },
+          },
+        });
+        onCollaborationModeChange(currentThreadId, target);
+        setError(null);
+        return true;
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Failed to change mode",
+        );
+        return false;
+      }
+    },
+    [agent, onCollaborationModeChange],
+  );
+
+  const setGoalMode = useCallback(
+    async (enabled: boolean): Promise<boolean> => {
+      if (enabled) {
+        if (goalState !== "off") return true;
+        if (
+          settingsRef.current.collaborationMode === "plan" &&
+          !(await setCollaborationMode("default"))
+        ) {
+          return false;
+        }
+        setGoalState("pending");
+        setError(null);
+        return true;
+      }
+
+      if (goalState !== "active") {
+        setGoalState("off");
+        setError(null);
+        return true;
+      }
+      const currentThreadId = desiredThreadIdRef.current;
+      if (currentThreadId === "new") {
+        setGoalState("off");
+        return true;
+      }
+      try {
+        await agent.client.request("thread/goal/clear", {
+          threadId: currentThreadId,
+        });
+        setGoalState("off");
+        setError(null);
+        return true;
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Failed to clear goal",
+        );
+        return false;
+      }
+    },
+    [agent, goalState, setCollaborationMode],
+  );
+
   const runControl = useCallback(
     async (control: CodexControl): Promise<CodexControlResult | null> => {
       const currentThreadId = desiredThreadIdRef.current;
+      if (control.action === "plan.toggle") {
+        const target =
+          settingsRef.current.collaborationMode === "plan"
+            ? "default"
+            : "plan";
+        if (!(await setCollaborationMode(target))) return null;
+        return {
+          action: control.action,
+          message:
+            target === "plan" ? "Plan mode enabled." : "Plan mode disabled.",
+          collaboration_mode: target,
+        };
+      }
       if (currentThreadId === "new") {
         setError("Send a message before using thread controls.");
         return null;
@@ -793,51 +921,7 @@ export function EffervaRuntime({
       }
       try {
         let result: CodexControlResult;
-        if (control.action === "plan.toggle") {
-          const target =
-            settingsRef.current.collaborationMode === "plan"
-              ? "default"
-              : "plan";
-          const response = await agent.client.request<{
-            data: Array<{
-              name: string;
-              mode?: string | null;
-              model?: string | null;
-              reasoning_effort?: string | null;
-            }>;
-          }>("collaborationMode/list", {});
-          const preset = response.data.find(
-            (item) =>
-              item.name.toLocaleLowerCase() === target ||
-              item.mode?.toLocaleLowerCase() === target,
-          );
-          if (!preset) throw new Error(`Codex does not provide ${target} mode`);
-          const selectedModel =
-            settingsRef.current.model || preset.model || undefined;
-          if (!selectedModel) throw new Error(`${target} mode has no model`);
-          await agent.client.request("thread/settings/update", {
-            threadId: currentThreadId,
-            collaborationMode: {
-              mode: target,
-              settings: {
-                model: selectedModel,
-                reasoning_effort:
-                  settingsRef.current.reasoningEffort ||
-                  preset.reasoning_effort ||
-                  null,
-                developer_instructions: null,
-              },
-            },
-          });
-          result = {
-            action: control.action,
-            message:
-              target === "plan"
-                ? "Plan mode enabled."
-                : "Plan mode disabled.",
-            collaboration_mode: target,
-          };
-        } else if (control.action === "goal.get") {
+        if (control.action === "goal.get") {
           const response = await agent.client.request<{
             goal: { objective: string; status: string } | null;
           }>("thread/goal/get", { threadId: currentThreadId });
@@ -874,12 +958,6 @@ export function EffervaRuntime({
           };
         }
         setError(null);
-        if (result.collaboration_mode) {
-          onCollaborationModeChange(
-            currentThreadId,
-            result.collaboration_mode,
-          );
-        }
         return result;
       } catch (cause) {
         setError(
@@ -888,7 +966,7 @@ export function EffervaRuntime({
         return null;
       }
     },
-    [agent, onCollaborationModeChange],
+    [agent, setCollaborationMode],
   );
 
   useEffect(() => {
@@ -1058,6 +1136,7 @@ export function EffervaRuntime({
     setHistoryMessages([]);
     setHistoryCursor(null);
     setHistoryRevision((current) => current + 1);
+    setGoalState("off");
     const isCurrentNavigation = () =>
       navigationEpochRef.current === navigationEpoch &&
       !controller.signal.aborted;
@@ -1200,10 +1279,14 @@ export function EffervaRuntime({
       collaborationMode,
       onModelChange,
       onReasoningEffortChange,
+      setCollaborationMode,
+      goalMode: goalState !== "off",
+      setGoalMode,
       runControl,
     }),
     [
       error,
+      goalState,
       historyCursor,
       historyMessages,
       historyRevision,
@@ -1216,6 +1299,8 @@ export function EffervaRuntime({
       onReasoningEffortChange,
       reasoningEffort,
       runControl,
+      setCollaborationMode,
+      setGoalMode,
       searchFiles,
       sessionId,
       skills,
@@ -1249,9 +1334,33 @@ type ComposerAddMenuButtonProps = ComponentProps<
   typeof CopilotChatInput.AddMenuButton
 >;
 
-function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
+type TriggerOption = {
+  value: string;
+  label: string;
+  description: string;
+};
+
+type ComposerSuggestionsContextValue = {
+  active: boolean;
+  triggerChar: string;
+  options: TriggerOption[];
+  selectedIndex: number;
+  select: (value: string) => void;
+  setSelectedIndex: (index: number) => void;
+  handleKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
+  openFromButton: () => void;
+};
+
+const ComposerSuggestionsContext =
+  createContext<ComposerSuggestionsContextValue | null>(null);
+
+function ComposerAddMenuButton({
+  className,
+  disabled,
+}: ComposerAddMenuButtonProps) {
   const runtime = useContext(RuntimeContext);
-  if (!runtime) return <CopilotChatInput.AddMenuButton {...props} />;
+  const suggestions = useContext(ComposerSuggestionsContext);
+  if (!runtime) return null;
   const selectedModel = runtime.models.find(
     (item) => item.model === runtime.model,
   );
@@ -1261,7 +1370,18 @@ function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
       className="flex min-w-0 items-center gap-1"
       onClick={(event) => event.stopPropagation()}
     >
-      <CopilotChatInput.AddMenuButton {...props} />
+      <button
+        type="button"
+        className={`grid size-8 shrink-0 place-items-center rounded-full text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-50 ${className ?? ""}`}
+        disabled={disabled}
+        aria-label="打开选择面板"
+        onClick={(event) => {
+          event.preventDefault();
+          suggestions?.openFromButton();
+        }}
+      >
+        <Plus className="size-5" />
+      </button>
       <select
         className="h-8 max-w-40 truncate rounded-md border-0 bg-transparent px-1.5 text-xs font-medium outline-none hover:bg-muted"
         value={runtime.model}
@@ -1291,8 +1411,29 @@ function ComposerAddMenuButton(props: ComposerAddMenuButtonProps) {
         ))}
       </select>
       {runtime.collaborationMode === "plan" && (
-        <span className="h-8 rounded-md bg-muted px-2 text-xs font-medium leading-8">
-          Plan
+        <span className="flex h-8 items-center gap-1 rounded-md bg-muted pl-2 text-xs font-medium">
+          计划模式
+          <button
+            type="button"
+            className="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            aria-label="退出计划模式"
+            onClick={() => void runtime.setCollaborationMode("default")}
+          >
+            ×
+          </button>
+        </span>
+      )}
+      {runtime.goalMode && (
+        <span className="flex h-8 items-center gap-1 rounded-md bg-muted pl-2 text-xs font-medium">
+          目标模式
+          <button
+            type="button"
+            className="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            aria-label="退出目标模式"
+            onClick={() => void runtime.setGoalMode(false)}
+          >
+            ×
+          </button>
         </span>
       )}
     </div>
@@ -1306,16 +1447,22 @@ const ComposerTextArea = forwardRef<
   {
     onCompositionStart: _onCompositionStart,
     onCompositionEnd: _onCompositionEnd,
+    onKeyDown,
     className: _className,
     ...props
   },
   ref,
 ) {
+  const suggestions = useContext(ComposerSuggestionsContext);
   return (
     <CopilotChatInput.TextArea
       {...props}
       ref={ref}
       className="cpk:w-full cpk:px-5 cpk:py-3"
+      onKeyDown={(event) => {
+        if (suggestions?.handleKeyDown(event)) return;
+        onKeyDown?.(event);
+      }}
     />
   );
 });
@@ -1345,6 +1492,7 @@ function ComposerLayout({
   className,
   style,
 }: ComposerLayoutProps) {
+  const suggestions = useContext(ComposerSuggestionsContext);
   return (
     <div
       data-copilotkit
@@ -1369,6 +1517,41 @@ function ComposerLayout({
         ...style,
       }}
     >
+      {suggestions?.active && suggestions.options.length > 0 && (
+        <div
+          data-efferva-trigger-menu
+          className="cpk:pointer-events-auto cpk:absolute cpk:right-0 cpk:bottom-full cpk:left-0 cpk:pb-2"
+        >
+          <div className="cpk:mx-auto cpk:max-w-3xl cpk:px-4 cpk:@3xl:px-0 cpk:[div[data-sidebar-chat]_&]:px-8 cpk:[div[data-popup-chat]_&]:px-4">
+            <div
+              className="cpk:max-h-72 cpk:overflow-y-auto cpk:rounded-xl cpk:border cpk:bg-background cpk:p-1 cpk:shadow-lg"
+              role="listbox"
+            >
+              {suggestions.options.map((option, index) => (
+                <button
+                  key={`${suggestions.triggerChar}:${option.value}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === suggestions.selectedIndex}
+                  className={`cpk:flex cpk:w-full cpk:items-start cpk:gap-3 cpk:rounded-lg cpk:px-3 cpk:py-2 cpk:text-left ${
+                    index === suggestions.selectedIndex ? "cpk:bg-muted" : ""
+                  }`}
+                  onMouseEnter={() => suggestions.setSelectedIndex(index)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => suggestions.select(option.value)}
+                >
+                  <span className="cpk:text-sm cpk:font-medium">
+                    {option.label}
+                  </span>
+                  <span className="cpk:min-w-0 cpk:flex-1 cpk:truncate cpk:text-xs cpk:text-muted-foreground">
+                    {option.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="cpk:max-w-3xl cpk:mx-auto cpk:py-0 cpk:px-4 cpk:@3xl:px-0 cpk:[div[data-sidebar-chat]_&]:px-8 cpk:[div[data-popup-chat]_&]:px-4 cpk:pointer-events-auto">
         <div
           data-testid="copilot-chat-input"
@@ -1432,6 +1615,16 @@ export function EffervaChat() {
   const [fileOptions, setFileOptions] = useState<
     Array<{ value: string; label: string; description: string }>
   >([]);
+  const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
+  const [buttonTrigger, setButtonTrigger] = useState<{
+    inputPrefix: string;
+  } | null>(null);
+  const [dismissedTrigger, setDismissedTrigger] = useState<{
+    char: string;
+    start: number;
+    prefix: string;
+  } | null>(null);
+  const dismissedTriggerRef = useRef(dismissedTrigger);
   const dispatchingRef = useRef(false);
   const historyAnchorRef = useRef<{
     element: HTMLElement;
@@ -1570,18 +1763,75 @@ export function EffervaChat() {
     });
   }, [agent.isRunning, queued, send]);
 
-  const appendDirective = useCallback((directive: string) => {
-    setInput((current) => `${current}${current && !current.endsWith(" ") ? " " : ""}${directive} `);
-  }, []);
-  const trigger = useMemo(() => {
-    const match = input.match(/(^|\s)([$/@])([^\s]*)$/u);
+  const textTrigger = useMemo(() => {
+    const match = input.match(/(^| )([$\/@])([^\s]*)$/u);
     if (!match) return null;
+    const tokenLength = match[2]!.length + match[3]!.length;
     return {
+      source: "text" as const,
       char: match[2]!,
       query: match[3]!,
-      tokenLength: match[2]!.length + match[3]!.length,
+      tokenLength,
+      start: input.length - tokenLength,
     };
   }, [input]);
+  const buttonQuery = buttonTrigger
+    ? input.slice(buttonTrigger.inputPrefix.length)
+    : "";
+  const buttonTriggerIsValid = Boolean(
+    buttonTrigger &&
+      input.startsWith(buttonTrigger.inputPrefix) &&
+      !/\s/u.test(buttonQuery),
+  );
+  const rawTrigger =
+    buttonTriggerIsValid && buttonTrigger
+      ? {
+          source: "button" as const,
+          char: "@",
+          query: buttonQuery,
+          tokenLength: buttonQuery.length,
+          start: buttonTrigger.inputPrefix.length,
+        }
+      : textTrigger;
+  const trigger =
+    rawTrigger &&
+    !(
+      dismissedTrigger?.char === rawTrigger.char &&
+      dismissedTrigger.start === rawTrigger.start &&
+      dismissedTrigger.prefix === input.slice(0, rawTrigger.start)
+    )
+      ? rawTrigger
+      : null;
+
+  const handleInputChange = useCallback((nextInput: string) => {
+    const dismissed = dismissedTriggerRef.current;
+    if (
+      dismissed &&
+      (nextInput[dismissed.start] !== dismissed.char ||
+        nextInput.slice(0, dismissed.start) !== dismissed.prefix)
+    ) {
+      dismissedTriggerRef.current = null;
+      setDismissedTrigger(null);
+    }
+    setInput(nextInput);
+  }, []);
+
+  useEffect(() => {
+    if (buttonTrigger && !buttonTriggerIsValid) {
+      setButtonTrigger(null);
+    }
+  }, [buttonTrigger, buttonTriggerIsValid]);
+
+  useEffect(() => {
+    if (
+      dismissedTrigger &&
+      (input[dismissedTrigger.start] !== dismissedTrigger.char ||
+        input.slice(0, dismissedTrigger.start) !== dismissedTrigger.prefix)
+    ) {
+      dismissedTriggerRef.current = null;
+      setDismissedTrigger(null);
+    }
+  }, [dismissedTrigger, input]);
 
   useEffect(() => {
     if (trigger?.char !== "@") {
@@ -1634,44 +1884,185 @@ export function EffervaChat() {
         { value: "goal", label: "/goal", description: "Manage the thread goal" },
       ].filter((item) => item.value.includes(query));
     }
-    return fileOptions;
+    return [
+      ...(query
+        ? []
+        : [
+            {
+              value: "__plan_mode__",
+              label: "计划模式",
+              description: "先制定计划，再开始执行",
+            },
+            {
+              value: "__goal_mode__",
+              label: "目标模式",
+              description: "设置持续执行的目标",
+            },
+          ]),
+      ...fileOptions,
+    ];
   }, [fileOptions, runtime.skills, trigger]);
 
   const selectTriggerOption = useCallback(
     (value: string) => {
       if (!trigger) return;
+      if (
+        trigger.char === "@" &&
+        (value === "__plan_mode__" || value === "__goal_mode__")
+      ) {
+        if (trigger.source === "text") {
+          setInput((current) =>
+            current.slice(0, current.length - trigger.tokenLength),
+          );
+        } else {
+          setInput((current) => current.slice(0, trigger.start));
+        }
+        setButtonTrigger(null);
+        if (value === "__goal_mode__") {
+          void runtime.setGoalMode(true);
+        } else {
+          void runtime
+            .setGoalMode(false)
+            .then((cleared) =>
+              cleared ? runtime.setCollaborationMode("plan") : false,
+            );
+        }
+        return;
+      }
       setInput(
-        (current) =>
-          `${current.slice(0, current.length - trigger.tokenLength)}${trigger.char}${value} `,
+        (current) => {
+          const prefix = current.slice(
+            0,
+            current.length - trigger.tokenLength,
+          );
+          const separator =
+            trigger.source === "button" && prefix && !prefix.endsWith(" ")
+              ? " "
+              : "";
+          return `${prefix}${separator}${trigger.char}${value} `;
+        },
       );
+      setButtonTrigger(null);
     },
-    [trigger],
+    [runtime, trigger],
   );
-  const toolsMenu = useMemo<(ToolsMenuItem | "-")[]>(
-    () => [
-      {
-        label: "Commands",
-        items: [
-          { label: "/plan", action: () => appendDirective("/plan") },
-          { label: "/goal", action: () => appendDirective("/goal") },
-        ],
-      },
-      ...(runtime.skills.length
-        ? [
-            "-" as const,
-            {
-              label: "Skills",
-              items: runtime.skills.map((skill) => ({
-                label: `$${skill.name}`,
-                action: () => appendDirective(`$${skill.name}`),
-              })),
-            },
-          ]
-        : []),
+  const dismissTrigger = useCallback(() => {
+    if (!trigger) return;
+    if (trigger.source === "button") {
+      setButtonTrigger(null);
+      return;
+    }
+    const dismissed = {
+      char: trigger.char,
+      start: trigger.start,
+      prefix: input.slice(0, trigger.start),
+    };
+    dismissedTriggerRef.current = dismissed;
+    setDismissedTrigger(dismissed);
+  }, [input, trigger]);
+
+  const openTriggerFromButton = useCallback(() => {
+    dismissedTriggerRef.current = null;
+    setDismissedTrigger(null);
+    setButtonTrigger({ inputPrefix: input });
+    setSelectedTriggerIndex(0);
+    window.requestAnimationFrame(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>(
+        '[data-testid="copilot-chat-input"] textarea',
+      );
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+  }, [input]);
+
+  useEffect(() => {
+    setSelectedTriggerIndex(0);
+  }, [trigger?.char, trigger?.query]);
+
+  useEffect(() => {
+    setSelectedTriggerIndex((current) =>
+      Math.min(current, Math.max(0, triggerOptions.length - 1)),
+    );
+  }, [triggerOptions.length]);
+
+  const handleTriggerKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>): boolean => {
+      if (!trigger || event.nativeEvent.isComposing) return false;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismissTrigger();
+        return true;
+      }
+      if (triggerOptions.length === 0) return false;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSelectedTriggerIndex(
+          (current) => (current + 1) % triggerOptions.length,
+        );
+        return true;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSelectedTriggerIndex(
+          (current) =>
+            (current - 1 + triggerOptions.length) % triggerOptions.length,
+        );
+        return true;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const selected = triggerOptions[selectedTriggerIndex];
+        if (selected) selectTriggerOption(selected.value);
+        return true;
+      }
+      return false;
+    }, [
+      dismissTrigger,
+      selectTriggerOption,
+      selectedTriggerIndex,
+      trigger,
+      triggerOptions,
     ],
-    [appendDirective, runtime.skills],
   );
 
+  useEffect(() => {
+    if (!trigger) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        (target.closest("[data-efferva-trigger-menu]") ||
+          target.closest('[data-testid="copilot-chat-input"]'))
+      ) {
+        return;
+      }
+      dismissTrigger();
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [dismissTrigger, trigger]);
+
+  const composerSuggestions = useMemo<ComposerSuggestionsContextValue | null>(
+    () => ({
+      active: Boolean(trigger),
+      triggerChar: trigger?.char ?? "@",
+      options: triggerOptions,
+      selectedIndex: selectedTriggerIndex,
+      select: selectTriggerOption,
+      setSelectedIndex: setSelectedTriggerIndex,
+      handleKeyDown: handleTriggerKeyDown,
+      openFromButton: openTriggerFromButton,
+    }),
+    [
+      handleTriggerKeyDown,
+      openTriggerFromButton,
+      selectTriggerOption,
+      selectedTriggerIndex,
+      trigger,
+      triggerOptions,
+    ],
+  );
   const stop = useCallback(() => {
     void (agent as CodexAgent).interrupt();
   }, [agent]);
@@ -1685,51 +2076,35 @@ export function EffervaChat() {
 
   return (
     <div className="relative h-full min-h-0">
-      <CopilotChatView
-        className="h-full"
-        messages={visibleMessages}
-        autoScroll="pin-to-bottom"
-        isRunning={agent.isRunning}
-        inputValue={input}
-        onInputChange={setInput}
-        onSubmitMessage={(value) => void send(value)}
-        onStop={stop}
-        scrollView={scrollView}
-        input={{
-          toolsMenu,
-          addMenuButton: ComposerAddMenuButton,
-          textArea: ComposerTextArea,
-          children: ComposerLayout,
-        }}
-        messageView={{
-          assistantMessage:
-            EffervaAssistantMessage as typeof CopilotChatAssistantMessage,
-          reasoningMessage:
-            EffervaReasoningMessage as typeof CopilotChatReasoningMessage,
-          children: EffervaMessageList,
-        }}
-        welcomeScreen={!runtime.loading && visibleMessages.length === 0}
-      />
+      <ComposerSuggestionsContext.Provider value={composerSuggestions}>
+        <CopilotChatView
+          className="h-full"
+          messages={visibleMessages}
+          autoScroll="pin-to-bottom"
+          isRunning={agent.isRunning}
+          inputValue={input}
+          onInputChange={handleInputChange}
+          onSubmitMessage={(value) => void send(value)}
+          onStop={stop}
+          scrollView={scrollView}
+          input={{
+            addMenuButton: ComposerAddMenuButton,
+            textArea: ComposerTextArea,
+            children: ComposerLayout,
+          }}
+          messageView={{
+            assistantMessage:
+              EffervaAssistantMessage as typeof CopilotChatAssistantMessage,
+            reasoningMessage:
+              EffervaReasoningMessage as typeof CopilotChatReasoningMessage,
+            children: EffervaMessageList,
+          }}
+          welcomeScreen={!runtime.loading && visibleMessages.length === 0}
+        />
+      </ComposerSuggestionsContext.Provider>
       {queued.length > 0 && (
         <div className="absolute right-6 bottom-24 left-6 mx-auto max-w-2xl rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-sm">
           Queued: {queued.join(" · ")}
-        </div>
-      )}
-      {trigger && triggerOptions.length > 0 && (
-        <div className="absolute right-6 bottom-24 left-6 z-20 mx-auto max-h-72 max-w-2xl overflow-y-auto rounded-xl border bg-background p-1 shadow-lg">
-          {triggerOptions.map((option) => (
-            <button
-              key={`${trigger.char}:${option.value}`}
-              type="button"
-              className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-muted"
-              onClick={() => selectTriggerOption(option.value)}
-            >
-              <span className="text-sm font-medium">{option.label}</span>
-              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                {option.description}
-              </span>
-            </button>
-          ))}
         </div>
       )}
       {agent.isRunning && input.trim() && (

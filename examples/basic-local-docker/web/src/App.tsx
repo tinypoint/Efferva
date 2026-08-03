@@ -246,7 +246,7 @@ export function App() {
       const settings: Required<ExecutionSettings> = {
         model,
         reasoning_effort: reasoningEffort,
-        collaboration_mode: "default",
+        collaboration_mode: collaborationMode,
       };
       setExecutionSettingsByThread((current) => ({
         ...current,
@@ -254,7 +254,14 @@ export function App() {
       }));
       setDraftSettings(null);
     },
-    [model, navigate, queryClient, reasoningEffort, sessionId],
+    [
+      collaborationMode,
+      model,
+      navigate,
+      queryClient,
+      reasoningEffort,
+      sessionId,
+    ],
   );
 
   const handleExecutionSettingsLoaded = useCallback(
@@ -272,6 +279,14 @@ export function App() {
 
   const handleCollaborationModeChange = useCallback(
     (updatedThreadId: string, nextMode: CollaborationMode) => {
+      if (updatedThreadId === "new") {
+        setDraftSettings((current) => ({
+          model: current?.model ?? model,
+          reasoning_effort: current?.reasoning_effort ?? reasoningEffort,
+          collaboration_mode: nextMode,
+        }));
+        return;
+      }
       setExecutionSettingsByThread((current) => ({
         ...current,
         [updatedThreadId]: {
