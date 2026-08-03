@@ -5,9 +5,10 @@ import { useNavigate } from "react-router-dom";
 
 import { DeleteThreadDialog } from "./components/DeleteThreadDialog";
 import { ThreadSidebar } from "./components/ThreadSidebar";
-import { EffervaChat, EffervaRuntime } from "./EffervaRuntime";
+import { EffervaChat } from "./chat/EffervaChat";
 import { useCodexConnection } from "./hooks/useCodexConnection";
 import { useExecutionSettings } from "./hooks/useExecutionSettings";
+import { EffervaRuntime } from "./runtime/EffervaRuntime";
 import type { ModelOption, SkillListEntry, ThreadSummary } from "./types";
 
 const THREAD_LIST_CHANGING_METHODS = new Set([
@@ -52,8 +53,7 @@ export function SessionWorkspace({
   const [threadToDelete, setThreadToDelete] = useState<ThreadSummary | null>(
     null,
   );
-  const { client: codex, events: codexEvents } =
-    useCodexConnection(sessionId);
+  const { client: codex, events: codexEvents } = useCodexConnection(sessionId);
   const threads = useQuery({
     queryKey: ["threads", sessionId],
     queryFn: async () => {
@@ -176,8 +176,7 @@ export function SessionWorkspace({
     onSuccess: (_, deletedThreadId) => {
       queryClient.setQueryData<ThreadSummary[]>(
         ["threads", sessionId],
-        (current = []) =>
-          current.filter((item) => item.id !== deletedThreadId),
+        (current = []) => current.filter((item) => item.id !== deletedThreadId),
       );
       if (threadId === deletedThreadId) {
         navigate(`/sessions/${sessionId}`);
@@ -201,12 +200,7 @@ export function SessionWorkspace({
     [skills.data],
   );
 
-  if (
-    threads.isLoading ||
-    !threads.data ||
-    models.isLoading ||
-    !models.data
-  ) {
+  if (threads.isLoading || !threads.data || models.isLoading || !models.data) {
     return <OpeningWorkspace />;
   }
 

@@ -15,14 +15,13 @@ export function useExecutionSettings({
   threadId,
   models,
 }: UseExecutionSettingsOptions) {
-  const [draftSettings, setDraftSettings] =
-    useState<ExecutionSettings | null>(null);
+  const [draftSettings, setDraftSettings] = useState<ExecutionSettings | null>(
+    null,
+  );
   const [settingsByThread, setSettingsByThread] = useState<
     Record<string, ExecutionSettings>
   >({});
-  const activeSettings = threadId
-    ? settingsByThread[threadId]
-    : draftSettings;
+  const activeSettings = threadId ? settingsByThread[threadId] : draftSettings;
   const selectedModel =
     models?.find((item) => item.model === activeSettings?.model) ??
     models?.find((item) => item.isDefault) ??
