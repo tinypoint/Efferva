@@ -9,12 +9,12 @@ from fastapi.staticfiles import StaticFiles
 from efferva import Efferva, Principal
 from efferva.config import get_settings
 from efferva.db import Database
+from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
 from scheduled_investment_research.reports import create_report_runs_router
 from scheduled_investment_research.scheduling import (
     ReportScheduler,
     create_report_tasks_router,
 )
-from scheduled_investment_research.sandbox import create_sandbox_provider
 
 
 async def resolve_local_principal(_: Request) -> Principal:
@@ -66,7 +66,7 @@ app.mount(
 )
 
 
-sandbox_provider = create_sandbox_provider()
+sandbox_provider = OpenSandboxProvider(get_settings())
 app.include_router(create_report_runs_router())
 app.include_router(create_report_tasks_router())
 

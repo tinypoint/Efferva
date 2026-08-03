@@ -17,19 +17,19 @@ Browser
   │
   ▼
 multi-session-codex app × N
-  ├── Efferva App / Run Worker
-  ├── PostgreSQL
+  ├── Efferva App / Run Worker ─── shared PostgreSQL
   └── OpenSandbox Python SDK
           │
           ▼
       OpenSandbox Server
-          │ Docker runtime
+          │ Docker or Kubernetes runtime
           ▼
       one Codex app-server + persistent volume per Session
 ```
 
-OpenSandbox Server 通过挂载的 Docker socket 创建沙箱；Efferva 不直接操作 Docker
-daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载到 `/session`：
+Compose 中的 OpenSandbox Server 通过挂载 Docker socket 创建沙箱，Kind 中则通过
+Kubernetes Controller 创建；Efferva 不直接操作底层 runtime。每个 Session 对应一个
+OpenSandbox sandbox，并把持久卷挂载到 `/session`：
 工作区为 `/session/workspace`，Codex 原生状态为 `/session/codex-home`。
 
 ## 启动
@@ -84,3 +84,5 @@ EFFERVA_OPENSANDBOX_USE_SERVER_PROXY=true
 标准 HTTP/HTTPS 模型端点默认启用 OpenSandbox Credential Proxy，真实 API Key 不进入
 sandbox 环境变量。像本地 `cliproxyapi` 这类非 80/443 端口会自动退回开发凭证环境变量；
 Base URL 和 Key 直接通过启动 `docker compose` 的环境传入即可。
+
+Kind 双 App Pod 部署见 [`kind/README.md`](kind/README.md)。

@@ -58,7 +58,7 @@ services:
         condition: service_healthy
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
-      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
+      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-efferva-scheduled-investment-research-sandbox:local}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"

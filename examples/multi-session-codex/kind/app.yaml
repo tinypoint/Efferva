@@ -103,11 +103,15 @@ spec:
               value: postgresql://efferva:efferva@postgres:5432/efferva
             - name: EFFERVA_SANDBOX_IMAGE
               value: python:3.13-slim-bookworm
+            - name: EFFERVA_SANDBOX_MEMORY_LIMIT
+              value: 2Gi
             - name: EFFERVA_OPENSANDBOX_SERVER_URL
               value: http://opensandbox-server.opensandbox-system.svc.cluster.local
             - name: EFFERVA_OPENSANDBOX_API_KEY
               value: local-dev-key
             - name: EFFERVA_OPENSANDBOX_USE_SERVER_PROXY
+              value: "false"
+            - name: EFFERVA_OPENSANDBOX_CREDENTIAL_PROXY_ENABLED
               value: "false"
             - name: OPENAI_API_KEY
               valueFrom:
