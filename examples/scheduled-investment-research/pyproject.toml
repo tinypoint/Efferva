@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "efferva-semantic-alpha"
+name = "efferva-scheduled-investment-research"
 version = "0.1.0"
-description = "An AI-native investment semantics showcase powered by Efferva."
+description = "A scheduled investment research example powered by Efferva."
 requires-python = ">=3.11"
 dependencies = [
     "croniter>=6,<7",
@@ -16,4 +16,4 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/semantic_alpha"]
+packages = ["src/scheduled_investment_research"]

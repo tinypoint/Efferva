@@ -15,7 +15,7 @@ services:
       - ./web:/web
       - web-node-modules:/web/node_modules
     networks:
-      - semantic-alpha-local
+      - scheduled-investment-research-local
 
 volumes:
   web-node-modules:

@@ -1,7 +1,7 @@
-# Semantic Alpha
+# Scheduled Investment Research
 
-Semantic Alpha 是一个基于 Efferva 的 AI 投资语义示例。服务端沿用本地 Docker
-example 的 FastAPI、Efferva、PostgreSQL、Redis 与 OpenSandbox 运行链路，Web UI
+Scheduled Investment Research 是一个基于 Efferva 的定时投资研究示例。服务端沿用本地
+Docker example 的 FastAPI、Efferva、PostgreSQL、Redis 与 OpenSandbox 运行链路，Web UI
 以投资月历作为研究报告入口。
 
 每个 Agent Session 会自动获得
@@ -36,7 +36,7 @@ Markdown，右侧展示原始 Session、Thread、模型、推理深度、请求�
 ```bash
 uv build --wheel --out-dir dist
 OPENAI_API_KEY=... docker compose \
-  --file examples/SemanticAlpha/compose.yaml \
+  --file examples/scheduled-investment-research/compose.yaml \
   up --build
 ```
 
@@ -46,8 +46,8 @@ OPENAI_API_KEY=... docker compose \
 
 ```bash
 OPENAI_API_KEY=... docker compose \
-  --file examples/SemanticAlpha/compose.yaml \
-  --file examples/SemanticAlpha/compose.dev.yaml \
+  --file examples/scheduled-investment-research/compose.yaml \
+  --file examples/scheduled-investment-research/compose.dev.yaml \
   up --build
 ```
 

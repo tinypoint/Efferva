@@ -1,4 +1,4 @@
-# Semantic Alpha Research Workspace
+# Scheduled Investment Research Workspace
 
 This workspace bundles the AI Berkshire Codex skills from
 https://github.com/xbtlin/ai-berkshire at revision

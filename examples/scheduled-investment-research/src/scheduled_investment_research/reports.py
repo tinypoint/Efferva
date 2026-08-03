@@ -215,7 +215,7 @@ async def execute_report(
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://semantic-alpha",
+            base_url="http://scheduled-investment-research",
             timeout=None,
         ) as client:
             session_response = await client.post(
@@ -394,7 +394,7 @@ async def mark_interrupted_runs_failed(database: Database) -> None:
                 status = 'failed',
                 stage = 'interrupted',
                 finished_at = now(),
-                error = 'Semantic Alpha 服务重启，执行被中断'
+                error = 'Scheduled Investment Research 服务重启，执行被中断'
             WHERE status IN ('queued', 'running')
             """
         )
@@ -492,14 +492,14 @@ async def _mark_run_failed(
 def _database(request: Request) -> Database:
     database = getattr(request.app.state, "report_database", None)
     if not isinstance(database, Database):
-        raise RuntimeError("Semantic Alpha database is not ready")
+        raise RuntimeError("Scheduled Investment Research database is not ready")
     return database
 
 
 def _owner_user_id(request: Request) -> str:
     owner_user_id = getattr(request.app.state, "report_owner_user_id", None)
     if not isinstance(owner_user_id, str) or not owner_user_id:
-        raise RuntimeError("Semantic Alpha report owner is not ready")
+        raise RuntimeError("Scheduled Investment Research report owner is not ready")
     return owner_user_id
 
 
@@ -601,7 +601,7 @@ async def _finalize_missing_report(
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://semantic-alpha",
+        base_url="http://scheduled-investment-research",
         timeout=None,
     ) as client:
         async with client.stream(

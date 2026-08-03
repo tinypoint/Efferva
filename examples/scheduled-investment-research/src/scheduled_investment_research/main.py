@@ -9,18 +9,18 @@ from fastapi.staticfiles import StaticFiles
 from efferva import Efferva, Principal
 from efferva.config import get_settings
 from efferva.db import Database
-from semantic_alpha.reports import create_report_runs_router
-from semantic_alpha.scheduling import (
+from scheduled_investment_research.reports import create_report_runs_router
+from scheduled_investment_research.scheduling import (
     ReportScheduler,
     create_report_tasks_router,
 )
-from semantic_alpha.sandbox import create_sandbox_provider
+from scheduled_investment_research.sandbox import create_sandbox_provider
 
 
 async def resolve_local_principal(_: Request) -> Principal:
     return Principal(
         tenant_id="local",
-        issuer="semantic-alpha",
+        issuer="scheduled-investment-research",
         subject="developer",
     )
 
@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.open()
     scheduler: ReportScheduler | None = None
     try:
-        schema = files("semantic_alpha").joinpath("schema.sql").read_text()
+        schema = files("scheduled_investment_research").joinpath("schema.sql").read_text()
         await database.initialize(schema)
         app.state.report_database = database
         app.state.report_owner_user_id = "developer"
@@ -50,8 +50,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await database.close()
 
 
-app = FastAPI(title="Semantic Alpha", lifespan=lifespan)
-static_dir = files("semantic_alpha").joinpath("static")
+app = FastAPI(title="Scheduled Investment Research", lifespan=lifespan)
+static_dir = files("scheduled_investment_research").joinpath("static")
 
 
 @app.get("/", include_in_schema=False)

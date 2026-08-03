@@ -16,7 +16,7 @@ type = "sqlite"
 path = "/var/lib/opensandbox/opensandbox.db"
 
 [docker]
-network_mode = "semantic-alpha-local"
+network_mode = "scheduled-investment-research-local"
 host_ip = "host.docker.internal"
 port_range_min = 40000
 port_range_max = 60000

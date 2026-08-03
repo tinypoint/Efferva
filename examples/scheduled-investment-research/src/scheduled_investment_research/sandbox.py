@@ -81,7 +81,7 @@ class BundledSkillsProvider:
         if installed_revision == AI_BERKSHIRE_REVISION:
             return
 
-        package_root = files("semantic_alpha")
+        package_root = files("scheduled_investment_research")
         skill_files = _resource_files(package_root.joinpath("skills"))
         workspace_files = _resource_files(package_root.joinpath("workspace"))
         workspace = self._settings.workspace_path

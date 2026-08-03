@@ -1,4 +1,4 @@
-name: efferva-semantic-alpha
+name: efferva-scheduled-investment-research
 
 services:
   postgres:
@@ -16,7 +16,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
-      - semantic-alpha-local
+      - scheduled-investment-research-local
 
   opensandbox-server:
     image: opensandbox/server:v0.2.2
@@ -43,14 +43,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - semantic-alpha-local
+      - scheduled-investment-research-local
 
   app:
-    image: efferva-semantic-alpha:local
+    image: efferva-scheduled-investment-research:local
     restart: unless-stopped
     build:
       context: ../..
-      dockerfile: examples/SemanticAlpha/Dockerfile
+      dockerfile: examples/scheduled-investment-research/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,12 +80,12 @@ services:
       timeout: 3s
       retries: 60
     networks:
-      - semantic-alpha-local
+      - scheduled-investment-research-local
 
 volumes:
   postgres-data:
   opensandbox-data:
 
 networks:
-  semantic-alpha-local:
-    name: semantic-alpha-local
+  scheduled-investment-research-local:
+    name: scheduled-investment-research-local
