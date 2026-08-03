@@ -71,7 +71,7 @@ def load_config() -> ApplicationConfig:
         sandbox_spec=OpenSandboxCreateSpec(
             image=_value(
                 "EFFERVA_SANDBOX_IMAGE",
-                "python:3.13-slim-bookworm",
+                "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
             ),
             cpu_limit=_value("EFFERVA_SANDBOX_CPU_LIMIT", "2"),
             memory_limit=_value("EFFERVA_SANDBOX_MEMORY_LIMIT", "2g"),

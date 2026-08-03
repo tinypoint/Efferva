@@ -102,7 +102,7 @@ spec:
             - name: EFFERVA_DATABASE_URL
               value: postgresql://efferva:efferva@postgres:5432/efferva
             - name: EFFERVA_SANDBOX_IMAGE
-              value: python:3.13-slim-bookworm
+              value: mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm
             - name: EFFERVA_SANDBOX_MEMORY_LIMIT
               value: 2Gi
             - name: EFFERVA_OPENSANDBOX_SERVER_URL
