@@ -16,7 +16,6 @@ from efferva.sandbox import (
     SandboxHandle,
     SandboxProvider,
     SandboxRuntime,
-    SessionVolumeHandle,
 )
 
 __all__ = [
@@ -32,6 +31,5 @@ __all__ = [
     "SandboxHandle",
     "SandboxProvider",
     "SandboxRuntime",
-    "SessionVolumeHandle",
     "UnauthenticatedError",
 ]

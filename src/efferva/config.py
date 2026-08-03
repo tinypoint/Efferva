@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     codex_appserver_port: int = 4500
     session_volume_size: str = "10Gi"
     sandbox_idle_timeout_seconds: int = 12 * 60 * 60
-    deleted_session_volume_retention_days: int = 30
 
 
 @lru_cache

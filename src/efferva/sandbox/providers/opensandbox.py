@@ -26,8 +26,8 @@ from efferva.sandbox.protocol import (
     FileMetadata,
     SandboxCapabilities,
     SandboxContext,
+    SandboxEnvironment,
     SandboxHandle,
-    SessionVolumeHandle,
 )
 
 _SESSION_METADATA_KEY = "efferva.session"
@@ -146,34 +146,26 @@ class OpenSandboxProvider:
             )
         self._settings = settings
         self._manager: SandboxManager | None = None
-        self._sandboxes: dict[str, Sandbox] = {}
         self._runtimes: dict[str, OpenSandboxRuntime] = {}
 
     async def open(self) -> None:
         if self._manager is None:
             self._manager = await SandboxManager.create(self._connection_config())
 
-    async def ensure_session_volume(
-        self,
-        context: SandboxContext,
-    ) -> SessionVolumeHandle:
-        return SessionVolumeHandle(
-            provider=self.name,
-            external_ref=f"efferva-session-{context.session_id.hex}",
-            state={
-                "mountPath": self._settings.session_volume_path,
-                "size": self._settings.session_volume_size,
-                "deletedRetentionDays": (
-                    self._settings.deleted_session_volume_retention_days
-                ),
-            },
+    async def ensure(self, context: SandboxContext) -> SandboxEnvironment:
+        sandbox, runtime = await self._ensure_runtime(context)
+        return SandboxEnvironment(
+            environment_id=str(context.session_id),
+            endpoint=f"sandbox://{sandbox.external_ref}",
+            workspace_path=context.workspace_path,
+            sandbox=sandbox,
+            runtime=runtime,
         )
 
-    async def start(
+    async def _ensure_runtime(
         self,
         context: SandboxContext,
-        volume: SessionVolumeHandle,
-    ) -> SandboxHandle:
+    ) -> tuple[SandboxHandle, OpenSandboxRuntime]:
         info = await self._find_sandbox(context)
         credential_proxy = self._credential_proxy_target()
         credential_proxy_active = False
@@ -183,10 +175,16 @@ class OpenSandboxProvider:
             ) == "true"
             if info.status.state.upper() == "PAUSED":
                 await self._require_manager().resume_sandbox(info.id)
-            sandbox = await Sandbox.connect(
-                info.id,
-                connection_config=self._connection_config(),
-            )
+            runtime = self._runtimes.get(info.id)
+            if runtime is None:
+                runtime = OpenSandboxRuntime(
+                    await Sandbox.connect(
+                        info.id,
+                        connection_config=self._connection_config(),
+                    )
+                )
+                self._runtimes[info.id] = runtime
+            sandbox_id = info.id
         else:
             sandbox = await Sandbox.create(
                 self._settings.sandbox_image,
@@ -210,7 +208,7 @@ class OpenSandboxProvider:
                     Volume(
                         name="session-data",
                         pvc=PVC(
-                            claim_name=volume.external_ref,
+                            claim_name=f"efferva-session-{context.session_id.hex}",
                             create_if_not_exists=True,
                             delete_on_sandbox_termination=False,
                             storage=self._settings.session_volume_size,
@@ -220,51 +218,32 @@ class OpenSandboxProvider:
                 ],
                 connection_config=self._connection_config(),
             )
-            if credential_proxy is not None:
-                await self._configure_credential_proxy(
-                    sandbox,
-                    host=credential_proxy[0],
-                    scheme=credential_proxy[1],
-                )
-                credential_proxy_active = True
-        self._sandboxes[sandbox.id] = sandbox
-        return SandboxHandle(
+            try:
+                if credential_proxy is not None:
+                    await self._configure_credential_proxy(
+                        sandbox,
+                        host=credential_proxy[0],
+                        scheme=credential_proxy[1],
+                    )
+                    credential_proxy_active = True
+            except BaseException:
+                await sandbox.close()
+                raise
+            sandbox_id = sandbox.id
+            runtime = OpenSandboxRuntime(sandbox)
+            self._runtimes[sandbox_id] = runtime
+        handle = SandboxHandle(
             provider=self.name,
-            external_ref=sandbox.id,
+            external_ref=sandbox_id,
             session_id=context.session_id,
             state={"credentialProxy": credential_proxy_active},
         )
-
-    async def connect(self, sandbox: SandboxHandle) -> OpenSandboxRuntime:
-        runtime = self._runtimes.get(sandbox.external_ref)
-        if runtime is not None:
-            return runtime
-        client = self._sandboxes.get(sandbox.external_ref)
-        if client is None:
-            client = await Sandbox.connect(
-                sandbox.external_ref,
-                connection_config=self._connection_config(),
-            )
-            self._sandboxes[sandbox.external_ref] = client
-        runtime = OpenSandboxRuntime(client)
-        self._runtimes[sandbox.external_ref] = runtime
-        return runtime
-
-    async def stop(self, sandbox: SandboxHandle) -> None:
-        await self._close_runtime(sandbox.external_ref)
-        await self._require_manager().pause_sandbox(sandbox.external_ref)
-
-    async def destroy(self, sandbox: SandboxHandle) -> None:
-        await self._close_runtime(sandbox.external_ref)
-        self._sandboxes.pop(sandbox.external_ref, None)
-        await self._require_manager().kill_sandbox(sandbox.external_ref)
+        return handle, runtime
 
     async def close(self) -> None:
-        for sandbox_id in tuple(self._runtimes):
-            await self._close_runtime(sandbox_id)
-        for sandbox in tuple(self._sandboxes.values()):
-            await sandbox.close()
-        self._sandboxes.clear()
+        for runtime in tuple(self._runtimes.values()):
+            await runtime.close()
+        self._runtimes.clear()
         if self._manager is not None:
             await self._manager.close()
             self._manager = None
@@ -295,12 +274,6 @@ class OpenSandboxProvider:
             use_server_proxy=self._settings.opensandbox_use_server_proxy,
             disable_metrics=True,
         )
-
-    async def _close_runtime(self, sandbox_id: str) -> None:
-        runtime = self._runtimes.pop(sandbox_id, None)
-        if runtime is not None:
-            await runtime.close()
-        self._sandboxes.pop(sandbox_id, None)
 
     def _credential_proxy_target(self) -> tuple[str, str] | None:
         if not self._settings.opensandbox_credential_proxy_enabled:

@@ -22,7 +22,7 @@ from efferva.repository import (
     SessionRepository,
 )
 from efferva.sandbox import SandboxProvider
-from efferva.sandbox.manager import create_sandbox_control_plane
+from efferva.sandbox.service import create_session_sandbox_service
 
 
 @dataclass(slots=True)
@@ -59,7 +59,9 @@ class Efferva:
         normalized_prefix = self._normalize_prefix(prefix)
         installed_prefixes = getattr(app.state, "_efferva_prefixes", set())
         if normalized_prefix in installed_prefixes:
-            raise RuntimeError(f"Efferva is already installed at {normalized_prefix or '/'}")
+            raise RuntimeError(
+                f"Efferva is already installed at {normalized_prefix or '/'}"
+            )
         app.state._efferva_prefixes = {*installed_prefixes, normalized_prefix}
 
         resources = _RuntimeResources()
@@ -72,14 +74,14 @@ class Efferva:
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             codex_release = await prepare_official_codex(settings)
             database = Database(settings.database_url)
-            sandboxes = create_sandbox_control_plane(
+            sandboxes = create_session_sandbox_service(
                 settings,
                 self.sandbox,
                 database,
             )
             await database.open()
             try:
-                await sandboxes.start()
+                await sandboxes.open()
                 await database.initialize(schema)
                 repository = SessionRepository(
                     database,
@@ -138,7 +140,9 @@ class Efferva:
         async def not_found_handler(_, error: NotFoundError) -> JSONResponse:
             return JSONResponse(status_code=404, content={"detail": str(error)})
 
-        async def unauthenticated_handler(_, error: UnauthenticatedError) -> JSONResponse:
+        async def unauthenticated_handler(
+            _, error: UnauthenticatedError
+        ) -> JSONResponse:
             detail = str(error) or "authentication required"
             return JSONResponse(status_code=401, content={"detail": detail})
 

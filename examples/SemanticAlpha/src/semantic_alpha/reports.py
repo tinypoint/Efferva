@@ -261,9 +261,8 @@ async def execute_report(
             session_id=session_id,
             workspace_path=_WORKSPACE,
         )
-        volume = await sandbox.ensure_session_volume(context)
-        handle = await sandbox.start(context, volume)
-        runtime = await sandbox.connect(handle)
+        environment = await sandbox.ensure(context)
+        runtime = environment.runtime
         try:
             await runtime.stat(markdown_path)
         except FileNotFoundError:

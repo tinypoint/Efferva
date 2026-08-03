@@ -9,9 +9,8 @@ from pathlib import PurePosixPath
 from efferva import (
     SandboxCapabilities,
     SandboxContext,
-    SandboxHandle,
+    SandboxEnvironment,
     SandboxRuntime,
-    SessionVolumeHandle,
 )
 from efferva.config import Settings, get_settings
 from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
@@ -53,32 +52,15 @@ class BundledSkillsProvider:
     async def open(self) -> None:
         await self._inner.open()
 
-    async def ensure_session_volume(
-        self,
-        context: SandboxContext,
-    ) -> SessionVolumeHandle:
-        return await self._inner.ensure_session_volume(context)
-
-    async def start(
-        self,
-        context: SandboxContext,
-        volume: SessionVolumeHandle,
-    ) -> SandboxHandle:
-        return await self._inner.start(context, volume)
-
-    async def connect(self, sandbox: SandboxHandle) -> SandboxRuntime:
-        runtime = await self._inner.connect(sandbox)
-        lock = self._locks.setdefault(sandbox.external_ref, asyncio.Lock())
+    async def ensure(self, context: SandboxContext) -> SandboxEnvironment:
+        environment = await self._inner.ensure(context)
+        lock = self._locks.setdefault(
+            environment.sandbox.external_ref,
+            asyncio.Lock(),
+        )
         async with lock:
-            await self._seed(runtime)
-        return runtime
-
-    async def stop(self, sandbox: SandboxHandle) -> None:
-        await self._inner.stop(sandbox)
-
-    async def destroy(self, sandbox: SandboxHandle) -> None:
-        self._locks.pop(sandbox.external_ref, None)
-        await self._inner.destroy(sandbox)
+            await self._seed(environment.runtime)
+        return environment
 
     async def close(self) -> None:
         self._locks.clear()

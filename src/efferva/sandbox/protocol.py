@@ -35,13 +35,6 @@ class SandboxContext:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionVolumeHandle:
-    provider: str
-    external_ref: str
-    state: JsonObject = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
 class SandboxHandle:
     provider: str
     external_ref: str
@@ -110,21 +103,6 @@ class SandboxProvider(Protocol):
 
     async def open(self) -> None: ...
 
-    async def ensure_session_volume(
-        self,
-        context: SandboxContext,
-    ) -> SessionVolumeHandle: ...
-
-    async def start(
-        self,
-        context: SandboxContext,
-        volume: SessionVolumeHandle,
-    ) -> SandboxHandle: ...
-
-    async def connect(self, sandbox: SandboxHandle) -> SandboxRuntime: ...
-
-    async def stop(self, sandbox: SandboxHandle) -> None: ...
-
-    async def destroy(self, sandbox: SandboxHandle) -> None: ...
+    async def ensure(self, context: SandboxContext) -> SandboxEnvironment: ...
 
     async def close(self) -> None: ...

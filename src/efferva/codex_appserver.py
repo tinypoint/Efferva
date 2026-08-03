@@ -13,8 +13,8 @@ from typing import Any
 from uuid import UUID
 
 from efferva.config import Settings
-from efferva.sandbox.manager import SandboxControlPlane
 from efferva.sandbox.protocol import SandboxEnvironment
+from efferva.sandbox.service import SessionSandboxService
 
 
 class CodexAppServerManager:
@@ -24,7 +24,7 @@ class CodexAppServerManager:
         self,
         binary: Path,
         settings: Settings,
-        sandboxes: SandboxControlPlane,
+        sandboxes: SessionSandboxService,
     ) -> None:
         self._binary_bytes = binary.read_bytes()
         self._binary_sha256 = sha256(self._binary_bytes).hexdigest()
@@ -46,13 +46,17 @@ class CodexAppServerManager:
             self._settings.codex_appserver_port
         )
         websocket_token = (
-            await sandbox.runtime.read_file(
-                posixpath.join(
-                    self._settings.codex_home_path,
-                    "app-server.token",
+            (
+                await sandbox.runtime.read_file(
+                    posixpath.join(
+                        self._settings.codex_home_path,
+                        "app-server.token",
+                    )
                 )
             )
-        ).decode("utf-8").strip()
+            .decode("utf-8")
+            .strip()
+        )
         target = (
             _websocket_url(endpoint),
             {
@@ -103,9 +107,7 @@ class CodexAppServerManager:
         codex_home = self._settings.codex_home_path
         websocket_token_file = posixpath.join(codex_home, "app-server.token")
         websocket_token = secrets.token_urlsafe(32)
-        temporary_token_file = (
-            f"{websocket_token_file}.{websocket_token[:16]}.tmp"
-        )
+        temporary_token_file = f"{websocket_token_file}.{websocket_token[:16]}.tmp"
         pid_file = "/tmp/efferva-app-server.pid"
         log_file = posixpath.join(codex_home, "app-server.log")
         start_lock = "/tmp/efferva-app-server-start.lock"
@@ -122,8 +124,7 @@ class CodexAppServerManager:
                 "model_provider": "efferva_proxy",
             }
         app_server_config_args = tuple(
-            f"{key}={json.dumps(value)}"
-            for key, value in app_server_overrides.items()
+            f"{key}={json.dumps(value)}" for key, value in app_server_overrides.items()
         )
         api_key = os.environ.get("OPENAI_API_KEY")
         effective_api_key = None
@@ -178,18 +179,17 @@ class CodexAppServerManager:
         )
         await self._run_command(sandbox, ("sh", "-lc", bootstrap))
         app_server_cli_config = "".join(
-            f"-c {shlex.quote(argument)} "
-            for argument in app_server_config_args
+            f"-c {shlex.quote(argument)} " for argument in app_server_config_args
         )
         command = (
             f"if ! mkdir {shlex.quote(start_lock)} 2>/dev/null; then exit 0; fi; "
             f"trap 'rmdir {shlex.quote(start_lock)} 2>/dev/null || true' EXIT; "
             f"if [ -s {shlex.quote(pid_file)} ]; then "
             f"read -r efferva_pid efferva_sha <{shlex.quote(pid_file)}; "
-            f"if kill -0 \"$efferva_pid\" 2>/dev/null && "
-            f"[ \"$efferva_sha\" = {shlex.quote(app_server_launch_sha256)} ]; then "
+            f'if kill -0 "$efferva_pid" 2>/dev/null && '
+            f'[ "$efferva_sha" = {shlex.quote(app_server_launch_sha256)} ]; then '
             "exit 0; fi; "
-            f"kill \"$efferva_pid\" 2>/dev/null || true; fi; "
+            f'kill "$efferva_pid" 2>/dev/null || true; fi; '
             f"cd {shlex.quote(self._settings.workspace_path)} && "
             f"{shlex.quote(sandbox_binary)} app-server "
             f"{app_server_cli_config}"
@@ -197,7 +197,7 @@ class CodexAppServerManager:
             f"--ws-auth capability-token "
             f"--ws-token-file {shlex.quote(websocket_token_file)} "
             f"</dev/null >>{shlex.quote(log_file)} 2>&1 & "
-            f"echo \"$! {app_server_launch_sha256}\" >{shlex.quote(pid_file)}"
+            f'echo "$! {app_server_launch_sha256}" >{shlex.quote(pid_file)}'
         )
         environment = {
             "CODEX_HOME": codex_home,
