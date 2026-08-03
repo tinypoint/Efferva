@@ -3,7 +3,7 @@ services:
     command:
       [
         "uvicorn",
-        "basic_local_docker.main:app",
+        "multi_session_codex.main:app",
         "--host",
         "0.0.0.0",
         "--port",
@@ -23,7 +23,7 @@ services:
   web:
     build:
       context: ../..
-      dockerfile: examples/basic-local-docker/web/Dockerfile.dev
+      dockerfile: examples/multi-session-codex/web/Dockerfile.dev
     restart: unless-stopped
     environment:
       EFFERVA_API_PROXY_TARGET: http://app:8080
@@ -33,11 +33,11 @@ services:
     ports:
       - "${EFFERVA_WEB_PORT:-5173}:5173"
     volumes:
-      - ./web:/repo/examples/basic-local-docker/web
+      - ./web:/repo/examples/multi-session-codex/web
       - ../../packages/codex-client:/repo/packages/codex-client:ro
-      - web-node-modules:/repo/examples/basic-local-docker/web/node_modules
+      - web-node-modules:/repo/examples/multi-session-codex/web/node_modules
     networks:
-      - efferva-local
+      - efferva-multi-session-codex
 
 volumes:
   web-node-modules:

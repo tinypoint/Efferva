@@ -70,7 +70,7 @@ export EFFERVA_OPENSANDBOX_API_KEY=...
 ```
 
 完整 Compose 见
-[`examples/basic-local-docker`](../examples/basic-local-docker)。
+[`examples/multi-session-codex`](../examples/multi-session-codex)。
 
 ## Codex 适配
 

@@ -1,4 +1,4 @@
-name: efferva-basic-local-docker
+name: efferva-multi-session-codex
 
 services:
   postgres:
@@ -16,7 +16,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
-      - efferva-local
+      - efferva-multi-session-codex
 
   opensandbox-server:
     image: opensandbox/server:v0.2.2
@@ -43,14 +43,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - efferva-local
+      - efferva-multi-session-codex
 
   app:
-    image: efferva-basic-local-docker:local
+    image: efferva-multi-session-codex:local
     restart: unless-stopped
     build:
       context: ../..
-      dockerfile: examples/basic-local-docker/Dockerfile
+      dockerfile: examples/multi-session-codex/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,12 +80,12 @@ services:
       timeout: 3s
       retries: 60
     networks:
-      - efferva-local
+      - efferva-multi-session-codex
 
 volumes:
   postgres-data:
   opensandbox-data:
 
 networks:
-  efferva-local:
-    name: efferva-local
+  efferva-multi-session-codex:
+    name: efferva-multi-session-codex

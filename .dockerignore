@@ -4,5 +4,5 @@
 **/*.pyc
 dist/*
 !dist/efferva-*.whl
-examples/basic-local-docker/web/node_modules
-examples/basic-local-docker/web/dist
+examples/multi-session-codex/web/node_modules
+examples/multi-session-codex/web/dist

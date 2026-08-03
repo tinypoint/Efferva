@@ -6,12 +6,12 @@ OpenSandbox 管理的 sandbox/PVC。
 
 ```bash
 uv build --wheel --out-dir dist
-docker compose --file examples/basic-local-docker/compose.yaml build app
+docker compose --file examples/multi-session-codex/compose.yaml build app
 
 kind create cluster \
   --name efferva \
-  --config examples/basic-local-docker/kind/cluster.yaml
-kind load docker-image efferva-basic-local-docker:local --name efferva
+  --config examples/multi-session-codex/kind/cluster.yaml
+kind load docker-image efferva-multi-session-codex:local --name efferva
 
 kubectl create namespace opensandbox-system
 kubectl create namespace efferva
@@ -26,9 +26,9 @@ kubectl create secret generic efferva-secrets \
 helm upgrade --install opensandbox \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox/0.2.0/opensandbox-0.2.0.tgz \
   --namespace opensandbox-system \
-  --values examples/basic-local-docker/kind/opensandbox-values.yaml
+  --values examples/multi-session-codex/kind/opensandbox-values.yaml
 
-kubectl apply --filename examples/basic-local-docker/kind/app.yaml
+kubectl apply --filename examples/multi-session-codex/kind/app.yaml
 
 kubectl --namespace efferva rollout status statefulset/postgres
 kubectl --namespace efferva rollout status deployment/efferva

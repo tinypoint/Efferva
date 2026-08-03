@@ -11,13 +11,13 @@ from efferva.sandbox.providers.opensandbox import OpenSandboxProvider
 async def resolve_local_principal(_: Request) -> Principal:
     return Principal(
         tenant_id="local",
-        issuer="basic-local-docker",
+        issuer="multi-session-codex",
         subject="developer",
     )
 
 
-app = FastAPI(title="Efferva Basic Local Docker")
-static_dir = files("basic_local_docker").joinpath("static")
+app = FastAPI(title="Efferva Multi-session Codex")
+static_dir = files("multi_session_codex").joinpath("static")
 
 
 @app.get("/", include_in_schema=False)

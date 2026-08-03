@@ -1,7 +1,11 @@
-# Basic Local Docker
+# Multi-session Codex
 
-这是 Efferva 的第一个接入示例：一个独立的 FastAPI 产品通过 Docker Compose 在本机启动，
-并使用 OpenSandbox Server 的 Docker runtime 创建 Agent 沙箱。
+这是 Efferva 的多 Session Codex 示例：两个产品 App 实例共享 PostgreSQL，而每个 Session
+拥有独立的 Sandbox、Codex app-server、workspace 和 `CODEX_HOME`。
+
+它既可以通过 Docker Compose 在本机快速开发，也可以部署到 Kind，实际验证多个 App Pod
+并发访问同一组 Session。OpenSandbox 是当前的 Sandbox Provider；Compose 使用 Docker
+runtime，Kind 使用 Kubernetes runtime。
 
 这个目录拥有自己的 `pyproject.toml`，直接声明产品代码使用的 Efferva、FastAPI 和
 Uvicorn，不依赖 Efferva 仓库的开发环境或传递依赖。
@@ -12,7 +16,7 @@ Uvicorn，不依赖 Efferva 仓库的开发环境或传递依赖。
 Browser
   │
   ▼
-basic-local-docker app
+multi-session-codex app × N
   ├── Efferva App / Run Worker
   ├── PostgreSQL
   └── OpenSandbox Python SDK
@@ -21,7 +25,7 @@ basic-local-docker app
       OpenSandbox Server
           │ Docker runtime
           ▼
-      per-Session Codex app-server + persistent Session volume
+      one Codex app-server + persistent volume per Session
 ```
 
 OpenSandbox Server 通过挂载的 Docker socket 创建沙箱；Efferva 不直接操作 Docker
@@ -41,7 +45,7 @@ daemon。每个 Session 对应一个 OpenSandbox sandbox，并把持久卷挂载
 ```bash
 uv build --wheel --out-dir dist
 OPENAI_API_KEY=... docker compose \
-  --file examples/basic-local-docker/compose.yaml \
+  --file examples/multi-session-codex/compose.yaml \
   up --build
 ```
 
@@ -54,18 +58,18 @@ Wheel，不包含 Rust 或 Codex 源码。FastAPI、Uvicorn、`efferva[opensandb
 工作区：
 
 ```bash
-docker compose --file examples/basic-local-docker/compose.yaml down
+docker compose --file examples/multi-session-codex/compose.yaml down
 ```
 
 连同本地示例数据一起删除：
 
 ```bash
-docker compose --file examples/basic-local-docker/compose.yaml down --volumes
+docker compose --file examples/multi-session-codex/compose.yaml down --volumes
 ```
 
 ## 接入方代码
 
-产品代码位于 `src/basic_local_docker/main.py`。本地示例使用一个固定的开发身份，因此不需要
+产品代码位于 `src/multi_session_codex/main.py`。本地示例使用一个固定的开发身份，因此不需要
 先实现登录；生产产品应把自己的 Cookie、JWT 或 SSO 身份转换成 `Principal`。
 
 OpenSandbox 相关参数由 Compose 通过环境变量提供：

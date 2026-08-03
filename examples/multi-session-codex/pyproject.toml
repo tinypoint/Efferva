@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "efferva-basic-local-docker"
+name = "efferva-multi-session-codex"
 version = "0.1.0"
-description = "A standalone local Docker product using Efferva and OpenSandbox."
+description = "A multi-session Codex product with one isolated sandbox per session."
 requires-python = ">=3.11"
 dependencies = [
     "efferva[opensandbox]==0.1.0",
@@ -14,4 +14,4 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/basic_local_docker"]
+packages = ["src/multi_session_codex"]

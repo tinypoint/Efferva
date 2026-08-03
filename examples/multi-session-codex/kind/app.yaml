@@ -96,7 +96,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: efferva-basic-local-docker:local
+          image: efferva-multi-session-codex:local
           imagePullPolicy: IfNotPresent
           env:
             - name: EFFERVA_DATABASE_URL
