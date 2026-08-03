@@ -16,6 +16,7 @@ from uuid import UUID
 from websockets.asyncio.client import ClientConnection, connect as connect_websocket
 
 from efferva.config import Settings
+from efferva.db import Database
 from efferva.sandbox.protocol import SandboxEnvironment
 from efferva.sandbox.service import SessionSandboxService
 
@@ -28,14 +29,13 @@ class CodexAppServerManager:
         binary: Path,
         settings: Settings,
         sandboxes: SessionSandboxService,
+        database: Database,
     ) -> None:
         self._binary_bytes = binary.read_bytes()
         self._binary_sha256 = sha256(self._binary_bytes).hexdigest()
         self._settings = settings
         self._sandboxes = sandboxes
-        self._locks: dict[UUID, asyncio.Lock] = {}
-        self._sessions: dict[UUID, SandboxEnvironment] = {}
-        self._connection_targets: dict[str, tuple[str, dict[str, str]]] = {}
+        self._database = database
 
     @asynccontextmanager
     async def connect(
@@ -74,9 +74,6 @@ class CodexAppServerManager:
         session: Mapping[str, Any],
     ) -> tuple[str, dict[str, str]]:
         sandbox = await self._ensure(session)
-        cached = self._connection_targets.get(sandbox.environment_id)
-        if cached is not None:
-            return cached
         endpoint, headers = await sandbox.runtime.get_endpoint(
             self._settings.codex_appserver_port
         )
@@ -92,33 +89,24 @@ class CodexAppServerManager:
             .decode("utf-8")
             .strip()
         )
-        target = (
+        return (
             _websocket_url(endpoint),
             {
                 **headers,
                 "Authorization": f"Bearer {websocket_token}",
             },
         )
-        self._connection_targets[sandbox.environment_id] = target
-        return target
 
     async def _ensure(
         self,
         session: Mapping[str, Any],
     ) -> SandboxEnvironment:
         session_id = UUID(str(session["id"]))
-        cached = self._sessions.get(session_id)
-        if cached is not None:
-            return cached
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            cached = self._sessions.get(session_id)
-            if cached is not None:
-                return cached
-            sandbox = await self._sandboxes.ensure(session_id)
+        sandbox = await self._sandboxes.ensure(session_id)
+        advisory_lock_key = f"efferva:codex-appserver-session:{session_id}"
+        async with self._database.advisory_lock(advisory_lock_key):
             await self._install_and_start(sandbox)
-            self._sessions[session_id] = sandbox
-            return sandbox
+        return sandbox
 
     async def _install_and_start(self, sandbox: SandboxEnvironment) -> None:
         runtime_root = posixpath.join(

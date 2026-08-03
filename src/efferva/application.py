@@ -92,6 +92,7 @@ class Efferva:
                     codex_release.binary,
                     settings,
                     sandboxes,
+                    database,
                 )
                 yield
             finally:
