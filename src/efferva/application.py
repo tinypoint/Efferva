@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from importlib.resources import files
 
 from fastapi import APIRouter, FastAPI
@@ -15,28 +14,12 @@ from efferva.identity import (
     IdentityResolver,
     UnauthenticatedError,
 )
-from efferva.repository import (
+from efferva.session_repository import (
     NotFoundError,
     SessionRepository,
 )
 from efferva.sandbox import SandboxProvider
-from efferva.sandbox.service import create_session_sandbox_service
-
-
-@dataclass(slots=True)
-class _RuntimeResources:
-    repository: SessionRepository | None = None
-    codex: CodexAppServerManager | None = None
-
-    def require_repository(self) -> SessionRepository:
-        if self.repository is None:
-            raise RuntimeError("Efferva application has not started")
-        return self.repository
-
-    def require_codex(self) -> CodexAppServerManager:
-        if self.codex is None:
-            raise RuntimeError("Efferva application has not started")
-        return self.codex
+from efferva.sandbox.service import SessionSandboxService
 
 
 class Efferva:
@@ -62,46 +45,34 @@ class Efferva:
             )
         app.state._efferva_prefixes = {*installed_prefixes, normalized_prefix}
 
-        resources = _RuntimeResources()
         settings = self.settings
         if settings.database_url is None:
             raise ValueError("EFFERVA_DATABASE_URL is required by the API")
         schema = files("efferva").joinpath("schema.sql").read_text()
+        database = Database(settings.database_url)
+        sandboxes = SessionSandboxService(settings, self.sandbox, database)
+        repository = SessionRepository(database)
+        codex = CodexAppServerManager(settings, sandboxes, database)
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-            database = Database(settings.database_url)
-            sandboxes = create_session_sandbox_service(
-                settings,
-                self.sandbox,
-                database,
-            )
             await database.open()
             try:
                 await sandboxes.open()
-                await database.initialize(schema)
-                repository = SessionRepository(database)
-                resources.repository = repository
-                resources.codex = CodexAppServerManager(
-                    settings,
-                    sandboxes,
-                    database,
-                )
-                yield
-            finally:
-                resources.codex = None
-                resources.repository = None
                 try:
-                    await sandboxes.close()
+                    await database.initialize(schema)
+                    yield
                 finally:
-                    await database.close()
+                    await sandboxes.close()
+            finally:
+                await database.close()
 
         router = APIRouter(lifespan=lifespan)
         router.include_router(
             create_api_router(
                 identity=self.identity,
-                repository=resources.require_repository,
-                codex=resources.require_codex,
+                repository=repository,
+                codex=codex,
             )
         )
 

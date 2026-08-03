@@ -41,11 +41,3 @@ class SessionSandboxService:
 
     async def close(self) -> None:
         await self._provider.close()
-
-
-def create_session_sandbox_service(
-    settings: Settings,
-    provider: SandboxProvider,
-    database: Database,
-) -> SessionSandboxService:
-    return SessionSandboxService(settings, provider, database)

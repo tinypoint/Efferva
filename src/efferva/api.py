@@ -18,7 +18,7 @@ from efferva.identity import (
     UnauthenticatedError,
 )
 from efferva.models import PrincipalView, Session, SessionCreate
-from efferva.repository import (
+from efferva.session_repository import (
     AccessMode,
     NotFoundError,
     SessionRepository,
@@ -40,15 +40,15 @@ def principal_dependency(
 def create_api_router(
     *,
     identity: IdentityResolver,
-    repository: Callable[[], SessionRepository],
-    codex: Callable[[], CodexAppServerManager],
+    repository: SessionRepository,
+    codex: CodexAppServerManager,
 ) -> APIRouter:
     router = APIRouter()
     resolve_principal = principal_dependency(identity)
 
     @router.get("/healthz")
     async def healthz() -> dict[str, str]:
-        await repository().ping()
+        await repository.ping()
         return {"status": "ok"}
 
     @router.websocket("/api/sessions/{session_id}/codex")
@@ -60,7 +60,7 @@ def create_api_router(
             principal = await identity(websocket)
             if not isinstance(principal, Principal):
                 raise TypeError("IdentityResolver must return efferva.Principal")
-            session = await repository().get_session(
+            session = await repository.get_session(
                 principal,
                 session_id,
                 mode=AccessMode.WRITE,
@@ -77,7 +77,7 @@ def create_api_router(
             return
 
         try:
-            upstream_context = codex().connect(session)
+            upstream_context = codex.connect(session)
             upstream = await upstream_context.__aenter__()
         except Exception:
             await websocket.close(code=1011, reason="Codex app-server unavailable")
@@ -156,13 +156,13 @@ def create_api_router(
         payload: SessionCreate,
         principal: Principal = Depends(resolve_principal),
     ) -> dict[str, Any]:
-        return await repository().create_session(principal, payload.name)
+        return await repository.create_session(principal, payload.name)
 
     @router.get("/api/sessions", response_model=list[Session])
     async def list_sessions(
         principal: Principal = Depends(resolve_principal),
         scope: Literal["mine", "tenant"] = Query(default="mine"),
     ) -> list[dict[str, Any]]:
-        return await repository().list_sessions(principal, scope)
+        return await repository.list_sessions(principal, scope)
 
     return router
