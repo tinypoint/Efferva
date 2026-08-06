@@ -88,7 +88,7 @@ resolver 只在没有现成 Sandbox、确实需要创建时执行；恢复或复
 Sandbox 创建不会同时读取到相同库存。产品仍然拥有套餐和计费语义。
 
 如果产品选择环境变量，读取逻辑属于自己的启动层；完整例子见
-[`examples/multi-session-codex`](../examples/multi-session-codex)。
+[`examples/multi-session`](../examples/multi-session)。
 
 ## 最低能力
 

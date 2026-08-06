@@ -4,5 +4,5 @@
 **/*.pyc
 dist/*
 !dist/efferva-*.whl
-examples/multi-session-codex/web/node_modules
-examples/multi-session-codex/web/dist
+examples/multi-session/web/node_modules
+examples/multi-session/web/dist
