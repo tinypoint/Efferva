@@ -6,7 +6,7 @@ import os.path
 import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import UUID
@@ -19,6 +19,8 @@ from opensandbox.models.filesystem import DirectoryListEntry
 from opensandbox.models.sandboxes import (
     PVC,
     CredentialProxyConfig,
+    NetworkPolicy,
+    NetworkRule,
     SandboxFilter,
     Volume,
 )
@@ -47,9 +49,17 @@ _LAYOUT_METADATA_KEY = "efferva.sandbox-layout"
 
 @dataclass(frozen=True, slots=True)
 class OpenSandboxCredentialProxy:
-    bearer_token: str
+    credential: str
     host: str
     scheme: Literal["http", "https"]
+    auth_type: Literal["bearer", "api_key"]
+    header_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.auth_type == "api_key" and not self.header_name:
+            raise ValueError("api_key credential proxy requires header_name")
+        if self.auth_type == "bearer" and self.header_name is not None:
+            raise ValueError("bearer credential proxy does not use header_name")
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +298,19 @@ class OpenSandboxProvider:
                     if credential_proxy is not None
                     else None
                 ),
+                network_policy=(
+                    NetworkPolicy(
+                        default_action="allow",
+                        egress=[
+                            NetworkRule(
+                                action="allow",
+                                target=credential_proxy.host,
+                            )
+                        ],
+                    )
+                    if credential_proxy is not None
+                    else None
+                ),
                 volumes=[
                     Volume(
                         name="session-data",
@@ -342,11 +365,7 @@ class OpenSandboxProvider:
                 if session.id != context.session_id
             )
         )
-        return tuple(
-            self._inventory_item(info)
-            for info in infos
-            if info is not None
-        )
+        return tuple(self._inventory_item(info) for info in infos if info is not None)
 
     async def _find_sandbox(self, session_id: UUID) -> Any | None:
         result = await self._require_manager().list_sandbox_infos(
@@ -387,6 +406,7 @@ class OpenSandboxProvider:
         return ConnectionConfig(
             domain=self._connection.server_url,
             api_key=self._connection.api_key,
+            request_timeout=timedelta(minutes=5),
             use_server_proxy=self._connection.use_server_proxy,
             disable_metrics=True,
         )
@@ -396,24 +416,33 @@ class OpenSandboxProvider:
         sandbox: Sandbox,
         config: OpenSandboxCredentialProxy,
     ) -> None:
+        auth = (
+            {
+                "type": "bearer",
+                "credential": "efferva-engine-credential",
+            }
+            if config.auth_type == "bearer"
+            else {
+                "type": "apiKey",
+                "name": config.header_name,
+                "credential": "efferva-engine-credential",
+            }
+        )
         await sandbox.credential_vault.create(
             credentials=[
                 {
-                    "name": "efferva-openai-api-key",
-                    "source": {"type": "inline", "value": config.bearer_token},
+                    "name": "efferva-engine-credential",
+                    "source": {"type": "inline", "value": config.credential},
                 }
             ],
             bindings=[
                 {
-                    "name": "efferva-openai-bearer",
+                    "name": "efferva-engine-auth",
                     "match": {
                         "schemes": [config.scheme],
                         "hosts": [config.host],
                     },
-                    "auth": {
-                        "type": "bearer",
-                        "credential": "efferva-openai-api-key",
-                    },
+                    "auth": auth,
                 }
             ],
         )
@@ -428,8 +457,6 @@ def _layout_fingerprint(layout: SandboxLayout) -> str:
             str(identity.gid),
             identity.home_path,
             layout.workspace_path,
-            layout.codex_home_path,
-            layout.codex_runtime_dir,
         )
     )
     return sha256(value.encode()).hexdigest()[:32]

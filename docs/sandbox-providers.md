@@ -26,7 +26,7 @@ Efferva 不读取环境变量、`.env` 或 Secret Manager。产品应用决定�
 对象传给框架和 Provider：
 
 ```python
-from efferva import CodexConfig, Efferva, EffervaConfig, SandboxLayout
+from efferva import Codex, Efferva, EffervaConfig, SandboxLayout
 from efferva.sandbox.providers.opensandbox import (
     OpenSandboxConnectionConfig,
     OpenSandboxCreateSpec,
@@ -37,11 +37,8 @@ layout = SandboxLayout()
 config = EffervaConfig(
     database_url=database_url,
     sandbox=layout,
-    codex=CodexConfig(
-        api_key=openai_api_key,
-        openai_base_url=openai_base_url,
-    ),
 )
+engine = Codex(api_key=openai_api_key, base_url=openai_base_url)
 connection = OpenSandboxConnectionConfig(
     server_url=opensandbox_server_url,
     api_key=opensandbox_api_key,
@@ -76,6 +73,7 @@ Efferva(
     config=config,
     identity=resolve_principal,
     sandbox=sandbox,
+    engine=engine,
 ).install(app, prefix="/agent")
 ```
 
@@ -110,14 +108,19 @@ Credential Proxy 也是显式配置，不会从 `OPENAI_API_KEY` 或 Base URL �
 from efferva.sandbox.providers.opensandbox import OpenSandboxCredentialProxy
 
 proxy = OpenSandboxCredentialProxy(
-    bearer_token=openai_api_key,
+    credential=openai_api_key,
     scheme="https",
     host="api.openai.com",
+    auth_type="bearer",
 )
 ```
 
 产品把它放进 resolver 返回的 `OpenSandboxCreateSpec(credential_proxy=proxy)`；传 `None`
-就是不启用。这样不同用户也可以使用不同的凭证策略。
+就是不启用。Claude 使用 `auth_type="api_key", header_name="x-api-key"`。这样不同用户也
+可以使用不同的凭证策略。
+
+OpenSandbox 的 Docker Credential Proxy 依赖 `networkPolicy`，Efferva 会自动传入允许出网的
+策略；OpenSandbox Server 的 Docker `network_mode` 必须使用 `bridge`。
 
 ## Codex 适配
 
@@ -133,3 +136,6 @@ Efferva App
 
 Docker 或 Kubernetes 是 OpenSandbox Server 的 runtime 选择，不是 Efferva 内的另一套
 Provider。
+
+Claude Code 同样只依赖 `SandboxRuntime`：第一次访问 Session 时安装固定版本 Agent SDK，
+启动 Sandbox 内的 SSE Server；Thread 历史直接读取 Claude Transcript。

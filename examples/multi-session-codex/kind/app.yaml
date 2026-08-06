@@ -113,8 +113,6 @@ spec:
               value: /home/node
             - name: EFFERVA_WORKSPACE_PATH
               value: /home/node/workspace
-            - name: EFFERVA_CODEX_HOME_PATH
-              value: /home/node/.codex
             - name: EFFERVA_SANDBOX_MEMORY_LIMIT
               value: 2Gi
             - name: EFFERVA_OPENSANDBOX_SERVER_URL

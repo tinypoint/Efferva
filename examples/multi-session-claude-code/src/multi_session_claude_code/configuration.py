@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from efferva import Codex, EffervaConfig, SandboxIdentity, SandboxLayout
+from efferva import ClaudeCode, EffervaConfig, SandboxIdentity, SandboxLayout
 from efferva.sandbox.providers.opensandbox import (
     OpenSandboxConnectionConfig,
     OpenSandboxCreateSpec,
@@ -13,7 +13,7 @@ from efferva.sandbox.providers.opensandbox import (
 @dataclass(frozen=True, slots=True)
 class ApplicationConfig:
     efferva: EffervaConfig
-    engine: Codex
+    engine: ClaudeCode
     opensandbox_connection: OpenSandboxConnectionConfig
     sandbox_spec: OpenSandboxCreateSpec
 
@@ -21,44 +21,42 @@ class ApplicationConfig:
 def load_config() -> ApplicationConfig:
     layout = SandboxLayout(
         identity=SandboxIdentity(
-            username=_value("EFFERVA_SANDBOX_USERNAME", "node"),
+            username=None,
             uid=int(_value("EFFERVA_SANDBOX_UID", "1000")),
             gid=int(_value("EFFERVA_SANDBOX_GID", "1000")),
-            home_path=_value("EFFERVA_SANDBOX_HOME", "/home/node"),
+            home_path=_value("EFFERVA_SANDBOX_HOME", "/home/sandbox"),
         ),
         workspace_path=_value(
             "EFFERVA_WORKSPACE_PATH",
-            "/home/node/workspace",
+            "/home/sandbox/workspace",
         ),
     )
-    api_key = os.environ.get("OPENAI_API_KEY") or None
-    base_url = os.environ.get("EFFERVA_CODEX_OPENAI_BASE_URL") or None
+    api_key = _required("ANTHROPIC_API_KEY")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL") or None
     credential_proxy = _credential_proxy(
         api_key=api_key,
         base_url=base_url,
-        enabled=_boolean(
-            "EFFERVA_OPENSANDBOX_CREDENTIAL_PROXY_ENABLED",
-            True,
-        ),
+        enabled=_boolean("EFFERVA_OPENSANDBOX_CREDENTIAL_PROXY_ENABLED", True),
     )
     return ApplicationConfig(
         efferva=EffervaConfig(
             database_url=_required("EFFERVA_DATABASE_URL"),
             sandbox=layout,
         ),
-        engine=Codex(api_key=api_key, base_url=base_url),
+        engine=ClaudeCode(
+            api_key=api_key,
+            base_url=base_url,
+            model=os.environ.get("ANTHROPIC_MODEL") or None,
+        ),
         opensandbox_connection=OpenSandboxConnectionConfig(
             server_url=_required("EFFERVA_OPENSANDBOX_SERVER_URL"),
             api_key=os.environ.get("EFFERVA_OPENSANDBOX_API_KEY") or None,
-            use_server_proxy=_boolean(
-                "EFFERVA_OPENSANDBOX_USE_SERVER_PROXY",
-                True,
-            ),
+            use_server_proxy=_boolean("EFFERVA_OPENSANDBOX_USE_SERVER_PROXY", True),
         ),
         sandbox_spec=OpenSandboxCreateSpec(
             image=_value(
                 "EFFERVA_SANDBOX_IMAGE",
-                "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+                "python:3.13-slim-bookworm",
             ),
             cpu_limit=_value("EFFERVA_SANDBOX_CPU_LIMIT", "2"),
             memory_limit=_value("EFFERVA_SANDBOX_MEMORY_LIMIT", "2g"),
@@ -71,23 +69,26 @@ def load_config() -> ApplicationConfig:
 
 def _credential_proxy(
     *,
-    api_key: str | None,
+    api_key: str,
     base_url: str | None,
     enabled: bool,
 ) -> OpenSandboxCredentialProxy | None:
-    if not enabled or not api_key:
+    if not enabled:
         return None
-    parsed = urlparse(base_url or "https://api.openai.com/v1")
+    parsed = urlparse(base_url or "https://api.anthropic.com")
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return None
+        raise RuntimeError("ANTHROPIC_BASE_URL must be an HTTP(S) URL")
     default_port = 443 if parsed.scheme == "https" else 80
     if parsed.port not in {None, default_port}:
-        return None
+        raise RuntimeError(
+            "OpenSandbox Credential Proxy requires a default-port ANTHROPIC_BASE_URL"
+        )
     return OpenSandboxCredentialProxy(
         credential=api_key,
         host=parsed.hostname,
         scheme=parsed.scheme,
-        auth_type="bearer",
+        auth_type="api_key",
+        header_name="x-api-key",
     )
 
 

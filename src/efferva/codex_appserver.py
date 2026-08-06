@@ -11,14 +11,16 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
-from websockets.asyncio.client import ClientConnection, connect as connect_websocket
+from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import connect as connect_websocket
 
-from efferva.config import CodexConfig
 from efferva.db import Database
 from efferva.sandbox.protocol import SandboxEnvironment
 from efferva.sandbox.service import SessionSandboxService
 
 _CODEX_VERSION = "0.146.0"
+_APP_SERVER_PORT = 4500
+_RUNTIME_ROOT = "/opt/efferva/runtimes/codex"
 _CODEX_RELEASES = {
     "aarch64": (
         "aarch64-unknown-linux-musl",
@@ -36,11 +38,14 @@ class CodexAppServerManager:
 
     def __init__(
         self,
-        config: CodexConfig,
+        *,
+        api_key: str | None,
+        openai_base_url: str | None,
         sandboxes: SessionSandboxService,
         database: Database,
     ) -> None:
-        self._config = config
+        self._api_key = api_key
+        self._openai_base_url = openai_base_url
         self._sandboxes = sandboxes
         self._database = database
 
@@ -87,14 +92,12 @@ class CodexAppServerManager:
         self,
         sandbox: SandboxEnvironment,
     ) -> tuple[str, dict[str, str]]:
-        endpoint, headers = await sandbox.runtime.get_endpoint(
-            self._config.appserver_port
-        )
+        endpoint, headers = await sandbox.runtime.get_endpoint(_APP_SERVER_PORT)
         websocket_token = (
             (
                 await sandbox.runtime.read_file(
                     posixpath.join(
-                        sandbox.layout.codex_home_path,
+                        _codex_home(sandbox),
                         "app-server.token",
                     )
                 )
@@ -116,8 +119,8 @@ class CodexAppServerManager:
     ) -> SandboxEnvironment:
         session_id = UUID(str(session["id"]))
         sandbox = await self._sandboxes.ensure(session)
-        config_args, effective_api_key, launch_sha256 = (
-            self._launch_configuration(sandbox)
+        config_args, effective_api_key, launch_sha256 = self._launch_configuration(
+            sandbox
         )
         advisory_lock_key = f"efferva:codex-appserver-session:{session_id}"
         async with self._database.advisory_lock(advisory_lock_key):
@@ -159,12 +162,10 @@ class CodexAppServerManager:
         sandbox: SandboxEnvironment,
     ) -> tuple[tuple[str, ...], str | None, str]:
         app_server_overrides: dict[str, str] = {}
-        if self._config.openai_base_url:
+        if self._openai_base_url:
             app_server_overrides = {
                 "model_providers.efferva_proxy.name": "Efferva LLM proxy",
-                "model_providers.efferva_proxy.base_url": (
-                    self._config.openai_base_url
-                ),
+                "model_providers.efferva_proxy.base_url": (self._openai_base_url),
                 "model_providers.efferva_proxy.env_key": "OPENAI_API_KEY",
                 "model_providers.efferva_proxy.wire_api": "responses",
                 "model_provider": "efferva_proxy",
@@ -172,7 +173,7 @@ class CodexAppServerManager:
         config_args = tuple(
             f"{key}={json.dumps(value)}" for key, value in app_server_overrides.items()
         )
-        api_key = self._config.api_key
+        api_key = self._api_key
         effective_api_key = None
         if api_key:
             effective_api_key = (
@@ -192,8 +193,8 @@ class CodexAppServerManager:
                     "gid": identity.gid,
                     "homePath": identity.home_path,
                     "workspacePath": layout.workspace_path,
-                    "codexHomePath": layout.codex_home_path,
-                    "codexRuntimeDir": layout.codex_runtime_dir,
+                    "codexHomePath": _codex_home(sandbox),
+                    "codexRuntimeDir": _RUNTIME_ROOT,
                     "openaiApiKeySha256": (
                         sha256(effective_api_key.encode()).hexdigest()
                         if effective_api_key
@@ -217,7 +218,7 @@ class CodexAppServerManager:
         identity = layout.identity
         target, archive_sha256 = await self._codex_release_for_sandbox(sandbox)
         runtime_root = posixpath.join(
-            layout.codex_runtime_dir,
+            _RUNTIME_ROOT,
             _CODEX_VERSION,
             target,
         )
@@ -233,12 +234,12 @@ class CodexAppServerManager:
                 archive_sha256=archive_sha256,
             )
 
-        codex_home = layout.codex_home_path
+        codex_home = _codex_home(sandbox)
         websocket_token_file = posixpath.join(codex_home, "app-server.token")
         websocket_token = secrets.token_urlsafe(32)
         pid_file = "/tmp/efferva-app-server.pid"
         log_file = posixpath.join(codex_home, "app-server.log")
-        listen = f"ws://0.0.0.0:{self._config.appserver_port}"
+        listen = f"ws://0.0.0.0:{_APP_SERVER_PORT}"
         identity_check = ""
         if identity.username is not None:
             username = shlex.quote(identity.username)
@@ -431,3 +432,7 @@ def _websocket_url(endpoint: str) -> str:
     if endpoint.startswith(("ws://", "wss://")):
         return endpoint
     return f"ws://{endpoint}"
+
+
+def _codex_home(sandbox: SandboxEnvironment) -> str:
+    return posixpath.join(sandbox.layout.identity.home_path, ".codex")

@@ -1,8 +1,8 @@
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from efferva import CodexConfig, EffervaConfig, SandboxIdentity, SandboxLayout
+from efferva import Codex, EffervaConfig, SandboxIdentity, SandboxLayout
 from efferva.sandbox.providers.opensandbox import (
     OpenSandboxConnectionConfig,
     OpenSandboxCreateSpec,
@@ -13,6 +13,7 @@ from efferva.sandbox.providers.opensandbox import (
 @dataclass(frozen=True, slots=True)
 class ApplicationConfig:
     efferva: EffervaConfig
+    engine: Codex
     opensandbox_connection: OpenSandboxConnectionConfig
     sandbox_spec: OpenSandboxCreateSpec
 
@@ -29,14 +30,6 @@ def load_config() -> ApplicationConfig:
             "EFFERVA_WORKSPACE_PATH",
             "/home/sandbox/workspace",
         ),
-        codex_home_path=_value(
-            "EFFERVA_CODEX_HOME_PATH",
-            "/home/sandbox/.codex",
-        ),
-        codex_runtime_dir=_value(
-            "EFFERVA_CODEX_RUNTIME_DIR",
-            "/opt/efferva/runtimes",
-        ),
     )
     api_key = os.environ.get("OPENAI_API_KEY") or None
     base_url = os.environ.get("EFFERVA_CODEX_OPENAI_BASE_URL") or None
@@ -52,14 +45,8 @@ def load_config() -> ApplicationConfig:
         efferva=EffervaConfig(
             database_url=_required("EFFERVA_DATABASE_URL"),
             sandbox=layout,
-            codex=CodexConfig(
-                api_key=api_key,
-                openai_base_url=base_url,
-                appserver_port=int(
-                    _value("EFFERVA_CODEX_APPSERVER_PORT", "4500")
-                ),
-            ),
         ),
+        engine=Codex(api_key=api_key, base_url=base_url),
         opensandbox_connection=OpenSandboxConnectionConfig(
             server_url=_required("EFFERVA_OPENSANDBOX_SERVER_URL"),
             api_key=os.environ.get("EFFERVA_OPENSANDBOX_API_KEY") or None,
@@ -97,9 +84,10 @@ def _credential_proxy(
     if parsed.port not in {None, default_port}:
         return None
     return OpenSandboxCredentialProxy(
-        bearer_token=api_key,
+        credential=api_key,
         host=parsed.hostname,
         scheme=parsed.scheme,
+        auth_type="bearer",
     )
 
 

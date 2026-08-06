@@ -1,4 +1,4 @@
-name: efferva-multi-session-codex
+name: efferva-multi-session-claude-code
 
 services:
   postgres:
@@ -16,7 +16,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
-      - efferva-multi-session-codex
+      - efferva-multi-session-claude-code
 
   opensandbox-server:
     image: opensandbox/server:v0.2.2
@@ -24,13 +24,7 @@ services:
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')",
-        ]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
       interval: 2s
       timeout: 3s
       retries: 60
@@ -43,14 +37,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - efferva-multi-session-codex
+      - efferva-multi-session-claude-code
 
   app:
-    image: efferva-multi-session-codex:local
+    image: efferva-multi-session-claude-code:local
     restart: unless-stopped
     build:
       context: ../..
-      dockerfile: examples/multi-session-codex/Dockerfile
+      dockerfile: examples/multi-session-claude-code/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,39 +52,28 @@ services:
         condition: service_healthy
     environment:
       EFFERVA_DATABASE_URL: postgresql://efferva:efferva@postgres:5432/efferva
-      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm}
-      EFFERVA_SANDBOX_USERNAME: ${EFFERVA_SANDBOX_USERNAME:-node}
-      EFFERVA_SANDBOX_UID: ${EFFERVA_SANDBOX_UID:-1000}
-      EFFERVA_SANDBOX_GID: ${EFFERVA_SANDBOX_GID:-1000}
-      EFFERVA_SANDBOX_HOME: ${EFFERVA_SANDBOX_HOME:-/home/node}
-      EFFERVA_WORKSPACE_PATH: ${EFFERVA_WORKSPACE_PATH:-/home/node/workspace}
+      EFFERVA_SANDBOX_IMAGE: ${EFFERVA_SANDBOX_IMAGE:-python:3.13-slim-bookworm}
       EFFERVA_OPENSANDBOX_SERVER_URL: http://opensandbox-server:8090
       EFFERVA_OPENSANDBOX_API_KEY: local-dev-key
       EFFERVA_OPENSANDBOX_USE_SERVER_PROXY: "false"
-      EFFERVA_CODEX_OPENAI_BASE_URL: ${EFFERVA_CODEX_OPENAI_BASE_URL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      EFFERVA_OPENSANDBOX_CREDENTIAL_PROXY_ENABLED: ${EFFERVA_OPENSANDBOX_CREDENTIAL_PROXY_ENABLED:-true}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
     ports:
       - "${EFFERVA_HTTP_PORT:-8080}:8080"
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8080/agent/healthz')",
-        ]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/agent/healthz')"]
       interval: 3s
       timeout: 3s
       retries: 60
     networks:
-      - efferva-multi-session-codex
+      - efferva-multi-session-claude-code
 
 volumes:
   postgres-data:
   opensandbox-data:
 
 networks:
-  efferva-multi-session-codex:
-    name: efferva-multi-session-codex
+  efferva-multi-session-claude-code:
+    name: efferva-multi-session-claude-code

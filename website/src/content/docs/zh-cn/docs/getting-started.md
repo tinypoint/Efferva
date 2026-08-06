@@ -13,7 +13,7 @@ Efferva 目前处于内部预览阶段。Python Wheel 和完整安装指南将�
 ```python
 from fastapi import FastAPI, Request
 
-from efferva import CodexConfig, Efferva, EffervaConfig, Principal, SandboxLayout
+from efferva import Codex, Efferva, EffervaConfig, Principal, SandboxLayout
 from efferva.sandbox.providers.opensandbox import (
     OpenSandboxConnectionConfig,
     OpenSandboxCreateSpec,
@@ -48,7 +48,6 @@ Efferva(
     config=EffervaConfig(
         database_url=database_url,
         sandbox=layout,
-        codex=CodexConfig(api_key=openai_api_key),
     ),
     identity=resolve_principal,
     sandbox=OpenSandboxProvider(
@@ -56,6 +55,7 @@ Efferva(
         layout=layout,
         resolve_spec=resolve_sandbox_spec,
     ),
+    engine=Codex(api_key=openai_api_key),
 ).install(app, prefix="/agent")
 ```
 

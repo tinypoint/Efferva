@@ -6,20 +6,20 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 
 from efferva.api import create_api_router
-from efferva.codex_appserver import CodexAppServerManager
 from efferva.config import EffervaConfig
 from efferva.db import Database
+from efferva.engine import Engine
 from efferva.identity import (
     ForbiddenError,
     IdentityResolver,
     UnauthenticatedError,
 )
+from efferva.sandbox import SandboxProvider
+from efferva.sandbox.service import SessionSandboxService
 from efferva.session_repository import (
     NotFoundError,
     SessionRepository,
 )
-from efferva.sandbox import SandboxProvider
-from efferva.sandbox.service import SessionSandboxService
 
 
 class Efferva:
@@ -31,10 +31,12 @@ class Efferva:
         config: EffervaConfig,
         identity: IdentityResolver,
         sandbox: SandboxProvider,
+        engine: Engine,
     ) -> None:
         self.config = config
         self.identity = identity
         self.sandbox = sandbox
+        self.engine = engine
 
     def install(self, app: FastAPI, *, prefix: str = "/agent") -> None:
         normalized_prefix = self._normalize_prefix(prefix)
@@ -53,11 +55,6 @@ class Efferva:
             self.sandbox,
             database,
             repository,
-        )
-        codex = CodexAppServerManager(
-            self.config.codex,
-            sandboxes,
-            database,
         )
 
         @asynccontextmanager
@@ -78,7 +75,16 @@ class Efferva:
             create_api_router(
                 identity=self.identity,
                 repository=repository,
-                codex=codex,
+                engine_name=self.engine.name,
+                engine_protocol=self.engine.protocol,
+            )
+        )
+        router.include_router(
+            self.engine.create_router(
+                identity=self.identity,
+                repository=repository,
+                sandboxes=sandboxes,
+                database=database,
             )
         )
 
@@ -89,11 +95,6 @@ class Efferva:
         app = FastAPI(title="Efferva")
         self.install(app, prefix="")
         return app
-
-    def app(self) -> FastAPI:
-        """Compatibility alias for asgi_app()."""
-
-        return self.asgi_app()
 
     @staticmethod
     def _normalize_prefix(prefix: str) -> str:

@@ -35,7 +35,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.open()
     scheduler: ReportScheduler | None = None
     try:
-        schema = files("scheduled_investment_research").joinpath("schema.sql").read_text()
+        schema = (
+            files("scheduled_investment_research").joinpath("schema.sql").read_text()
+        )
         await database.initialize(schema)
         app.state.report_database = database
         app.state.report_owner_user_id = "developer"
@@ -89,6 +91,7 @@ Efferva(
     config=config.efferva,
     identity=resolve_local_principal,
     sandbox=sandbox_provider,
+    engine=config.engine,
 ).install(app, prefix="/agent")
 
 

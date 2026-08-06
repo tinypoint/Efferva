@@ -1,5 +1,5 @@
 import posixpath
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,36 +22,17 @@ class SandboxIdentity:
 class SandboxLayout:
     identity: SandboxIdentity
     workspace_path: str
-    codex_home_path: str
-    codex_runtime_dir: str = "/opt/efferva/runtimes"
 
     def __post_init__(self) -> None:
-        for name, path in (
-            ("workspace", self.workspace_path),
-            ("Codex home", self.codex_home_path),
-            ("Codex runtime", self.codex_runtime_dir),
+        if not posixpath.isabs(self.workspace_path):
+            raise ValueError("workspace path must be absolute")
+        if posixpath.commonpath((self.identity.home_path, self.workspace_path)) != (
+            self.identity.home_path
         ):
-            if not posixpath.isabs(path):
-                raise ValueError(f"{name} path must be absolute")
-        for name, path in (
-            ("workspace", self.workspace_path),
-            ("Codex home", self.codex_home_path),
-        ):
-            if posixpath.commonpath((self.identity.home_path, path)) != (
-                self.identity.home_path
-            ):
-                raise ValueError(f"{name} path must be inside the sandbox home")
-
-
-@dataclass(frozen=True, slots=True)
-class CodexConfig:
-    api_key: str | None = None
-    openai_base_url: str | None = None
-    appserver_port: int = 4500
+            raise ValueError("workspace path must be inside the sandbox home")
 
 
 @dataclass(frozen=True, slots=True)
 class EffervaConfig:
     database_url: str
     sandbox: SandboxLayout
-    codex: CodexConfig = field(default_factory=CodexConfig)

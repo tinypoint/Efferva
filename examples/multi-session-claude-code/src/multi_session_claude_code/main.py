@@ -10,32 +10,19 @@ from efferva.sandbox.providers.opensandbox import (
     OpenSandboxCreateSpec,
     OpenSandboxProvider,
 )
-from multi_session_codex.configuration import load_config
+from multi_session_claude_code.configuration import load_config
 
 
 async def resolve_local_principal(_: Request) -> Principal:
     return Principal(
         tenant_id="local",
-        issuer="multi-session-codex",
+        issuer="multi-session-claude-code",
         subject="developer",
     )
 
 
-app = FastAPI(title="Efferva Multi-session Codex")
-static_dir = files("multi_session_codex").joinpath("static")
-
-
-@app.get("/", include_in_schema=False)
-async def index() -> FileResponse:
-    return FileResponse(str(static_dir.joinpath("index.html")))
-
-
-app.mount(
-    "/assets",
-    StaticFiles(directory=str(static_dir.joinpath("assets")), check_dir=False),
-    name="assets",
-)
-
+app = FastAPI(title="Efferva Multi-session Claude Code")
+static_dir = files("multi_session_claude_code").joinpath("static")
 config = load_config()
 
 
@@ -55,6 +42,18 @@ Efferva(
     sandbox=sandbox_provider,
     engine=config.engine,
 ).install(app, prefix="/agent")
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    return FileResponse(str(static_dir.joinpath("index.html")))
+
+
+app.mount(
+    "/assets",
+    StaticFiles(directory=str(static_dir.joinpath("assets")), check_dir=False),
+    name="assets",
+)
 
 
 @app.get("/{spa_path:path}", include_in_schema=False)
